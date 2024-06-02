@@ -4,3 +4,4 @@ wrap_comments = true
 short_array_element_width_threshold = 16
 overflow_delimited_expr = true
 max_width = 120
+chain_width = 80
