@@ -31,11 +31,13 @@ impl IpWithPrefix {
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub const fn addr(self) -> IpAddr {
     self.addr
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub const fn prefix_len(self) -> u8 {
     self.prefix_len
   }
@@ -164,6 +166,7 @@ impl IpPrefix {
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub fn mask(self) -> IpAddr {
     self.inner.mask()
   }
@@ -186,6 +189,7 @@ impl IpPrefix {
   }
 
   #[inline]
+  #[allow(dead_code)]
   pub const fn is_single(self) -> bool {
     prefix_max_len(self.prefix()) == self.len()
   }

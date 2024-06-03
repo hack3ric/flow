@@ -23,7 +23,7 @@ pub const AFI_IPV4: u16 = 1;
 pub const AFI_IPV6: u16 = 2;
 
 pub const SAFI_UNICAST: u8 = 1;
-pub const SAFI_MULTICAST: u8 = 2;
+pub const _SAFI_MULTICAST: u8 = 2;
 
 pub const AS_TRANS: u16 = 23456;
 
@@ -139,6 +139,8 @@ impl Message<'static> {
         }
         Ok(Message::Open(msg))
       }
+
+      MSG_UPDATE => todo!(),
 
       MSG_NOTIFICATION => {
         let code = ptr.read_u8().await?;

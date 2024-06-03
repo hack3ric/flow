@@ -25,7 +25,8 @@ pub struct Config {
 /// - RFC 4271: A Border Gateway Protocol 4 (BGP-4) \[partial\]
 ///   - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 ///   - RFC 4760: Multiprotocol Extensions for BGP
-///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain Routing
+///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
+///       Routing
 pub struct Session {
   config: Config,
   state: State,
@@ -36,13 +37,15 @@ impl Session {
     Self { config, state: Active }
   }
 
+  #[allow(dead_code)]
   pub fn start(&mut self) {
     self.state = Active;
   }
 
+  #[allow(dead_code)]
   pub async fn stop(&mut self) -> Result<(), BGPError> {
     match &mut self.state {
-      Idle | _Connect | Active => {}
+      Idle | Connect | Active => {}
       OpenSent { stream } | OpenConfirm { stream, .. } | Established { stream, .. } => {
         Notification::Cease.send(stream).await?;
       }
@@ -79,7 +82,7 @@ impl Session {
 
   async fn process_inner(&mut self) -> Result<(), BGPError> {
     match &mut self.state {
-      Idle | _Connect | Active => pending().await,
+      Idle | Connect | Active => pending().await,
       OpenSent { stream } => match Message::recv(stream).await? {
         Message::Open(msg) => {
           if self.config.remote_as.map_or(false, |x| msg.my_as != x) {
@@ -120,7 +123,8 @@ impl Session {
 #[derive(Debug)]
 pub enum State {
   Idle,
-  _Connect, // never used in passive mode
+  #[allow(dead_code)]
+  Connect, // never used in passive mode
   Active,
   OpenSent {
     stream: TcpStream,
