@@ -22,8 +22,10 @@ pub struct Config {
 /// A passive BGP session.
 ///
 /// Implemented RFCs:
-/// - RFC 4271: A Border Gateway Protocol 4 (BGP-4) (partial)
-/// - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
+/// - RFC 4271: A Border Gateway Protocol 4 (BGP-4) \[partial\]
+///   - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
+///   - RFC 4760: Multiprotocol Extensions for BGP
+///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain Routing
 pub struct Session {
   config: Config,
   state: State,
@@ -110,7 +112,7 @@ impl Session {
         }
         other => BadType(other.kind() as u8).send_and_return(stream).await,
       },
-      Established { .. } => todo!(),
+      Established { .. } => pending().await,
     }
   }
 }

@@ -16,8 +16,37 @@ pub const MSG_KEEPALIVE: u8 = 4;
 pub const OPT_PARAM_CAP: u8 = 2;
 
 pub const CAP_4B_ASN: u8 = 65;
+pub const CAP_BGP_MP: u8 = 1;
+
+// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
+pub const AFI_IPV4: u16 = 1;
+pub const AFI_IPV6: u16 = 2;
+
+pub const SAFI_UNICAST: u8 = 1;
+pub const SAFI_MULTICAST: u8 = 2;
 
 pub const AS_TRANS: u16 = 23456;
+
+pub trait MessageSend {
+  fn serialize_data(&self, buf: &mut Vec<u8>);
+
+  fn serialize_message(&self, buf: &mut Vec<u8>) {
+    let start_pos = buf.len();
+    buf.extend([u8::MAX; 16]); // marker
+    buf.extend([0; 2]); // reserved for length
+    self.serialize_data(buf);
+    let total_len = u16::try_from(buf.len() - start_pos).expect("total_len should fit in u16");
+    buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
+  }
+
+  async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
+    let mut buf = Vec::new();
+    self.serialize_message(&mut buf);
+    writer.write_all(&buf).await?;
+    writer.flush().await?;
+    Ok(())
+  }
+}
 
 #[derive(Debug, Clone, EnumDiscriminants)]
 #[repr(u8)]
@@ -195,6 +224,16 @@ impl Message<'static> {
   }
 }
 
+impl MessageSend for Message<'_> {
+  fn serialize_data(&self, buf: &mut Vec<u8>) {
+    match self {
+      Self::Open(x) => x.serialize_data(buf),
+      Self::Notification(x) => x.serialize_data(buf),
+      Self::Keepalive => buf.push(MSG_KEEPALIVE),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct OpenMessage<'a> {
   pub my_as: u32, // maybe 4b
@@ -205,6 +244,56 @@ pub struct OpenMessage<'a> {
 
   pub other_caps: Vec<(u8, Cow<'a, [u8]>)>,
   pub other_opt_params: Vec<(u8, Cow<'a, [u8]>)>,
+}
+
+impl MessageSend for OpenMessage<'_> {
+  fn serialize_data(&self, buf: &mut Vec<u8>) {
+    assert!(self.enable_4b_asn || self.my_as <= u16::MAX.into());
+    assert!(self.my_as != AS_TRANS.into());
+
+    buf.extend([MSG_OPEN, 4]); // message type, BGP version
+    buf.extend(u16::to_be_bytes(self.my_as.try_into().unwrap_or(AS_TRANS))); // my AS (2b)
+    buf.extend(u16::to_be_bytes(self.hold_time));
+    buf.extend(u32::to_be_bytes(self.bgp_id));
+
+    let opt_params_len_pos = buf.len();
+    buf.push(0); // reserved for optional parameters length
+
+    // Capabilities
+    {
+      let caps_len_pos = buf.len() + 1;
+      buf.extend([OPT_PARAM_CAP, 0]); // reserved for capabilities parameter length
+
+      [(AFI_IPV4, SAFI_UNICAST), (AFI_IPV6, SAFI_UNICAST)]
+        .into_iter()
+        .for_each(|(afi, safi)| {
+          buf.extend([CAP_BGP_MP, 4]);
+          buf.extend(u16::to_be_bytes(afi));
+          buf.extend([0, safi]);
+        });
+      if self.enable_4b_asn {
+        buf.extend([CAP_4B_ASN, 4]);
+        buf.extend(u32::to_be_bytes(self.my_as));
+      }
+      self.other_caps.iter().for_each(|(kind, value)| {
+        let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
+        buf.extend([*kind, len]);
+        buf.extend(&value[..]);
+      });
+
+      let caps_len = buf.len() - caps_len_pos - 1;
+      buf[caps_len_pos] = caps_len.try_into().expect("caps_len should fit in u8");
+    }
+
+    self.other_opt_params.iter().for_each(|(kind, value)| {
+      let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
+      buf.extend([*kind, len]);
+      buf.extend(&value[..]);
+    });
+
+    let opt_params_len = buf.len() - opt_params_len_pos - 1;
+    buf[opt_params_len_pos] = opt_params_len.try_into().expect("opt_params_len should fit in u8");
+  }
 }
 
 pub const N_HEADER: u8 = 1;
@@ -273,6 +362,13 @@ impl Notification<'_> {
       Self::Unknown(_, _, data) => buf.extend(&data[..]),
       _ => {}
     }
+  }
+}
+
+impl MessageSend for Notification<'_> {
+  fn serialize_data(&self, buf: &mut Vec<u8>) {
+    buf.extend([MSG_NOTIFICATION, self.code(), self.subcode()]);
+    self.serialize_data(buf);
   }
 }
 
@@ -385,78 +481,4 @@ pub enum UpdateError<'a> {
 
   #[error("malformed AS_PATH")]
   MalformedASPath = NU_MALFORMED_AS_PATH,
-}
-
-pub trait MessageSend {
-  fn serialize_data(&self, buf: &mut Vec<u8>);
-
-  fn serialize(&self, buf: &mut Vec<u8>) {
-    let start_pos = buf.len();
-    buf.extend([u8::MAX; 16]); // marker
-    buf.extend([0; 2]); // reserved for length
-    self.serialize_data(buf);
-    let total_len = u16::try_from(buf.len() - start_pos).expect("total_len should fit in u16");
-    buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
-  }
-
-  async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-    let mut buf = Vec::new();
-    self.serialize(&mut buf);
-    writer.write_all(&buf).await?;
-    writer.flush().await?;
-    Ok(())
-  }
-}
-
-impl MessageSend for Message<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
-    match self {
-      Self::Open(x) => x.serialize_data(buf),
-      Self::Notification(x) => x.serialize_data(buf),
-      Self::Keepalive => buf.push(MSG_KEEPALIVE),
-    }
-  }
-}
-
-impl MessageSend for OpenMessage<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
-    assert!(self.enable_4b_asn || self.my_as <= u16::MAX.into());
-    assert!(self.my_as != AS_TRANS.into());
-
-    buf.extend([MSG_OPEN, 4]); // message type, BGP version
-    buf.extend(u16::to_be_bytes(self.my_as.try_into().unwrap_or(AS_TRANS))); // my AS (2b)
-    buf.extend(u16::to_be_bytes(self.hold_time));
-    buf.extend(u32::to_be_bytes(self.bgp_id));
-
-    let opt_params_len_pos = buf.len();
-    buf.push(0); // reserved for optional parameters length
-
-    // HACK: enable BGP-MP for peering with BIRD
-    buf.extend([2, 6, 1, 4, 0, 1, 0, 1]);
-
-    if self.enable_4b_asn {
-      buf.extend([OPT_PARAM_CAP, 6, CAP_4B_ASN, 4]);
-      buf.extend(u32::to_be_bytes(self.my_as));
-    }
-    self.other_caps.iter().for_each(|(kind, value)| {
-      let len = u8::try_from(value.len() + 2).expect("opt_param_len should fit in u8");
-      buf.extend([OPT_PARAM_CAP, len, *kind, len - 2]);
-      buf.extend(&**value);
-    });
-    self.other_opt_params.iter().for_each(|(kind, value)| {
-      let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
-      buf.extend([*kind, len]);
-      buf.extend(&**value);
-    });
-
-    let opt_params_len = buf.len() - opt_params_len_pos - 1;
-    buf[opt_params_len_pos] = opt_params_len.try_into().expect("opt_params_len should fit in u8");
-  }
-}
-
-impl MessageSend for Notification<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
-    buf.extend([MSG_NOTIFICATION, self.code(), self.subcode()]);
-    self.serialize_data(buf);
-  }
 }
