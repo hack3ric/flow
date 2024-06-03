@@ -66,26 +66,38 @@ impl Message<'static> {
         msg.hold_time = ptr.read_u16().await?;
         msg.bgp_id = ptr.read_u32().await?;
 
+        let params_len = ptr.read_u8().await?;
+        if u16::from(params_len) + 10 != len {
+          return Err(Notification::Open(Unspecific).into());
+        }
+
         while let Ok(x) = ptr.read_u16().await {
           let [param_type, param_len] = x.to_be_bytes();
+          if ptr.len() < param_len.into() {
+            return Err(Notification::Open(Unspecific).into());
+          }
           match param_type {
             OPT_PARAM_CAP => {
-              let [cap_type, cap_len] = ptr.read_u16().await?.to_be_bytes();
-              if cap_len != param_len - 2 {
-                return Err(Notification::Open(Unspecific).into());
-              }
-              match cap_type {
-                CAP_4B_ASN => {
-                  if cap_len != 4 {
-                    return Err(Notification::Open(Unspecific).into());
-                  }
-                  msg.my_as = ptr.read_u32().await?;
-                  msg.enable_4b_asn = true;
+              let (mut ptr_cap, ptr1) = ptr.split_at(param_len.into());
+              ptr = ptr1;
+              while let Ok(x) = ptr_cap.read_u16().await {
+                let [cap_type, cap_len] = x.to_be_bytes();
+                if param_len < cap_len {
+                  return Err(Notification::Open(Unspecific).into());
                 }
-                _ => {
-                  let mut cap_buf = vec![0; cap_len.into()];
-                  ptr.read_exact(&mut cap_buf).await?;
-                  msg.other_caps.push((cap_type, cap_buf.into()));
+                match cap_type {
+                  CAP_4B_ASN => {
+                    if cap_len != 4 {
+                      return Err(Notification::Open(Unspecific).into());
+                    }
+                    msg.my_as = ptr_cap.read_u32().await?;
+                    msg.enable_4b_asn = true;
+                  }
+                  _ => {
+                    let mut cap_buf = vec![0; cap_len.into()];
+                    ptr_cap.read_exact(&mut cap_buf).await?;
+                    msg.other_caps.push((cap_type, cap_buf.into()));
+                  }
                 }
               }
             }
@@ -384,7 +396,7 @@ pub trait MessageSend {
     buf.extend([0; 2]); // reserved for length
     self.serialize_data(buf);
     let total_len = u16::try_from(buf.len() - start_pos).expect("total_len should fit in u16");
-    buf[start_pos..start_pos + 2].copy_from_slice(&total_len.to_be_bytes());
+    buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
   }
 
   async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
@@ -401,7 +413,7 @@ impl MessageSend for Message<'_> {
     match self {
       Self::Open(x) => x.serialize_data(buf),
       Self::Notification(x) => x.serialize_data(buf),
-      Self::Keepalive => {}
+      Self::Keepalive => buf.push(MSG_KEEPALIVE),
     }
   }
 }
@@ -418,6 +430,9 @@ impl MessageSend for OpenMessage<'_> {
 
     let opt_params_len_pos = buf.len();
     buf.push(0); // reserved for optional parameters length
+
+    // HACK: enable BGP-MP for peering with BIRD
+    buf.extend([2, 6, 1, 4, 0, 1, 0, 1]);
 
     if self.enable_4b_asn {
       buf.extend([OPT_PARAM_CAP, 6, CAP_4B_ASN, 4]);
