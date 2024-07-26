@@ -6,6 +6,8 @@ use tokio::select;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+  pretty_env_logger::init();
+
   let listener = TcpListener::bind("0.0.0.0:179").await?;
   let mut bgp = bgp::Session::new(bgp::Config {
     router_id: 123456,

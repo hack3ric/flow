@@ -2,7 +2,7 @@ mod error;
 mod msg;
 
 use crate::net::IpPrefix;
-use error::BGPError;
+use error::BgpError;
 use futures::future::pending;
 use msg::HeaderError::*;
 use msg::OpenError::*;
@@ -11,6 +11,7 @@ use replace_with::replace_with_or_abort;
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 use State::*;
+use log::info;
 
 pub struct Config {
   pub router_id: u32,
@@ -27,6 +28,10 @@ pub struct Config {
 ///   - RFC 4760: Multiprotocol Extensions for BGP
 ///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
 ///       Routing
+///
+/// To be implemented:
+/// - RFC 8955: Dissemination of Flow Specification Rules
+///   - RFC 8956: Dissemination of Flow Specification Rules for IPv6
 pub struct Session {
   config: Config,
   state: State,
@@ -43,7 +48,7 @@ impl Session {
   }
 
   #[allow(dead_code)]
-  pub async fn stop(&mut self) -> Result<(), BGPError> {
+  pub async fn stop(&mut self) -> Result<(), BgpError> {
     match &mut self.state {
       Idle | Connect | Active => {}
       OpenSent { stream } | OpenConfirm { stream, .. } | Established { stream, .. } => {
@@ -54,11 +59,11 @@ impl Session {
     Ok(())
   }
 
-  pub async fn accept(&mut self, mut stream: TcpStream, addr: IpAddr) -> Result<(), BGPError> {
+  pub async fn accept(&mut self, mut stream: TcpStream, addr: IpAddr) -> Result<(), BgpError> {
     if !self.config.remote_ip.contains(addr) {
-      return Err(BGPError::UnacceptableAddr(addr));
+      return Err(BgpError::UnacceptableAddr(addr));
     } else if !matches!(self.state, Active) {
-      return Err(BGPError::AlreadyRunning);
+      return Err(BgpError::AlreadyRunning);
     }
     let open = OpenMessage {
       my_as: self.config.local_as,
@@ -72,7 +77,7 @@ impl Session {
     Ok(())
   }
 
-  pub async fn process(&mut self) -> Result<(), BGPError> {
+  pub async fn process(&mut self) -> Result<(), BgpError> {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
@@ -80,7 +85,7 @@ impl Session {
     result
   }
 
-  async fn process_inner(&mut self) -> Result<(), BGPError> {
+  async fn process_inner(&mut self) -> Result<(), BgpError> {
     match &mut self.state {
       Idle | Connect | Active => pending().await,
       OpenSent { stream } => match Message::recv(stream).await? {
@@ -111,6 +116,7 @@ impl Session {
             };
             Established { stream, remote_open }
           });
+          info!("established");
           Ok(())
         }
         other => BadType(other.kind() as u8).send_and_return(stream).await,

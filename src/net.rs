@@ -14,7 +14,7 @@ pub const fn prefix_max_len(prefix: IpAddr) -> u8 {
 }
 
 /// IP address with its prefix length attached.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IpWithPrefix {
   addr: IpAddr,
   prefix_len: u8,
@@ -64,6 +64,16 @@ impl IpWithPrefix {
       _ => unreachable!(),
     };
     IpPrefix { inner }
+  }
+
+  #[inline]
+  pub const fn is_ipv4(&self) -> bool {
+    self.addr.is_ipv4()
+  }
+
+  #[inline]
+  pub const fn is_ipv6(&self) -> bool {
+    self.addr.is_ipv6()
   }
 }
 
@@ -141,7 +151,7 @@ pub enum IpWithPrefixErrorKind {
 }
 
 /// IP prefix.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IpPrefix {
   inner: IpWithPrefix,
 }
@@ -190,8 +200,33 @@ impl IpPrefix {
 
   #[inline]
   #[allow(dead_code)]
-  pub const fn is_single(self) -> bool {
+  pub const fn is_single(&self) -> bool {
     prefix_max_len(self.prefix()) == self.len()
+  }
+
+  #[inline]
+  pub const fn is_ipv4(&self) -> bool {
+    self.inner.is_ipv4()
+  }
+
+  #[inline]
+  pub const fn is_ipv6(&self) -> bool {
+    self.inner.is_ipv6()
+  }
+
+  pub fn serialize(self, buf: &mut Vec<u8>) {
+    let prefix_bytes = self.len() / 8 + u8::from(self.len() % 8 != 0);
+    buf.push(self.len());
+    match self.prefix() {
+      IpAddr::V4(v4) => {
+        assert!(prefix_bytes <= 4);
+        buf.extend(v4.octets().into_iter().take(prefix_bytes.into()))
+      }
+      IpAddr::V6(v6) => {
+        assert!(prefix_bytes <= 16);
+        buf.extend(v6.octets().into_iter().take(prefix_bytes.into()))
+      }
+    }
   }
 }
 

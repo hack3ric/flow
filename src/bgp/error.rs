@@ -4,9 +4,9 @@ use std::net::IpAddr;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum BGPError {
+pub enum BgpError {
   #[error(transparent)]
-  IO(#[from] io::Error),
+  Io(#[from] io::Error),
   #[error(transparent)]
   Notification(#[from] Notification<'static>),
 

@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.86"
 futures = "0.3.30"
+log = "0.4.21"
 pin-project = "1.1.5"
+pretty_env_logger = "0.5.0"
 replace_with = "0.1.7"
 strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0.61"

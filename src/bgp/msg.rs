@@ -1,6 +1,9 @@
-use super::error::BGPError;
-use std::borrow::Cow;
+use super::error::BgpError;
+use crate::net::IpPrefix;
+use std::collections::HashSet;
 use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{borrow::Cow, net::IpAddr};
 use strum::EnumDiscriminants;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -23,7 +26,13 @@ pub const AFI_IPV4: u16 = 1;
 pub const AFI_IPV6: u16 = 2;
 
 pub const SAFI_UNICAST: u8 = 1;
-pub const _SAFI_MULTICAST: u8 = 2;
+#[allow(dead_code)]
+pub const SAFI_MULTICAST: u8 = 2;
+#[allow(dead_code)]
+pub const SAFI_FLOW: u8 = 133;
+
+pub const MP_REACH_NLRI: u8 = 14;
+pub const MP_UNREACH_NLRI: u8 = 15;
 
 pub const AS_TRANS: u16 = 23456;
 
@@ -64,7 +73,7 @@ impl Message<'_> {
 }
 
 impl Message<'static> {
-  pub async fn recv_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BGPError> {
+  pub async fn recv_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     let mut header = [0; 19];
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
@@ -205,7 +214,7 @@ impl Message<'static> {
               .unwrap_or_else(|| Notification::Unknown(code, subcode, ptr.to_vec().into()))
           }
           N_HOLD_TIMER_EXPIRED => Notification::HoldTimerExpired,
-          N_FSM => Notification::FSM,
+          N_FSM => Notification::Fsm,
           N_CEASE => Notification::Cease,
           _ => Notification::Unknown(code, subcode, ptr.to_vec().into()),
         };
@@ -217,10 +226,10 @@ impl Message<'static> {
     }
   }
 
-  pub async fn recv<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BGPError> {
+  pub async fn recv<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
     match Message::recv_raw(socket).await {
       Ok(Message::Notification(n)) => Err(n.into()),
-      Err(BGPError::Notification(n)) => return n.send_and_return(socket).await.map(|_| unreachable!()),
+      Err(BgpError::Notification(n)) => return n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
     }
   }
@@ -298,6 +307,91 @@ impl MessageSend for OpenMessage<'_> {
   }
 }
 
+#[derive(Debug, Clone)]
+pub struct UpdateMessage {
+  withdrawn: HashSet<IpPrefix>,
+  nlri: Option<Nlri>,     // BGP-MP-advertised NLRI
+  old_nlri: Option<Nlri>, // Old, BGP-4-advertised NLRI
+  origin: Origin,
+  as_path: Vec<u32>, // Stored in reverse
+}
+
+impl MessageSend for UpdateMessage {
+  fn serialize_data(&self, buf: &mut Vec<u8>) {
+    let start_pos = buf.len();
+    buf.extend([0; 2]);
+    self.withdrawn.iter().filter(|x| x.is_ipv4()).for_each(|p| p.serialize(buf));
+    let wr_len = u16::try_from(buf.len() - start_pos - 2)
+      .expect("withdrawn routes length should fit in u16")
+      .to_be_bytes();
+    buf[start_pos] = wr_len[0];
+    buf[start_pos + 1] = wr_len[1];
+
+    let pattr_len_pos = buf.len();
+    buf.extend([0; 2]);
+
+    // MP_UNREACH_NLRI
+    // self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(f)
+    // TODO: path attributes
+
+    let pattr_len = u16::try_from(buf.len() - pattr_len_pos - 2)
+      .expect("path attribute length should fit in u16")
+      .to_be_bytes();
+    buf[pattr_len_pos] = pattr_len[0];
+    buf[pattr_len_pos + 1] = pattr_len[1];
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nlri {
+  prefixes: HashSet<IpPrefix>,
+  next_hop: NextHop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NextHop {
+  V4(Ipv4Addr),
+  V6(Ipv6Addr, Option<Ipv6Addr>),
+}
+
+impl From<IpAddr> for NextHop {
+  fn from(ip: IpAddr) -> Self {
+    match ip {
+      IpAddr::V4(ip) => ip.into(),
+      IpAddr::V6(ip) => ip.into(),
+    }
+  }
+}
+
+impl From<Ipv4Addr> for NextHop {
+  fn from(ip: Ipv4Addr) -> Self {
+    Self::V4(ip)
+  }
+}
+
+impl From<Ipv6Addr> for NextHop {
+  fn from(ip: Ipv6Addr) -> Self {
+    if let [0xfe80, ..] = ip.segments() {
+      Self::V6([0; 8].into(), Some(ip))
+    } else {
+      Self::V6(ip, None)
+    }
+  }
+}
+
+impl From<[Ipv6Addr; 2]> for NextHop {
+  fn from(ips: [Ipv6Addr; 2]) -> Self {
+    Self::V6(ips[0], Some(ips[1]))
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Origin {
+  Igp,
+  Egp,
+  Incomplete,
+}
+
 pub const N_HEADER: u8 = 1;
 pub const N_OPEN: u8 = 2;
 pub const N_UPDATE: u8 = 3;
@@ -321,7 +415,7 @@ pub enum Notification<'a> {
   HoldTimerExpired = N_HOLD_TIMER_EXPIRED,
 
   #[error("finite state machine error")]
-  FSM = N_FSM,
+  Fsm = N_FSM,
 
   #[error("ceasing operation")]
   Cease = N_CEASE,
@@ -343,7 +437,7 @@ impl Notification<'_> {
       Self::Header(x) => HeaderErrorDiscriminants::from(x) as u8,
       Self::Open(x) => OpenErrorDiscriminants::from(x) as u8,
       Self::Update(x) => UpdateErrorDiscriminants::from(x) as u8,
-      Self::HoldTimerExpired | Self::FSM | Self::Cease => 0,
+      Self::HoldTimerExpired | Self::Fsm | Self::Cease => 0,
       Self::Unknown(_, subcode, _) => *subcode,
     }
   }
@@ -381,11 +475,11 @@ impl<'a> From<UpdateError<'a>> for Notification<'a> {
 }
 
 pub trait SendAndReturn {
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BGPError>;
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BgpError>;
 }
 
 impl<T: Into<Notification<'static>>> SendAndReturn for T {
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BGPError> {
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BgpError> {
     let n = self.into();
     n.send(writer).await?;
     Err(n.into())
