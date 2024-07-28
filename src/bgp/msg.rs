@@ -129,7 +129,7 @@ impl Message<'static> {
                       return Err(Notification::Open(Unspecific).into());
                     }
                     msg.my_as = ptr_cap.read_u32().await?;
-                    msg.enable_4b_asn = true;
+                    // TODO: require peer to support 4b ASN
                   }
                   _ => {
                     let mut cap_buf = vec![0; cap_len.into()];
@@ -245,13 +245,12 @@ impl MessageSend for Message<'_> {
   }
 }
 
+// TODO: Only support 4b ASN
 #[derive(Debug, Clone, Default)]
 pub struct OpenMessage<'a> {
-  pub my_as: u32, // maybe 4b
+  pub my_as: u32,
   pub hold_time: u16,
   pub bgp_id: u32,
-
-  pub enable_4b_asn: bool,
 
   pub other_caps: Vec<(u8, Cow<'a, [u8]>)>,
   pub other_opt_params: Vec<(u8, Cow<'a, [u8]>)>,
@@ -259,7 +258,6 @@ pub struct OpenMessage<'a> {
 
 impl MessageSend for OpenMessage<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
-    assert!(self.enable_4b_asn || self.my_as <= u16::MAX.into());
     assert!(self.my_as != AS_TRANS.into());
 
     buf.extend([MSG_OPEN, 4]); // message type, BGP version
@@ -282,10 +280,8 @@ impl MessageSend for OpenMessage<'_> {
           buf.extend(u16::to_be_bytes(afi));
           buf.extend([0, safi]);
         });
-      if self.enable_4b_asn {
-        buf.extend([CAP_4B_ASN, 4]);
-        buf.extend(u32::to_be_bytes(self.my_as));
-      }
+      buf.extend([CAP_4B_ASN, 4]);
+      buf.extend(u32::to_be_bytes(self.my_as));
       self.other_caps.iter().for_each(|(kind, value)| {
         let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
         buf.extend([*kind, len]);
@@ -307,6 +303,8 @@ impl MessageSend for OpenMessage<'_> {
   }
 }
 
+// TODO: implement flowspec first
+// TODO: merge old_nlri with nlri
 #[derive(Debug, Clone)]
 pub struct UpdateMessage {
   withdrawn: HashSet<IpPrefix>,

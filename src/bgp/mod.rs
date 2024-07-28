@@ -69,7 +69,6 @@ impl Session {
       my_as: self.config.local_as,
       hold_time: 180,
       bgp_id: self.config.router_id,
-      enable_4b_asn: true,
       ..Default::default()
     };
     open.send(&mut stream).await?;
