@@ -31,6 +31,9 @@ pub const SAFI_MULTICAST: u8 = 2;
 #[allow(dead_code)]
 pub const SAFI_FLOW: u8 = 133;
 
+pub const ORIGIN: u8 = 1;
+pub const AS_PATH: u8 = 2;
+pub const NEXT_HOP: u8 = 3;
 pub const MP_REACH_NLRI: u8 = 14;
 pub const MP_UNREACH_NLRI: u8 = 15;
 
@@ -62,6 +65,7 @@ pub trait MessageSend {
 pub enum Message<'a> {
   Open(OpenMessage<'a>) = 1,
   // TODO: UPDATE
+  Update(UpdateMessage) = 2,
   Notification(Notification<'a>) = 3,
   Keepalive = 4,
 }
@@ -239,10 +243,30 @@ impl MessageSend for Message<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
     match self {
       Self::Open(x) => x.serialize_data(buf),
+      Self::Update(x) => x.serialize_data(buf),
       Self::Notification(x) => x.serialize_data(buf),
       Self::Keepalive => buf.push(MSG_KEEPALIVE),
     }
   }
+}
+
+/// Track buffer extension length
+#[inline]
+fn extend_with_u8_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
+  let len_pos = buf.len();
+  buf.push(0);
+  extend(buf);
+  let len = buf.len() - len_pos - 1;
+  buf[len_pos] = len.try_into().expect("length should fit in u8");
+}
+
+#[inline]
+fn extend_with_u16_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
+  let len_pos = buf.len();
+  buf.extend([0; 2]);
+  extend(buf);
+  let len = u16::try_from(buf.len() - len_pos - 2).expect("");
+  buf[len_pos..len_pos + 2].copy_from_slice(&len.to_be_bytes())
 }
 
 // TODO: Only support 4b ASN
@@ -265,91 +289,152 @@ impl MessageSend for OpenMessage<'_> {
     buf.extend(u16::to_be_bytes(self.hold_time));
     buf.extend(u32::to_be_bytes(self.bgp_id));
 
-    let opt_params_len_pos = buf.len();
-    buf.push(0); // reserved for optional parameters length
-
-    // Capabilities
-    {
-      let caps_len_pos = buf.len() + 1;
-      buf.extend([OPT_PARAM_CAP, 0]); // reserved for capabilities parameter length
-
-      [(AFI_IPV4, SAFI_UNICAST), (AFI_IPV6, SAFI_UNICAST)]
-        .into_iter()
-        .for_each(|(afi, safi)| {
-          buf.extend([CAP_BGP_MP, 4]);
-          buf.extend(u16::to_be_bytes(afi));
-          buf.extend([0, safi]);
+    // Optional Parameters
+    extend_with_u8_len(buf, |buf| {
+      // Capabilities
+      buf.push(OPT_PARAM_CAP);
+      extend_with_u8_len(buf, |buf| {
+        [(AFI_IPV4, SAFI_UNICAST), (AFI_IPV6, SAFI_UNICAST)]
+          .into_iter()
+          .for_each(|(afi, safi)| {
+            buf.extend([CAP_BGP_MP, 4]);
+            buf.extend(u16::to_be_bytes(afi));
+            buf.extend([0, safi]);
+          });
+        buf.extend([CAP_4B_ASN, 4]);
+        buf.extend(u32::to_be_bytes(self.my_as));
+        self.other_caps.iter().for_each(|(kind, value)| {
+          let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
+          buf.extend([*kind, len]);
+          buf.extend(&value[..]);
         });
-      buf.extend([CAP_4B_ASN, 4]);
-      buf.extend(u32::to_be_bytes(self.my_as));
-      self.other_caps.iter().for_each(|(kind, value)| {
+      });
+
+      self.other_opt_params.iter().for_each(|(kind, value)| {
         let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
         buf.extend([*kind, len]);
         buf.extend(&value[..]);
       });
-
-      let caps_len = buf.len() - caps_len_pos - 1;
-      buf[caps_len_pos] = caps_len.try_into().expect("caps_len should fit in u8");
-    }
-
-    self.other_opt_params.iter().for_each(|(kind, value)| {
-      let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
-      buf.extend([*kind, len]);
-      buf.extend(&value[..]);
     });
-
-    let opt_params_len = buf.len() - opt_params_len_pos - 1;
-    buf[opt_params_len_pos] = opt_params_len.try_into().expect("opt_params_len should fit in u8");
   }
 }
 
-// TODO: implement flowspec first
-// TODO: merge old_nlri with nlri
+// TODO: communities...
 #[derive(Debug, Clone)]
 pub struct UpdateMessage {
   withdrawn: HashSet<IpPrefix>,
-  nlri: Option<Nlri>,     // BGP-MP-advertised NLRI
-  old_nlri: Option<Nlri>, // Old, BGP-4-advertised NLRI
+  nlri: Option<Nlri>,
   origin: Origin,
   as_path: Vec<u32>, // Stored in reverse
 }
 
 impl MessageSend for UpdateMessage {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
-    let start_pos = buf.len();
-    buf.extend([0; 2]);
-    self.withdrawn.iter().filter(|x| x.is_ipv4()).for_each(|p| p.serialize(buf));
-    let wr_len = u16::try_from(buf.len() - start_pos - 2)
-      .expect("withdrawn routes length should fit in u16")
-      .to_be_bytes();
-    buf[start_pos] = wr_len[0];
-    buf[start_pos + 1] = wr_len[1];
+    buf.push(MSG_UPDATE);
 
-    let pattr_len_pos = buf.len();
-    buf.extend([0; 2]);
+    // IPv4 withdrawn routes
+    extend_with_u16_len(buf, |buf| {
+      self.withdrawn.iter().filter(|x| x.is_ipv4()).for_each(|p| p.serialize(buf));
+    });
 
     // MP_UNREACH_NLRI
-    // self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(f)
-    // TODO: path attributes
+    // optional, non-transitive, non-partial, use 2b length
+    buf.extend([0b10010000, MP_UNREACH_NLRI]);
+    self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(|p| p.serialize(buf));
 
-    let pattr_len = u16::try_from(buf.len() - pattr_len_pos - 2)
-      .expect("path attribute length should fit in u16")
-      .to_be_bytes();
-    buf[pattr_len_pos] = pattr_len[0];
-    buf[pattr_len_pos + 1] = pattr_len[1];
+    // Path attributes
+    buf.extend([0b01000000, ORIGIN, 1, self.origin as u8]);
+    buf.extend([
+      0b01000000,
+      AS_PATH,
+      u8::try_from(self.as_path.len() * 4).expect("AS path length should fit in u8"),
+    ]);
+    buf.extend(self.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
+
+    // MP_REACH_NLRI
+    if let Some(nlri) = &self.nlri {
+      nlri.serialize(buf);
+    }
+
+    match &self.nlri {
+      Some(Nlri::Route {
+        prefixes,
+        next_hop: NextHop::V4(next_hop),
+      }) => {
+        // well-known, transitive, non-partial, use 1b length
+        buf.extend([0b01000000, NEXT_HOP, 4]);
+        buf.extend(next_hop.octets());
+        // IPv4 NLRI
+        prefixes.iter().for_each(|p| {
+          assert!(p.is_ipv4(), "IPv6 with IPv4 next hop not supported");
+          p.serialize(buf);
+        })
+      }
+      Some(nlri) => nlri.serialize(buf),
+      _ => {}
+    }
   }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Nlri {
-  prefixes: HashSet<IpPrefix>,
-  next_hop: NextHop,
+pub enum Nlri {
+  Route {
+    prefixes: HashSet<IpPrefix>,
+    next_hop: NextHop,
+  },
+  // TODO: flowspec
+}
+
+impl Nlri {
+  /// Serialize to MP_REACH_NLRI.
+  fn serialize(&self, buf: &mut Vec<u8>) {
+    match self {
+      Self::Route { prefixes, next_hop } => {
+        let mut iter = prefixes.iter().peekable();
+        let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
+        let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
+
+        // optional, non-transitive, non-partial, use 2b length
+        buf.extend([0b10010000, MP_REACH_NLRI]);
+        extend_with_u16_len(buf, |buf| {
+          buf.extend(afi.to_be_bytes());
+          buf.push(SAFI_UNICAST);
+          next_hop.serialize(buf);
+          buf.push(0); // reserved
+          iter.for_each(|p| {
+            assert_eq!(p.is_ipv4(), is_ipv4, "NLRI contains multiple kinds of prefix");
+            p.serialize(buf)
+          });
+        });
+      }
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NextHop {
   V4(Ipv4Addr),
   V6(Ipv6Addr, Option<Ipv6Addr>),
+}
+
+impl NextHop {
+  fn serialize(&self, buf: &mut Vec<u8>) {
+    match self {
+      Self::V4(x) => {
+        buf.push(4);
+        buf.extend(x.octets());
+      }
+      Self::V6(x, Some(y)) => {
+        buf.push(32);
+        buf.extend(x.octets());
+        buf.extend(y.octets());
+      }
+      Self::V6(x, None) => {
+        buf.push(16);
+        buf.extend(x.octets());
+      }
+    }
+  }
 }
 
 impl From<IpAddr> for NextHop {
@@ -384,10 +469,11 @@ impl From<[Ipv6Addr; 2]> for NextHop {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Origin {
-  Igp,
-  Egp,
-  Incomplete,
+  Igp = 0,
+  Egp = 1,
+  Incomplete = 2,
 }
 
 pub const N_HEADER: u8 = 1;
