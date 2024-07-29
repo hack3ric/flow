@@ -63,11 +63,10 @@ pub trait MessageSend {
 #[derive(Debug, Clone, EnumDiscriminants)]
 #[repr(u8)]
 pub enum Message<'a> {
-  Open(OpenMessage<'a>) = 1,
-  // TODO: UPDATE
-  Update(UpdateMessage) = 2,
-  Notification(Notification<'a>) = 3,
-  Keepalive = 4,
+  Open(OpenMessage<'a>) = MSG_OPEN,
+  Update(UpdateMessage) = MSG_UPDATE,
+  Notification(Notification<'a>) = MSG_NOTIFICATION,
+  Keepalive = MSG_KEEPALIVE,
 }
 
 impl Message<'_> {
@@ -94,146 +93,21 @@ impl Message<'static> {
       };
     }
 
-    let mut buf = vec![0; len.into()];
-    reader.read_exact(&mut buf).await?;
-    let mut ptr = &*buf;
-
+    let mut ptr = reader.take(len.into());
     match msg_type {
-      MSG_OPEN => {
-        if ptr.read_u8().await? != 4 {
-          return Err(Notification::Open(UnsupportedVersion(4)).into());
-        }
-        let mut msg = OpenMessage::default();
-        msg.my_as = ptr.read_u16().await?.into();
-        msg.hold_time = ptr.read_u16().await?;
-        msg.bgp_id = ptr.read_u32().await?;
-
-        let params_len = ptr.read_u8().await?;
-        if u16::from(params_len) + 10 != len {
-          return Err(Notification::Open(Unspecific).into());
-        }
-
-        while let Ok(x) = ptr.read_u16().await {
-          let [param_type, param_len] = x.to_be_bytes();
-          if ptr.len() < param_len.into() {
-            return Err(Notification::Open(Unspecific).into());
-          }
-          match param_type {
-            OPT_PARAM_CAP => {
-              let (mut ptr_cap, ptr1) = ptr.split_at(param_len.into());
-              ptr = ptr1;
-              while let Ok(x) = ptr_cap.read_u16().await {
-                let [cap_type, cap_len] = x.to_be_bytes();
-                if param_len < cap_len {
-                  return Err(Notification::Open(Unspecific).into());
-                }
-                match cap_type {
-                  CAP_4B_ASN => {
-                    if cap_len != 4 {
-                      return Err(Notification::Open(Unspecific).into());
-                    }
-                    msg.my_as = ptr_cap.read_u32().await?;
-                    // TODO: require peer to support 4b ASN
-                  }
-                  _ => {
-                    let mut cap_buf = vec![0; cap_len.into()];
-                    ptr_cap.read_exact(&mut cap_buf).await?;
-                    msg.other_caps.push((cap_type, cap_buf.into()));
-                  }
-                }
-              }
-            }
-            _ => {
-              let mut param_buf = vec![0; param_len.into()];
-              ptr.read_exact(&mut param_buf).await?;
-              msg.other_opt_params.push((param_type, param_buf.into()));
-            }
-          }
-        }
-        Ok(Message::Open(msg))
-      }
-
-      MSG_UPDATE => todo!(),
-
-      MSG_NOTIFICATION => {
-        let code = ptr.read_u8().await?;
-        let subcode = ptr.read_u8().await?;
-        let notification = match code {
-          N_HEADER => {
-            let subcode_p = match subcode {
-              NH_CONN_NOT_SYNCED => Some(ConnNotSynced),
-              NH_BAD_LEN => Some(BadLen(ptr.read_u16().await?)),
-              NH_BAD_TYPE => Some(BadType(ptr.read_u8().await?)),
-              _ => None,
-            };
-            subcode_p
-              .map(|x| Notification::Header(x))
-              .unwrap_or_else(|| Notification::Unknown(code, subcode, ptr.to_vec().into()))
-          }
-          N_OPEN => {
-            let subcode_p = match subcode {
-              NO_UNSPECIFIC => Some(OpenError::Unspecific),
-              NO_UNSUPPORTED_VERSION => Some(UnsupportedVersion(ptr.read_u16().await?)),
-              NO_BAD_PEER_AS => Some(BadPeerAS),
-              NO_BAD_BGP_ID => Some(BadBGPID),
-              NO_UNSUPPORTED_OPT_PARAM => Some(UnsupportedOptParam),
-              NO_UNACCEPTABLE_HOLD_TIME => Some(UnacceptableHoldTime),
-              _ => None,
-            };
-            subcode_p
-              .map(|x| Notification::Open(x))
-              .unwrap_or_else(|| Notification::Unknown(code, subcode, ptr.to_vec().into()))
-          }
-          N_UPDATE => {
-            let subcode_p = match subcode {
-              NU_MALFORMED_ATTR_LIST => Some(MalformedAttrList),
-              NU_MISSING_WELL_KNOWN_ATTR => Some(MissingWellKnownAttr(ptr.read_u8().await?)),
-              NU_INVALID_NETWORK => Some(InvalidNetwork),
-              NU_MALFORMED_AS_PATH => Some(MalformedASPath),
-              NU_UNRECOGNIZED_WELL_KNOWN_ATTR
-              | NU_ATTR_FLAGS
-              | NU_ATTR_LEN
-              | NU_INVALID_ORIGIN
-              | NU_INVALID_NEXT_HOP
-              | NU_OPT_ATTR => {
-                let discrim_fn = match subcode {
-                  NU_UNRECOGNIZED_WELL_KNOWN_ATTR => UpdateError::UnrecognizedWellKnownAttr,
-                  NU_ATTR_FLAGS => UpdateError::AttrFlags,
-                  NU_ATTR_LEN => UpdateError::AttrLen,
-                  NU_INVALID_ORIGIN => UpdateError::InvalidOrigin,
-                  NU_INVALID_NEXT_HOP => UpdateError::InvalidNextHop,
-                  NU_OPT_ATTR => UpdateError::OptAttr,
-                  _ => unreachable!(),
-                };
-                Some(discrim_fn(
-                  ptr.read_u8().await?,
-                  ptr.read_u8().await?,
-                  ptr.to_vec().into(),
-                ))
-              }
-              _ => None,
-            };
-            subcode_p
-              .map(|x| Notification::Update(x))
-              .unwrap_or_else(|| Notification::Unknown(code, subcode, ptr.to_vec().into()))
-          }
-          N_HOLD_TIMER_EXPIRED => Notification::HoldTimerExpired,
-          N_FSM => Notification::Fsm,
-          N_CEASE => Notification::Cease,
-          _ => Notification::Unknown(code, subcode, ptr.to_vec().into()),
-        };
-        Ok(Message::Notification(notification))
-      }
-
+      MSG_OPEN => OpenMessage::recv(&mut ptr).await.map(Message::Open),
+      MSG_UPDATE => UpdateMessage::recv(&mut ptr).await.map(Message::Update),
+      MSG_NOTIFICATION => Notification::recv(&mut ptr).await.map(Message::Notification),
       MSG_KEEPALIVE => Err(Notification::Header(BadLen(len)).into()),
       _ => Err(Notification::Header(BadType(msg_type)).into()),
     }
   }
 
   pub async fn recv<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
+    // TODO: separate our error and their error
     match Message::recv_raw(socket).await {
       Ok(Message::Notification(n)) => Err(n.into()),
-      Err(BgpError::Notification(n)) => return n.send_and_return(socket).await.map(|_| unreachable!()),
+      Err(BgpError::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
     }
   }
@@ -278,6 +152,63 @@ pub struct OpenMessage<'a> {
 
   pub other_caps: Vec<(u8, Cow<'a, [u8]>)>,
   pub other_opt_params: Vec<(u8, Cow<'a, [u8]>)>,
+}
+
+impl OpenMessage<'static> {
+  async fn recv<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+    match Self::recv_inner(ptr).await {
+      Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Notification::Open(Unspecific).into()),
+      other => other,
+    }
+  }
+
+  async fn recv_inner<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+    if ptr.read_u8().await? != 4 {
+      return Err(Notification::Open(UnsupportedVersion(4)).into());
+    }
+    let mut msg = OpenMessage::default();
+    msg.my_as = ptr.read_u16().await?.into();
+    msg.hold_time = ptr.read_u16().await?;
+    msg.bgp_id = ptr.read_u32().await?;
+
+    let params_len = ptr.read_u8().await?;
+    let mut ptr = ptr.take(params_len.into());
+
+    while let Ok(x) = ptr.read_u16().await {
+      let [param_type, param_len] = x.to_be_bytes();
+      match param_type {
+        OPT_PARAM_CAP => {
+          let mut ptr_cap = (&mut ptr).take(param_len.into());
+          while let Ok(x) = ptr_cap.read_u16().await {
+            let [cap_type, cap_len] = x.to_be_bytes();
+            if param_len < cap_len {
+              return Err(Notification::Open(Unspecific).into());
+            }
+            match cap_type {
+              CAP_4B_ASN => {
+                if cap_len != 4 {
+                  return Err(Notification::Open(Unspecific).into());
+                }
+                msg.my_as = ptr_cap.read_u32().await?;
+                // TODO: require peer to support 4b ASN
+              }
+              _ => {
+                let mut cap_buf = vec![0; cap_len.into()];
+                ptr_cap.read_exact(&mut cap_buf).await?;
+                msg.other_caps.push((cap_type, cap_buf.into()));
+              }
+            }
+          }
+        }
+        _ => {
+          let mut param_buf = vec![0; param_len.into()];
+          ptr.read_exact(&mut param_buf).await?;
+          msg.other_opt_params.push((param_type, param_buf.into()));
+        }
+      }
+    }
+    Ok(msg)
+  }
 }
 
 impl MessageSend for OpenMessage<'_> {
@@ -326,6 +257,12 @@ pub struct UpdateMessage {
   nlri: Option<Nlri>,
   origin: Origin,
   as_path: Vec<u32>, // Stored in reverse
+}
+
+impl UpdateMessage {
+  async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    todo!();
+  }
 }
 
 impl MessageSend for UpdateMessage {
@@ -468,12 +405,16 @@ impl From<[Ipv6Addr; 2]> for NextHop {
   }
 }
 
+pub const ORIGIN_IGP: u8 = 0;
+pub const ORIGIN_EGP: u8 = 1;
+pub const ORIGIN_INCOMPLETE: u8 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Origin {
-  Igp = 0,
-  Egp = 1,
-  Incomplete = 2,
+  Igp = ORIGIN_IGP,
+  Egp = ORIGIN_EGP,
+  Incomplete = ORIGIN_INCOMPLETE,
 }
 
 pub const N_HEADER: u8 = 1;
@@ -525,8 +466,92 @@ impl Notification<'_> {
       Self::Unknown(_, subcode, _) => *subcode,
     }
   }
+}
 
-  pub fn serialize_data(&self, buf: &mut Vec<u8>) {
+impl Notification<'static> {
+  async fn recv<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+    async fn to_vec<R: AsyncRead + Unpin>(ptr: &mut R) -> io::Result<Vec<u8>> {
+      let mut buf = Vec::new();
+      ptr.read_to_end(&mut buf).await?;
+      Ok(buf)
+    }
+
+    let code = ptr.read_u8().await?;
+    let subcode = ptr.read_u8().await?;
+    let notification = match code {
+      N_HEADER => {
+        let subcode_p = match subcode {
+          NH_CONN_NOT_SYNCED => Some(ConnNotSynced),
+          NH_BAD_LEN => Some(BadLen(ptr.read_u16().await?)),
+          NH_BAD_TYPE => Some(BadType(ptr.read_u8().await?)),
+          _ => None,
+        };
+        match subcode_p {
+          Some(x) => Notification::Header(x),
+          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
+        }
+      }
+      N_OPEN => {
+        let subcode_p = match subcode {
+          NO_UNSPECIFIC => Some(OpenError::Unspecific),
+          NO_UNSUPPORTED_VERSION => Some(UnsupportedVersion(ptr.read_u16().await?)),
+          NO_BAD_PEER_AS => Some(BadPeerAS),
+          NO_BAD_BGP_ID => Some(BadBGPID),
+          NO_UNSUPPORTED_OPT_PARAM => Some(UnsupportedOptParam),
+          NO_UNACCEPTABLE_HOLD_TIME => Some(UnacceptableHoldTime),
+          _ => None,
+        };
+        match subcode_p {
+          Some(x) => Notification::Open(x),
+          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
+        }
+      }
+      N_UPDATE => {
+        let subcode_p = match subcode {
+          NU_MALFORMED_ATTR_LIST => Some(MalformedAttrList),
+          NU_MISSING_WELL_KNOWN_ATTR => Some(MissingWellKnownAttr(ptr.read_u8().await?)),
+          NU_INVALID_NETWORK => Some(InvalidNetwork),
+          NU_MALFORMED_AS_PATH => Some(MalformedASPath),
+          NU_UNRECOGNIZED_WELL_KNOWN_ATTR
+          | NU_ATTR_FLAGS
+          | NU_ATTR_LEN
+          | NU_INVALID_ORIGIN
+          | NU_INVALID_NEXT_HOP
+          | NU_OPT_ATTR => {
+            let discrim_fn = match subcode {
+              NU_UNRECOGNIZED_WELL_KNOWN_ATTR => UpdateError::UnrecognizedWellKnownAttr,
+              NU_ATTR_FLAGS => UpdateError::AttrFlags,
+              NU_ATTR_LEN => UpdateError::AttrLen,
+              NU_INVALID_ORIGIN => UpdateError::InvalidOrigin,
+              NU_INVALID_NEXT_HOP => UpdateError::InvalidNextHop,
+              NU_OPT_ATTR => UpdateError::OptAttr,
+              _ => unreachable!(),
+            };
+            Some(discrim_fn(
+              ptr.read_u8().await?,
+              ptr.read_u8().await?,
+              to_vec(ptr).await?.into(),
+            ))
+          }
+          _ => None,
+        };
+        match subcode_p {
+          Some(x) => Notification::Update(x),
+          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
+        }
+      }
+      N_HOLD_TIMER_EXPIRED => Notification::HoldTimerExpired,
+      N_FSM => Notification::Fsm,
+      N_CEASE => Notification::Cease,
+      _ => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
+    };
+    Ok(notification)
+  }
+}
+
+impl MessageSend for Notification<'_> {
+  fn serialize_data(&self, buf: &mut Vec<u8>) {
+    buf.extend([MSG_NOTIFICATION, self.code(), self.subcode()]);
     match self {
       Self::Header(BadLen(x)) | Self::Open(UnsupportedVersion(x)) => buf.extend(u16::to_be_bytes(*x)),
       Self::Header(BadType(x)) | Self::Update(MissingWellKnownAttr(x)) => buf.push(*x),
@@ -542,13 +567,6 @@ impl Notification<'_> {
       Self::Unknown(_, _, data) => buf.extend(&data[..]),
       _ => {}
     }
-  }
-}
-
-impl MessageSend for Notification<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
-    buf.extend([MSG_NOTIFICATION, self.code(), self.subcode()]);
-    self.serialize_data(buf);
   }
 }
 
