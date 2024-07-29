@@ -1,8 +1,10 @@
 use std::fmt::{self, Debug, Display, Formatter};
+use std::io;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::str::FromStr;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Max prefix length of a certain IP type.
 #[inline]
@@ -176,7 +178,6 @@ impl IpPrefix {
   }
 
   #[inline]
-  #[allow(dead_code)]
   pub fn mask(self) -> IpAddr {
     self.inner.mask()
   }
@@ -199,7 +200,6 @@ impl IpPrefix {
   }
 
   #[inline]
-  #[allow(dead_code)]
   pub const fn is_single(&self) -> bool {
     prefix_max_len(self.prefix()) == self.len()
   }
@@ -228,6 +228,50 @@ impl IpPrefix {
       }
     }
   }
+
+  pub(crate) async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+    Self::recv_generic::<32, 4, _, _>(reader, IpAddr::V4).await
+  }
+
+  pub(crate) async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+    Self::recv_generic::<128, 16, _, _>(reader, IpAddr::V6).await
+  }
+
+  async fn recv_generic<const L: u8, const M: usize, T, R>(
+    reader: &mut R,
+    ctor: fn(T) -> IpAddr,
+  ) -> Result<Option<Self>, IpPrefixError>
+  where
+    T: From<[u8; M]>,
+    R: AsyncRead + Unpin,
+  {
+    let Ok(len) = reader.read_u8().await else {
+      // no more prefix to read
+      return Ok(None);
+    };
+    if len > L {
+      return Err(IpPrefixError {
+        kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, L).into(),
+        value: None,
+      });
+    }
+    let mut buf = [0; M];
+    let prefix_bytes = len / 8 + u8::from(len % 8 != 0);
+    reader.read_exact(&mut buf[0..prefix_bytes.into()]).await?;
+    let inner = IpWithPrefix {
+      addr: ctor(buf.into()),
+      prefix_len: len,
+    };
+    let result = inner.prefix();
+    if result.inner == inner {
+      Ok(Some(result))
+    } else {
+      Err(IpPrefixError {
+        kind: IpPrefixErrorKind::TrailingBitsNonZero,
+        value: None,
+      })
+    }
+  }
 }
 
 impl Debug for IpPrefix {
@@ -251,7 +295,7 @@ impl FromStr for IpPrefix {
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     let inner = s.parse::<IpWithPrefix>().map_err(|e| IpPrefixError {
       kind: e.kind.into(),
-      value: e.value,
+      value: Some(e.value),
     })?;
     let result = inner.prefix();
     if result.inner == inner {
@@ -259,7 +303,7 @@ impl FromStr for IpPrefix {
     } else {
       Err(IpPrefixError {
         kind: IpPrefixErrorKind::TrailingBitsNonZero,
-        value: s.into(),
+        value: Some(s.into()),
       })
     }
   }
@@ -272,15 +316,35 @@ impl From<IpAddr> for IpPrefix {
   }
 }
 
-#[derive(Debug, Clone, Error)]
-#[error("error parsing IP prefix '{value}': {kind}")]
+#[derive(Debug, Error)]
 pub struct IpPrefixError {
-  kind: IpPrefixErrorKind,
-  value: String,
+  pub(crate) kind: IpPrefixErrorKind,
+  pub(crate) value: Option<String>,
 }
 
-#[derive(Debug, Clone, Error)]
+impl Display for IpPrefixError {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    if let Some(value) = &self.value {
+      write!(f, "error parsing IP prefix '{}': {}", value, self.kind)
+    } else {
+      write!(f, "error parsing IP prefix: {}", self.kind)
+    }
+  }
+}
+
+impl From<io::Error> for IpPrefixError {
+  fn from(e: io::Error) -> Self {
+    Self {
+      kind: IpPrefixErrorKind::Io(e),
+      value: None,
+    }
+  }
+}
+
+#[derive(Debug, Error)]
 pub enum IpPrefixErrorKind {
+  #[error(transparent)]
+  Io(#[from] io::Error),
   #[error(transparent)]
   IpWithPrefixParse(#[from] IpWithPrefixErrorKind),
   #[error("trailing bits of a prefix are non-zero")]

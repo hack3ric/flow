@@ -4,6 +4,7 @@ mod msg;
 use crate::net::IpPrefix;
 use error::BgpError;
 use futures::future::pending;
+use log::info;
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
@@ -11,7 +12,6 @@ use replace_with::replace_with_or_abort;
 use std::net::IpAddr;
 use tokio::net::TcpStream;
 use State::*;
-use log::info;
 
 pub struct Config {
   pub router_id: u32,
