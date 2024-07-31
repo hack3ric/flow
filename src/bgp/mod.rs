@@ -10,6 +10,7 @@ use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
 use replace_with::replace_with_or_abort;
 use std::net::IpAddr;
+use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use State::*;
 
@@ -72,7 +73,9 @@ impl Session {
       ..Default::default()
     };
     open.send(&mut stream).await?;
-    self.state = OpenSent { stream };
+    self.state = OpenSent {
+      stream: BufReader::new(stream),
+    };
     Ok(())
   }
 
@@ -132,14 +135,14 @@ pub enum State {
   Connect, // never used in passive mode
   Active,
   OpenSent {
-    stream: TcpStream,
+    stream: BufReader<TcpStream>,
   },
   OpenConfirm {
-    stream: TcpStream,
+    stream: BufReader<TcpStream>,
     remote_open: OpenMessage<'static>,
   },
   Established {
-    stream: TcpStream,
+    stream: BufReader<TcpStream>,
     remote_open: OpenMessage<'static>,
   },
 }

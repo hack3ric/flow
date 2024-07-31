@@ -43,7 +43,7 @@ pub trait MessageSend {
 #[repr(u8)]
 pub enum Message<'a> {
   Open(OpenMessage<'a>) = MSG_OPEN,
-  Update(UpdateMessage) = MSG_UPDATE,
+  Update(UpdateMessage<'a>) = MSG_UPDATE,
   Notification(Notification<'a>) = MSG_NOTIFICATION,
   Keepalive = MSG_KEEPALIVE,
 }
@@ -130,7 +130,7 @@ async fn get_pattr_buf(
   read_data: impl IntoIterator<Item = u8>,
 ) -> Result<Cow<'static, [u8]>, BgpError> {
   let mut pattr_buf = vec![flags, kind];
-  if flags & PATTR_EXT_LEN == 0 {
+  if flags & PF_EXT_LEN == 0 {
     pattr_buf.push(len as u8);
   } else {
     pattr_buf.extend(len.to_be_bytes());
@@ -260,17 +260,19 @@ pub const SAFI_MULTICAST: u8 = 2;
 #[allow(dead_code)]
 pub const SAFI_FLOW: u8 = 133;
 
-pub const PATTR_OPTIONAL: u8 = 0b1000_0000;
-pub const PATTR_TRANSITIVE: u8 = 0b0100_0000;
-pub const PATTR_PARTIAL: u8 = 0b0010_0000;
-pub const PATTR_EXT_LEN: u8 = 0b0001_0000;
-pub const PATTR_WELL_KNOWN: u8 = 0b0100_0000;
+// Path attribute flags
+pub const PF_OPTIONAL: u8 = 0b1000_0000;
+pub const PF_TRANSITIVE: u8 = 0b0100_0000;
+pub const PF_PARTIAL: u8 = 0b0010_0000;
+pub const PF_EXT_LEN: u8 = 0b0001_0000;
+pub const PF_WELL_KNOWN: u8 = 0b0100_0000;
 
-pub const ORIGIN: u8 = 1;
-pub const AS_PATH: u8 = 2;
-pub const NEXT_HOP: u8 = 3;
-pub const MP_REACH_NLRI: u8 = 14;
-pub const MP_UNREACH_NLRI: u8 = 15;
+// Path attribute types
+pub const P_ORIGIN: u8 = 1;
+pub const P_AS_PATH: u8 = 2;
+pub const P_NEXT_HOP: u8 = 3;
+pub const P_MP_REACH_NLRI: u8 = 14;
+pub const P_MP_UNREACH_NLRI: u8 = 15;
 
 // Strictly, according to RFC 7606 Section 5.1, one UPDATE message MUST NOT
 // contain more than one kind of (un)reachability information. However we allow
@@ -278,16 +280,18 @@ pub const MP_UNREACH_NLRI: u8 = 15;
 //
 // TODO: communities...
 #[derive(Debug, Clone)]
-pub struct UpdateMessage {
+pub struct UpdateMessage<'a> {
   withdrawn: HashSet<IpPrefix>,
   nlri: Option<Nlri>,
   old_nlri: Option<Nlri>,
   origin: Origin,
-  as_path: Vec<u32>, // Stored in reverse
-  trans_unknown_attrs: HashMap<u8, Cow<'static, [u8]>>,
+  /// AS path, stored in reverse.
+  as_path: Cow<'a, [u32]>,
+  /// Transitive but unrecognized path attributes.
+  other_attrs: HashMap<u8, Cow<'a, [u8]>>,
 }
 
-impl UpdateMessage {
+impl UpdateMessage<'static> {
   async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     match Self::recv_inner(reader).await {
       Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -303,8 +307,8 @@ impl UpdateMessage {
       nlri: None,
       old_nlri: None,
       origin: Origin::Incomplete,
-      as_path: Vec::new(),
-      trans_unknown_attrs: HashMap::new(),
+      as_path: Cow::Borrowed(&[]),
+      other_attrs: HashMap::new(),
     };
 
     let withdrawn_len = reader.read_u16().await?;
@@ -314,14 +318,13 @@ impl UpdateMessage {
     }
 
     let mut visited = HashSet::new();
-
-    let mut next_hop_v4 = None::<NextHop>;
+    let mut old_next_hop = None::<NextHop>;
     let pattrs_len = reader.read_u16().await?;
     let mut pattrs_reader = (&mut reader).take(pattrs_len.into());
 
     while let Ok(x) = pattrs_reader.read_u16().await {
       let [flags, kind] = x.to_be_bytes();
-      let len: u16 = if flags & PATTR_EXT_LEN == 0 {
+      let len: u16 = if flags & PF_EXT_LEN == 0 {
         pattrs_reader.read_u8().await?.into()
       } else {
         pattrs_reader.read_u16().await?
@@ -332,7 +335,7 @@ impl UpdateMessage {
         flags: u8,
         kind: u8,
         len: u16,
-      ) -> Result<UpdateMessage, BgpError> {
+      ) -> Result<UpdateMessage<'static>, BgpError> {
         let pattr_buf = get_pattr_buf(reader, flags, kind, len, []).await?;
         Err(Notification::Update(AttrFlags(pattr_buf)).into())
       }
@@ -344,54 +347,54 @@ impl UpdateMessage {
 
       match kind {
         // Well-known attributes
-        ORIGIN | AS_PATH | NEXT_HOP
-          if flags & (PATTR_OPTIONAL | PATTR_PARTIAL) != 0 || flags & PATTR_TRANSITIVE == 0 =>
-        {
+        P_ORIGIN | P_AS_PATH | P_NEXT_HOP if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
-        ORIGIN => {
+        P_ORIGIN => {
           if len != 1 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(AttrLen(pattr_buf)).into());
           }
           result.origin = match pattrs_reader.read_u8().await? {
-            ORIGIN_IGP => Origin::Igp,
-            ORIGIN_EGP => Origin::Egp,
-            ORIGIN_INCOMPLETE => Origin::Incomplete,
+            O_IGP => Origin::Igp,
+            O_EGP => Origin::Egp,
+            O_INCOMPLETE => Origin::Incomplete,
             other => {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [other]).await?;
               return Err(Notification::Update(InvalidOrigin(pattr_buf)).into());
             }
           }
         }
-        AS_PATH => {
+        P_AS_PATH => {
           if len % 4 != 0 {
             return Err(Notification::Update(MalformedASPath).into());
           }
+          let mut as_path = Vec::new();
           let mut as_path_reader = (&mut pattrs_reader).take(len.into());
           while let Ok(asn) = as_path_reader.read_u32().await {
-            result.as_path.push(asn);
+            as_path.push(asn);
           }
           if result.as_path.len() != usize::from(len % 4) {
             return Err(Notification::Update(MalformedASPath).into());
           }
-          result.as_path.reverse();
+          as_path.reverse();
+          result.as_path = as_path.into();
         }
-        NEXT_HOP => {
+        P_NEXT_HOP => {
           if len != 4 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
           }
-          next_hop_v4 = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
+          old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
         }
 
         // Known optional attributes
-        MP_REACH_NLRI | MP_UNREACH_NLRI
-          if flags & PATTR_OPTIONAL == 0 || flags & (PATTR_TRANSITIVE | PATTR_PARTIAL) != 0 =>
+        P_MP_REACH_NLRI | P_MP_UNREACH_NLRI
+          if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
         {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
-        MP_REACH_NLRI => {
+        P_MP_REACH_NLRI => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
           match Nlri::recv_mp(&mut &opt_buf[..]).await {
@@ -402,7 +405,7 @@ impl UpdateMessage {
             }
           }
         }
-        MP_UNREACH_NLRI => {
+        P_MP_UNREACH_NLRI => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
           let mut unreach_reader = &*opt_buf;
@@ -420,52 +423,58 @@ impl UpdateMessage {
 
         // Others
         _ => {
-          // unknown well-known attribute
-          if flags & PATTR_OPTIONAL == 0 {
+          // reject unknown well-known attribute
+          if flags & PF_OPTIONAL == 0 {
             return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
           }
-          // non-transitive but partial set
-          if flags & PATTR_TRANSITIVE == 0 && flags & PATTR_PARTIAL != 0 {
+          // reject non-transitive but partial set
+          if flags & PF_TRANSITIVE == 0 && flags & PF_PARTIAL != 0 {
             return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
           }
           // store transitive unknown attributes
-          if flags & PATTR_TRANSITIVE != 0 {
+          if flags & PF_TRANSITIVE != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            result.trans_unknown_attrs.insert(kind, pattr_buf);
+            result.other_attrs.insert(kind, pattr_buf);
           }
-          // Silently ignore optional non-transitive unrecognized attributes
+          // silently ignore optional non-transitive unrecognized attributes
         }
       }
 
       visited.insert(kind);
     }
 
-    // TODO: old NLRI
-    let mut prefixes_v4 = HashSet::new();
+    let mut old_prefixes = HashSet::new();
     let exec = async {
       while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
-        prefixes_v4.insert(prefix);
+        old_prefixes.insert(prefix);
       }
       Ok::<_, IpPrefixError>(())
     };
     if exec.await.is_err() {
       return Err(Notification::Update(InvalidNetwork).into());
     }
-
-    if let Some(next_hop) = next_hop_v4 {
+    if let Some(next_hop) = old_next_hop {
       result.old_nlri = Some(Nlri::Route {
-        prefixes: prefixes_v4,
+        prefixes: old_prefixes,
         next_hop,
       });
-    } else if !prefixes_v4.is_empty() {
-      return Err(Notification::Update(MissingWellKnownAttr(NEXT_HOP)).into());
+    } else if !old_prefixes.is_empty() {
+      return Err(Notification::Update(MissingWellKnownAttr(P_NEXT_HOP)).into());
+    }
+
+    if result.nlri.is_some() || result.old_nlri.is_some() {
+      for attr in [P_ORIGIN, P_AS_PATH] {
+        if !visited.contains(&attr) {
+          return Err(Notification::Update(MissingWellKnownAttr(attr)).into());
+        }
+      }
     }
 
     Ok(result)
   }
 }
 
-impl MessageSend for UpdateMessage {
+impl MessageSend for UpdateMessage<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
     let old_nlri = match &self.old_nlri {
       Some(Nlri::Route {
@@ -490,18 +499,18 @@ impl MessageSend for UpdateMessage {
       }
       // MP_UNREACH_NLRI
       if !self.withdrawn.is_empty() {
-        buf.extend([PATTR_OPTIONAL | PATTR_EXT_LEN, MP_UNREACH_NLRI]);
+        buf.extend([PF_OPTIONAL | PF_EXT_LEN, P_MP_UNREACH_NLRI]);
         self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(|p| p.serialize(buf));
       }
 
       // Path attributes
-      buf.extend([PATTR_WELL_KNOWN, ORIGIN, 1, self.origin as u8]);
+      buf.extend([PF_WELL_KNOWN, P_ORIGIN, 1, self.origin as u8]);
       let as_path_len = u8::try_from(self.as_path.len() * 4).expect("AS path length should fit in u8");
-      buf.extend([PATTR_WELL_KNOWN, AS_PATH, as_path_len]);
+      buf.extend([PF_WELL_KNOWN, P_AS_PATH, as_path_len]);
       buf.extend(self.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
 
       if let Some((_, next_hop)) = &old_nlri {
-        buf.extend([PATTR_WELL_KNOWN, NEXT_HOP, 4]);
+        buf.extend([PF_WELL_KNOWN, P_NEXT_HOP, 4]);
         buf.extend(next_hop.octets());
       }
     });
@@ -534,7 +543,7 @@ impl Nlri {
         let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
         let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
 
-        buf.extend([PATTR_OPTIONAL | PATTR_EXT_LEN, MP_REACH_NLRI]);
+        buf.extend([PF_OPTIONAL | PF_EXT_LEN, P_MP_REACH_NLRI]);
         extend_with_u16_len(buf, |buf| {
           buf.extend(afi.to_be_bytes());
           buf.push(SAFI_UNICAST);
@@ -642,16 +651,16 @@ impl From<[Ipv6Addr; 2]> for NextHop {
   }
 }
 
-pub const ORIGIN_IGP: u8 = 0;
-pub const ORIGIN_EGP: u8 = 1;
-pub const ORIGIN_INCOMPLETE: u8 = 2;
+pub const O_IGP: u8 = 0;
+pub const O_EGP: u8 = 1;
+pub const O_INCOMPLETE: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Origin {
-  Igp = ORIGIN_IGP,
-  Egp = ORIGIN_EGP,
-  Incomplete = ORIGIN_INCOMPLETE,
+  Igp = O_IGP,
+  Egp = O_EGP,
+  Incomplete = O_INCOMPLETE,
 }
 
 pub const N_HEADER: u8 = 1;

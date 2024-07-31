@@ -215,7 +215,7 @@ impl IpPrefix {
   }
 
   pub fn serialize(self, buf: &mut Vec<u8>) {
-    let prefix_bytes = self.len() / 8 + u8::from(self.len() % 8 != 0);
+    let prefix_bytes = self.len().div_ceil(8);
     buf.push(self.len());
     match self.prefix() {
       IpAddr::V4(v4) => {
@@ -256,7 +256,7 @@ impl IpPrefix {
       });
     }
     let mut buf = [0; M];
-    let prefix_bytes = len / 8 + u8::from(len % 8 != 0);
+    let prefix_bytes = len.div_ceil(8);
     reader.read_exact(&mut buf[0..prefix_bytes.into()]).await?;
     let inner = IpWithPrefix {
       addr: ctor(buf.into()),
