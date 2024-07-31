@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use strum::EnumDiscriminants;
+use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use HeaderError::*;
@@ -12,11 +12,6 @@ use OpenError::*;
 use UpdateError::*;
 
 pub const AS_TRANS: u16 = 23456;
-
-pub const MSG_OPEN: u8 = 1;
-pub const MSG_UPDATE: u8 = 2;
-pub const MSG_NOTIFICATION: u8 = 3;
-pub const MSG_KEEPALIVE: u8 = 4;
 
 pub trait MessageSend {
   fn serialize_data(&self, buf: &mut Vec<u8>);
@@ -40,16 +35,17 @@ pub trait MessageSend {
 }
 
 #[derive(Debug, Clone, EnumDiscriminants)]
+#[strum_discriminants(name(MessageKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum Message<'a> {
-  Open(OpenMessage<'a>) = MSG_OPEN,
-  Update(UpdateMessage<'a>) = MSG_UPDATE,
-  Notification(Notification<'a>) = MSG_NOTIFICATION,
-  Keepalive = MSG_KEEPALIVE,
+  Open(OpenMessage<'a>) = 1,
+  Update(UpdateMessage<'a>) = 2,
+  Notification(Notification<'a>) = 3,
+  Keepalive = 4,
 }
 
 impl Message<'_> {
-  pub fn kind(&self) -> MessageDiscriminants {
+  pub fn kind(&self) -> MessageKind {
     self.into()
   }
 }
@@ -59,13 +55,13 @@ impl Message<'static> {
     let mut header = [0; 19];
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
-      return Err(Notification::Header(HeaderError::ConnNotSynced).into());
+      return Err(Notification::Header(ConnNotSynced).into());
     }
     let len = u16::from_be_bytes(header[16..18].try_into().unwrap()) - 19;
     let msg_type = header[18];
 
     if len == 0 {
-      return if msg_type == MSG_KEEPALIVE {
+      return if msg_type == MessageKind::Keepalive as u8 {
         Ok(Self::Keepalive)
       } else {
         Err(Notification::Header(BadLen(len)).into())
@@ -73,11 +69,11 @@ impl Message<'static> {
     }
 
     let mut msg_reader = reader.take(len.into());
-    match msg_type {
-      MSG_OPEN => OpenMessage::recv(&mut msg_reader).await.map(Message::Open),
-      MSG_UPDATE => UpdateMessage::recv(&mut msg_reader).await.map(Message::Update),
-      MSG_NOTIFICATION => Notification::recv(&mut msg_reader).await.map(Message::Notification),
-      MSG_KEEPALIVE => Err(Notification::Header(BadLen(len)).into()),
+    match MessageKind::from_repr(msg_type) {
+      Some(MessageKind::Open) => OpenMessage::recv(&mut msg_reader).await.map(Message::Open),
+      Some(MessageKind::Update) => UpdateMessage::recv(&mut msg_reader).await.map(Message::Update),
+      Some(MessageKind::Notification) => Notification::recv(&mut msg_reader).await.map(Message::Notification),
+      Some(MessageKind::Keepalive) => Err(Notification::Header(BadLen(len)).into()),
       _ => Err(Notification::Header(BadType(msg_type)).into()),
     }
   }
@@ -98,7 +94,7 @@ impl MessageSend for Message<'_> {
       Self::Open(x) => x.serialize_data(buf),
       Self::Update(x) => x.serialize_data(buf),
       Self::Notification(x) => x.serialize_data(buf),
-      Self::Keepalive => buf.push(MSG_KEEPALIVE),
+      Self::Keepalive => buf.push(MessageKind::Keepalive as u8),
     }
   }
 }
@@ -215,7 +211,7 @@ impl MessageSend for OpenMessage<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
     assert!(self.my_as != AS_TRANS.into());
 
-    buf.extend([MSG_OPEN, 4]); // message type, BGP version
+    buf.extend([MessageKind::Open as u8, 4]); // message type, BGP version
     buf.extend(u16::to_be_bytes(self.my_as.try_into().unwrap_or(AS_TRANS))); // my AS (2b)
     buf.extend(u16::to_be_bytes(self.hold_time));
     buf.extend(u32::to_be_bytes(self.bgp_id));
@@ -267,12 +263,15 @@ pub const PF_PARTIAL: u8 = 0b0010_0000;
 pub const PF_EXT_LEN: u8 = 0b0001_0000;
 pub const PF_WELL_KNOWN: u8 = 0b0100_0000;
 
-// Path attribute types
-pub const P_ORIGIN: u8 = 1;
-pub const P_AS_PATH: u8 = 2;
-pub const P_NEXT_HOP: u8 = 3;
-pub const P_MP_REACH_NLRI: u8 = 14;
-pub const P_MP_UNREACH_NLRI: u8 = 15;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
+#[repr(u8)]
+pub enum PathAttr {
+  Origin = 1,
+  AsPath = 2,
+  NextHop = 3,
+  MpReachNlri = 14,
+  MpUnreachNlri = 15,
+}
 
 // Strictly, according to RFC 7606 Section 5.1, one UPDATE message MUST NOT
 // contain more than one kind of (un)reachability information. However we allow
@@ -345,29 +344,30 @@ impl UpdateMessage<'static> {
         return Err(Notification::Update(AttrFlags(pattr_buf)).into());
       }
 
-      match kind {
+      match PathAttr::from_repr(kind) {
         // Well-known attributes
-        P_ORIGIN | P_AS_PATH | P_NEXT_HOP if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
+        Some(PathAttr::Origin | PathAttr::AsPath | PathAttr::NextHop)
+          if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 =>
+        {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
-        P_ORIGIN => {
+        Some(PathAttr::Origin) => {
           if len != 1 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(AttrLen(pattr_buf)).into());
           }
-          result.origin = match pattrs_reader.read_u8().await? {
-            O_IGP => Origin::Igp,
-            O_EGP => Origin::Egp,
-            O_INCOMPLETE => Origin::Incomplete,
-            other => {
-              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [other]).await?;
+          let origin = pattrs_reader.read_u8().await?;
+          result.origin = match Origin::from_repr(origin) {
+            Some(x) => x,
+            None => {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [origin]).await?;
               return Err(Notification::Update(InvalidOrigin(pattr_buf)).into());
             }
-          }
+          };
         }
-        P_AS_PATH => {
+        Some(PathAttr::AsPath) => {
           if len % 4 != 0 {
-            return Err(Notification::Update(MalformedASPath).into());
+            return Err(Notification::Update(MalformedAsPath).into());
           }
           let mut as_path = Vec::new();
           let mut as_path_reader = (&mut pattrs_reader).take(len.into());
@@ -375,12 +375,12 @@ impl UpdateMessage<'static> {
             as_path.push(asn);
           }
           if result.as_path.len() != usize::from(len % 4) {
-            return Err(Notification::Update(MalformedASPath).into());
+            return Err(Notification::Update(MalformedAsPath).into());
           }
           as_path.reverse();
           result.as_path = as_path.into();
         }
-        P_NEXT_HOP => {
+        Some(PathAttr::NextHop) => {
           if len != 4 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
@@ -389,12 +389,12 @@ impl UpdateMessage<'static> {
         }
 
         // Known optional attributes
-        P_MP_REACH_NLRI | P_MP_UNREACH_NLRI
+        Some(PathAttr::MpReachNlri | PathAttr::MpUnreachNlri)
           if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
         {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
-        P_MP_REACH_NLRI => {
+        Some(PathAttr::MpReachNlri) => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
           match Nlri::recv_mp(&mut &opt_buf[..]).await {
@@ -405,7 +405,7 @@ impl UpdateMessage<'static> {
             }
           }
         }
-        P_MP_UNREACH_NLRI => {
+        Some(PathAttr::MpUnreachNlri) => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
           let mut unreach_reader = &*opt_buf;
@@ -459,11 +459,14 @@ impl UpdateMessage<'static> {
         next_hop,
       });
     } else if !old_prefixes.is_empty() {
-      return Err(Notification::Update(MissingWellKnownAttr(P_NEXT_HOP)).into());
+      return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
     }
 
+    PathAttr::NextHop as u16;
+
     if result.nlri.is_some() || result.old_nlri.is_some() {
-      for attr in [P_ORIGIN, P_AS_PATH] {
+      for attr in [PathAttr::Origin, PathAttr::AsPath] {
+        let attr = attr as u8;
         if !visited.contains(&attr) {
           return Err(Notification::Update(MissingWellKnownAttr(attr)).into());
         }
@@ -485,7 +488,7 @@ impl MessageSend for UpdateMessage<'_> {
       None => None,
     };
 
-    buf.push(MSG_UPDATE);
+    buf.push(MessageKind::Update as u8);
 
     // IPv4 withdrawn routes
     extend_with_u16_len(buf, |buf| {
@@ -499,18 +502,18 @@ impl MessageSend for UpdateMessage<'_> {
       }
       // MP_UNREACH_NLRI
       if !self.withdrawn.is_empty() {
-        buf.extend([PF_OPTIONAL | PF_EXT_LEN, P_MP_UNREACH_NLRI]);
+        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpUnreachNlri as u8]);
         self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(|p| p.serialize(buf));
       }
 
       // Path attributes
-      buf.extend([PF_WELL_KNOWN, P_ORIGIN, 1, self.origin as u8]);
+      buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.origin as u8]);
       let as_path_len = u8::try_from(self.as_path.len() * 4).expect("AS path length should fit in u8");
-      buf.extend([PF_WELL_KNOWN, P_AS_PATH, as_path_len]);
+      buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, as_path_len]);
       buf.extend(self.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
 
       if let Some((_, next_hop)) = &old_nlri {
-        buf.extend([PF_WELL_KNOWN, P_NEXT_HOP, 4]);
+        buf.extend([PF_WELL_KNOWN, PathAttr::NextHop as u8, 4]);
         buf.extend(next_hop.octets());
       }
     });
@@ -543,7 +546,7 @@ impl Nlri {
         let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
         let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
 
-        buf.extend([PF_OPTIONAL | PF_EXT_LEN, P_MP_REACH_NLRI]);
+        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpReachNlri as u8]);
         extend_with_u16_len(buf, |buf| {
           buf.extend(afi.to_be_bytes());
           buf.push(SAFI_UNICAST);
@@ -651,45 +654,35 @@ impl From<[Ipv6Addr; 2]> for NextHop {
   }
 }
 
-pub const O_IGP: u8 = 0;
-pub const O_EGP: u8 = 1;
-pub const O_INCOMPLETE: u8 = 2;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr)]
 #[repr(u8)]
 pub enum Origin {
-  Igp = O_IGP,
-  Egp = O_EGP,
-  Incomplete = O_INCOMPLETE,
+  Igp = 0,
+  Egp = 1,
+  Incomplete = 2,
 }
 
-pub const N_HEADER: u8 = 1;
-pub const N_OPEN: u8 = 2;
-pub const N_UPDATE: u8 = 3;
-pub const N_HOLD_TIMER_EXPIRED: u8 = 4;
-pub const N_FSM: u8 = 5;
-pub const N_CEASE: u8 = 6;
-
 #[derive(Debug, Clone, EnumDiscriminants, Error)]
+#[strum_discriminants(name(NotificationKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum Notification<'a> {
   #[error("message header error: {0}")]
-  Header(#[from] HeaderError) = N_HEADER,
+  Header(#[from] HeaderError) = 1,
 
   #[error("OPEN message error: {0}")]
-  Open(#[from] OpenError) = N_OPEN,
+  Open(#[from] OpenError) = 2,
 
   #[error("UPDATE message error: {0}")]
-  Update(UpdateError<'a>) = N_UPDATE,
+  Update(UpdateError<'a>) = 3,
 
   #[error("hold timer expired")]
-  HoldTimerExpired = N_HOLD_TIMER_EXPIRED,
+  HoldTimerExpired = 4,
 
   #[error("finite state machine error")]
-  Fsm = N_FSM,
+  Fsm = 5,
 
   #[error("ceasing operation")]
-  Cease = N_CEASE,
+  Cease = 6,
 
   #[error("unknown BGP error: ({0}, {1}, {2:02x?})")]
   Unknown(u8, u8, Cow<'a, [u8]>),
@@ -699,15 +692,15 @@ impl Notification<'_> {
   pub fn code(&self) -> u8 {
     match self {
       Self::Unknown(code, ..) => *code,
-      _ => NotificationDiscriminants::from(self) as u8,
+      _ => NotificationKind::from(self) as u8,
     }
   }
 
   pub fn subcode(&self) -> u8 {
     match self {
-      Self::Header(x) => HeaderErrorDiscriminants::from(x) as u8,
-      Self::Open(x) => OpenErrorDiscriminants::from(x) as u8,
-      Self::Update(x) => UpdateErrorDiscriminants::from(x) as u8,
+      Self::Header(x) => HeaderErrorKind::from(x) as u8,
+      Self::Open(x) => OpenErrorKind::from(x) as u8,
+      Self::Update(x) => UpdateErrorKind::from(x) as u8,
       Self::HoldTimerExpired | Self::Fsm | Self::Cease => 0,
       Self::Unknown(_, subcode, _) => *subcode,
     }
@@ -716,76 +709,49 @@ impl Notification<'_> {
 
 impl Notification<'static> {
   async fn recv<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+    use Notification::*;
+    use {HeaderErrorKind as HEK, NotificationKind as NK, OpenErrorKind as OEK, UpdateErrorKind as UEK};
+
     async fn to_vec<R: AsyncRead + Unpin>(ptr: &mut R) -> io::Result<Vec<u8>> {
       let mut buf = Vec::new();
       ptr.read_to_end(&mut buf).await?;
       Ok(buf)
     }
 
-    let code = ptr.read_u8().await?;
-    let subcode = ptr.read_u8().await?;
-    let notification = match code {
-      N_HEADER => {
-        let subcode_p = match subcode {
-          NH_CONN_NOT_SYNCED => Some(ConnNotSynced),
-          NH_BAD_LEN => Some(BadLen(ptr.read_u16().await?)),
-          NH_BAD_TYPE => Some(BadType(ptr.read_u8().await?)),
-          _ => None,
-        };
-        match subcode_p {
-          Some(x) => Notification::Header(x),
-          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
-        }
-      }
-      N_OPEN => {
-        let subcode_p = match subcode {
-          NO_UNSPECIFIC => Some(OpenError::Unspecific),
-          NO_UNSUPPORTED_VERSION => Some(UnsupportedVersion(ptr.read_u16().await?)),
-          NO_BAD_PEER_AS => Some(BadPeerAS),
-          NO_BAD_BGP_ID => Some(BadBGPID),
-          NO_UNSUPPORTED_OPT_PARAM => Some(UnsupportedOptParam),
-          NO_UNACCEPTABLE_HOLD_TIME => Some(UnacceptableHoldTime),
-          _ => None,
-        };
-        match subcode_p {
-          Some(x) => Notification::Open(x),
-          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
-        }
-      }
-      N_UPDATE => {
-        let subcode_p = match subcode {
-          NU_MALFORMED_ATTR_LIST => Some(MalformedAttrList),
-          NU_MISSING_WELL_KNOWN_ATTR => Some(MissingWellKnownAttr(ptr.read_u8().await?)),
-          NU_INVALID_NETWORK => Some(InvalidNetwork),
-          NU_MALFORMED_AS_PATH => Some(MalformedASPath),
-          NU_UNRECOGNIZED_WELL_KNOWN_ATTR
-          | NU_ATTR_FLAGS
-          | NU_ATTR_LEN
-          | NU_INVALID_ORIGIN
-          | NU_INVALID_NEXT_HOP
-          | NU_OPT_ATTR => {
-            let discrim_fn = match subcode {
-              NU_UNRECOGNIZED_WELL_KNOWN_ATTR => UpdateError::UnrecognizedWellKnownAttr,
-              NU_ATTR_FLAGS => UpdateError::AttrFlags,
-              NU_ATTR_LEN => UpdateError::AttrLen,
-              NU_INVALID_ORIGIN => UpdateError::InvalidOrigin,
-              NU_INVALID_NEXT_HOP => UpdateError::InvalidNextHop,
-              NU_OPT_ATTR => UpdateError::OptAttr,
-              _ => unreachable!(),
-            };
-            Some(discrim_fn(to_vec(ptr).await?.into()))
-          }
-          _ => None,
-        };
-        match subcode_p {
-          Some(x) => Notification::Update(x),
-          None => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
-        }
-      }
-      N_HOLD_TIMER_EXPIRED => Notification::HoldTimerExpired,
-      N_FSM => Notification::Fsm,
-      N_CEASE => Notification::Cease,
-      _ => Notification::Unknown(code, subcode, to_vec(ptr).await?.into()),
+    let [code, subcode] = ptr.read_u16().await?.to_be_bytes();
+    let notification = match NK::from_repr(code) {
+      Some(NK::Header) => match HEK::from_repr(subcode) {
+        Some(HEK::ConnNotSynced) => Header(ConnNotSynced),
+        Some(HEK::BadLen) => Header(BadLen(ptr.read_u16().await?)),
+        Some(HEK::BadType) => Header(BadType(ptr.read_u8().await?)),
+        _ => Unknown(code, subcode, to_vec(ptr).await?.into()),
+      },
+      Some(NK::Open) => match OEK::from_repr(subcode) {
+        Some(OEK::Unspecific) => Open(Unspecific),
+        Some(OEK::UnsupportedVersion) => Open(UnsupportedVersion(ptr.read_u16().await?)),
+        Some(OEK::BadPeerAs) => Open(BadPeerAs),
+        Some(OEK::BadBGPID) => Open(BadBGPID),
+        Some(OEK::UnsupportedOptParam) => Open(UnsupportedOptParam),
+        Some(OEK::UnacceptableHoldTime) => Open(UnacceptableHoldTime),
+        _ => Unknown(code, subcode, to_vec(ptr).await?.into()),
+      },
+      Some(NK::Update) => match UEK::from_repr(subcode) {
+        Some(UEK::MalformedAttrList) => Update(MalformedAttrList),
+        Some(UEK::MissingWellKnownAttr) => Update(MissingWellKnownAttr(ptr.read_u8().await?)),
+        Some(UEK::InvalidNetwork) => Update(InvalidNetwork),
+        Some(UEK::MalformedAsPath) => Update(MalformedAsPath),
+        Some(UEK::UnrecognizedWellKnownAttr) => Update(UnrecognizedWellKnownAttr(to_vec(ptr).await?.into())),
+        Some(UEK::AttrFlags) => Update(AttrFlags(to_vec(ptr).await?.into())),
+        Some(UEK::AttrLen) => Update(AttrLen(to_vec(ptr).await?.into())),
+        Some(UEK::InvalidOrigin) => Update(InvalidOrigin(to_vec(ptr).await?.into())),
+        Some(UEK::InvalidNextHop) => Update(InvalidNextHop(to_vec(ptr).await?.into())),
+        Some(UEK::OptAttr) => Update(OptAttr(to_vec(ptr).await?.into())),
+        _ => Unknown(code, subcode, to_vec(ptr).await?.into()),
+      },
+      Some(NK::HoldTimerExpired) => HoldTimerExpired,
+      Some(NK::Fsm) => Fsm,
+      Some(NK::Cease) => Cease,
+      _ => Unknown(code, subcode, to_vec(ptr).await?.into()),
     };
     Ok(notification)
   }
@@ -793,7 +759,7 @@ impl Notification<'static> {
 
 impl MessageSend for Notification<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
-    buf.extend([MSG_NOTIFICATION, self.code(), self.subcode()]);
+    buf.extend([MessageKind::Notification as u8, self.code(), self.subcode()]);
     match self {
       Self::Header(BadLen(x)) | Self::Open(UnsupportedVersion(x)) => buf.extend(u16::to_be_bytes(*x)),
       Self::Header(BadType(x)) | Self::Update(MissingWellKnownAttr(x)) => buf.push(*x),
@@ -802,9 +768,7 @@ impl MessageSend for Notification<'_> {
       | Self::Update(AttrLen(v))
       | Self::Update(InvalidOrigin(v))
       | Self::Update(InvalidNextHop(v))
-      | Self::Update(OptAttr(v)) => {
-        buf.extend(&v[..]);
-      }
+      | Self::Update(OptAttr(v)) => buf.extend(&v[..]),
       Self::Unknown(_, _, data) => buf.extend(&data[..]),
       _ => {}
     }
@@ -829,95 +793,76 @@ impl<T: Into<Notification<'static>>> SendAndReturn for T {
   }
 }
 
-pub const NH_CONN_NOT_SYNCED: u8 = 1;
-pub const NH_BAD_LEN: u8 = 2;
-pub const NH_BAD_TYPE: u8 = 3;
-
 #[derive(Debug, Clone, EnumDiscriminants, Error)]
+#[strum_discriminants(name(HeaderErrorKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum HeaderError {
   #[error("connection not synchronised")]
-  ConnNotSynced = NH_CONN_NOT_SYNCED,
+  ConnNotSynced = 1,
 
   #[error("bad message length: {0}")]
-  BadLen(u16) = NH_BAD_LEN,
+  BadLen(u16) = 2,
 
   #[error("bad message type: {0}")]
-  BadType(u8) = NH_BAD_TYPE,
+  BadType(u8) = 3,
 }
 
-pub const NO_UNSPECIFIC: u8 = 0;
-pub const NO_UNSUPPORTED_VERSION: u8 = 1;
-pub const NO_BAD_PEER_AS: u8 = 2;
-pub const NO_BAD_BGP_ID: u8 = 3;
-pub const NO_UNSUPPORTED_OPT_PARAM: u8 = 4;
-// value 5 is deprecated
-pub const NO_UNACCEPTABLE_HOLD_TIME: u8 = 6;
-
 #[derive(Debug, Clone, EnumDiscriminants, Error)]
+#[strum_discriminants(name(OpenErrorKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum OpenError {
   #[error("malformed optional parameter")]
-  Unspecific = NO_UNSPECIFIC,
+  Unspecific = 0,
 
   #[error("unsupported version number; we support at least/at most version {0}")]
-  UnsupportedVersion(u16) = NO_UNSUPPORTED_VERSION,
+  UnsupportedVersion(u16) = 1,
 
   #[error("bad peer AS")]
-  BadPeerAS = NO_BAD_PEER_AS,
+  BadPeerAs = 2,
 
   #[error("bad BGP ID")]
-  BadBGPID = NO_BAD_BGP_ID,
+  BadBGPID = 3,
 
   #[error("unsupported optional parameters")]
-  UnsupportedOptParam = NO_UNSUPPORTED_OPT_PARAM,
+  UnsupportedOptParam = 4,
 
+  // value 5 is deprecated
   #[error("unacceptable hold time")]
-  UnacceptableHoldTime = NO_UNACCEPTABLE_HOLD_TIME,
+  UnacceptableHoldTime = 6,
 }
 
-pub const NU_MALFORMED_ATTR_LIST: u8 = 1;
-pub const NU_UNRECOGNIZED_WELL_KNOWN_ATTR: u8 = 2;
-pub const NU_MISSING_WELL_KNOWN_ATTR: u8 = 3;
-pub const NU_ATTR_FLAGS: u8 = 4;
-pub const NU_ATTR_LEN: u8 = 5;
-pub const NU_INVALID_ORIGIN: u8 = 6;
-// value 7 is deprecated
-pub const NU_INVALID_NEXT_HOP: u8 = 8;
-pub const NU_OPT_ATTR: u8 = 9;
-pub const NU_INVALID_NETWORK: u8 = 10;
-pub const NU_MALFORMED_AS_PATH: u8 = 11;
-
 #[derive(Debug, Clone, EnumDiscriminants, Error)]
+#[strum_discriminants(name(UpdateErrorKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum UpdateError<'a> {
   #[error("malformed attribute list")]
-  MalformedAttrList = NU_MALFORMED_ATTR_LIST,
+  MalformedAttrList = 1,
 
   #[error("unrecognized well-known attribute: {0:02x?}")]
-  UnrecognizedWellKnownAttr(Cow<'a, [u8]>) = NU_UNRECOGNIZED_WELL_KNOWN_ATTR,
+  UnrecognizedWellKnownAttr(Cow<'a, [u8]>) = 2,
 
   #[error("missing well-known attribute type {0}")]
-  MissingWellKnownAttr(u8) = NU_MISSING_WELL_KNOWN_ATTR,
+  MissingWellKnownAttr(u8) = 3,
 
   #[error("attribute flags error: {0:02x?}")]
-  AttrFlags(Cow<'a, [u8]>) = NU_ATTR_FLAGS,
+  AttrFlags(Cow<'a, [u8]>) = 4,
 
   #[error("attribute length error: {0:02x?}")]
-  AttrLen(Cow<'a, [u8]>) = NU_ATTR_LEN,
+  AttrLen(Cow<'a, [u8]>) = 5,
 
   #[error("invalid ORIGIN attribute: {0:02x?}")]
-  InvalidOrigin(Cow<'a, [u8]>) = NU_INVALID_ORIGIN,
+  InvalidOrigin(Cow<'a, [u8]>) = 6,
 
+  // value 7 is deprecated
   #[error("invalid NEXT_HOP attribute: {0:02x?}")]
-  InvalidNextHop(Cow<'a, [u8]>) = NU_INVALID_NEXT_HOP,
+  InvalidNextHop(Cow<'a, [u8]>) = 8,
 
   #[error("optional attribute error: {0:02x?}")]
-  OptAttr(Cow<'a, [u8]>) = NU_OPT_ATTR,
+  OptAttr(Cow<'a, [u8]>) = 9,
 
   #[error("invalid network field")]
-  InvalidNetwork = NU_INVALID_NETWORK,
+  InvalidNetwork = 10,
 
   #[error("malformed AS_PATH")]
-  MalformedASPath = NU_MALFORMED_AS_PATH,
+  MalformedAsPath = 11,
 }

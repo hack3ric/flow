@@ -94,7 +94,7 @@ impl Session {
       OpenSent { stream } => match Message::recv(stream).await? {
         Message::Open(msg) => {
           if self.config.remote_as.map_or(false, |x| msg.my_as != x) {
-            BadPeerAS.send_and_return(stream).await
+            BadPeerAs.send_and_return(stream).await
           } else if msg.hold_time == 1 || msg.hold_time == 2 {
             UnacceptableHoldTime.send_and_return(stream).await
           } else {
