@@ -1,9 +1,13 @@
+//! Flowspec Operators, as specified in [RFC 8955 Section 4.2.1](https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1).
+
+use smallvec::SmallVec;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
 use std::marker::PhantomData;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-pub struct Ops<K: OpKind>(Box<[Op<K>]>);
+/// Operator sequence with values.
+pub struct Ops<K: OpKind>(SmallVec<[Op<K>; 4]>);
 
 impl<K: OpKind> Ops<K> {
   pub fn serialize(&self, buf: &mut Vec<u8>) {
@@ -57,7 +61,7 @@ impl<K: OpKind> Ops<K> {
 
 impl<K: OpKind> Debug for Ops<K> {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    Display::fmt(&self, f)
+    write!(f, "Ops({self})")
   }
 }
 
@@ -76,7 +80,7 @@ impl<K: OpKind> Clone for Ops<K> {
 pub struct Op<K: OpKind> {
   flags: u8,
   value: u64,
-  _phantom: PhantomData<K>,
+  _k: PhantomData<K>,
 }
 
 impl<K: OpKind> Op<K> {
@@ -111,8 +115,8 @@ impl<K: OpKind> Op<K> {
     };
     let eol = flags & 0b1000_0000 != 0;
     let flags = flags & K::FLAGS_MASK;
-    let _phantom = PhantomData;
-    Ok((Self { flags, value, _phantom }, eol))
+    let _k = PhantomData;
+    Ok((Self { flags, value, _k }, eol))
   }
 
   fn op(self, data: u64) -> bool {
@@ -146,7 +150,7 @@ impl<K: OpKind> Clone for Op<K> {
     Self {
       flags: self.flags.clone(),
       value: self.value.clone(),
-      _phantom: PhantomData,
+      _k: PhantomData,
     }
   }
 }
@@ -213,9 +217,9 @@ impl OpKind for BitmaskOp {
 
   fn op(flags: u8, d: u64, v: u64) -> bool {
     let result = if flags & Self::MATCH == 0 {
-      d & v == v
-    } else {
       d & v != 0
+    } else {
+      d & v == v
     };
     if flags & Self::NOT == 0 {
       result
@@ -239,4 +243,24 @@ pub trait OpKind {
   const FLAGS_MASK: u8;
   fn op(flags: u8, data: u64, value: u64) -> bool;
   fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use test_case::test_case;
+
+  const OP_NUM: PhantomData<NumericOp> = PhantomData;
+  const OP_BIT: PhantomData<BitmaskOp> = PhantomData;
+
+  #[test_case(OP_NUM, &[0b00000011, 114, 0b01010100, 2, 2, 0b10000001, 1], &[1, 114, 200], &[0, 2, 514]; "n ge 114 AND n lt 514 OR n eq 1")]
+  #[test_case(OP_BIT, &[0b10000001, 0b101], &[85, 1365, 65525, 65535], &[0, 1, 2, 114, 514]; "n bitand 0b101 eq 0b101")]
+  #[tokio::test]
+  async fn test_ops<K: OpKind>(_op: PhantomData<K>, mut seq: &[u8], aye: &[u64], nay: &[u64]) -> anyhow::Result<()> {
+    let ops = Ops::<K>::recv(&mut seq).await?;
+    dbg!(&ops);
+    aye.iter().for_each(|&n| assert!(ops.op(n), "!ops.op({n})"));
+    nay.iter().for_each(|&n| assert!(!ops.op(n), "ops.op({n})"));
+    Ok(())
+  }
 }
