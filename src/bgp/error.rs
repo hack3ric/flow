@@ -13,6 +13,9 @@ pub enum BgpError {
   #[error(transparent)]
   IpPrefix(IpPrefixError),
 
+  #[error("remote said: {0}")]
+  Remote(Notification<'static>),
+
   #[error("address {0} not acceptable")]
   UnacceptableAddr(IpAddr),
   #[error("session is already running")]

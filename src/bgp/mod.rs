@@ -22,14 +22,14 @@ pub struct Config {
   pub remote_ip: IpPrefix,
 }
 
-/// A passive BGP session.
+/// A (currently passive only) BGP session.
 ///
 /// Implemented RFCs:
 /// - RFC 4271: A Border Gateway Protocol 4 (BGP-4) \[partial\]
 ///   - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
 ///   - RFC 4760: Multiprotocol Extensions for BGP
 ///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
-///       Routing
+///       Routing (?)
 ///
 /// To be implemented:
 /// - RFC 8955: Dissemination of Flow Specification Rules
@@ -62,6 +62,7 @@ impl Session {
   }
 
   pub async fn accept(&mut self, mut stream: TcpStream, addr: IpAddr) -> Result<(), BgpError> {
+    let addr = addr.to_canonical();
     if !self.config.remote_ip.contains(addr) {
       return Err(BgpError::UnacceptableAddr(addr));
     } else if !matches!(self.state, Active) {
@@ -124,7 +125,7 @@ impl Session {
         }
         other => BadType(other.kind() as u8).send_and_return(stream).await,
       },
-      Established { .. } => pending().await,
+      Established { .. } => pending().await, // TODO: recv update
     }
   }
 }

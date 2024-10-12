@@ -79,9 +79,8 @@ impl Message<'static> {
   }
 
   pub async fn recv<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
-    // TODO: separate our error and their error
     match Message::recv_raw(socket).await {
-      Ok(Message::Notification(n)) => Err(n.into()),
+      Ok(Message::Notification(n)) => Err(BgpError::Remote(n.into())),
       Err(BgpError::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
     }
