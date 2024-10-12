@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anstyle = "1.0.8"
 anyhow = "1.0.86"
 clap = { version = "4.5.20", features = ["derive"] }
+clap-verbosity = "2.1.0"
+env_logger = "0.11.5"
 futures = "0.3.30"
 log = "0.4.21"
 pin-project = "1.1.5"
-pretty_env_logger = "0.5.0"
 replace_with = "0.1.7"
 smallvec = { version = "1.13.2", features = ["union", "const_generics", "const_new"]}
 strum = { version = "0.26.2", features = ["derive"] }

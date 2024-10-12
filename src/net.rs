@@ -46,7 +46,7 @@ impl IpWithPrefix {
 
   #[inline]
   const fn mask_raw(self) -> u128 {
-    u128::MAX << (prefix_max_len(self.addr) - self.prefix_len)
+    u128::MAX.wrapping_shl((prefix_max_len(self.addr) - self.prefix_len) as u32)
   }
 
   #[inline]

@@ -10,7 +10,7 @@ use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
 use replace_with::replace_with_or_abort;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use State::*;
@@ -19,7 +19,7 @@ pub struct Config {
   pub router_id: u32,
   pub local_as: u32,
   pub remote_as: Option<u32>,
-  pub remote_ip: IpPrefix,
+  pub remote_ip: Vec<IpPrefix>,
 }
 
 /// A (currently passive only) BGP session.
@@ -61,10 +61,10 @@ impl Session {
     Ok(())
   }
 
-  pub async fn accept(&mut self, mut stream: TcpStream, addr: IpAddr) -> Result<(), BgpError> {
-    let addr = addr.to_canonical();
-    if !self.config.remote_ip.contains(addr) {
-      return Err(BgpError::UnacceptableAddr(addr));
+  pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<(), BgpError> {
+    let ip = addr.ip();
+    if !self.config.remote_ip.iter().any(|x| x.contains(ip)) {
+      return Err(BgpError::UnacceptableAddr(ip));
     } else if !matches!(self.state, Active) {
       return Err(BgpError::AlreadyRunning);
     }
@@ -78,6 +78,7 @@ impl Session {
     self.state = OpenSent {
       stream: BufReader::new(stream),
     };
+    info!("accepting BGP connection from {addr}");
     Ok(())
   }
 

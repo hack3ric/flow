@@ -130,16 +130,16 @@ impl<K: OpKind> Op<K> {
 
 impl<K: OpKind> Debug for Op<K> {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    Display::fmt(&self, f)
+    write!(f, "Op({self})")
   }
 }
 
 impl<K: OpKind> Display for Op<K> {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     if self.and() {
-      f.write_str("(&&) ")?;
+      f.write_str("&& ")?;
     } else {
-      f.write_str("(||) ")?;
+      f.write_str("|| ")?;
     }
     K::fmt(f, self.flags, &"data", self.value)
   }
