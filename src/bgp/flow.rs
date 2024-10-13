@@ -1,7 +1,6 @@
 use super::error::BgpError;
 use crate::net::{IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
 use anyhow::anyhow;
-use log::info;
 use smallvec::SmallVec;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -343,7 +342,7 @@ impl Borrow<ComponentKind> for ComponentStore {
   }
 }
 
-#[derive(Debug, Clone, EnumDiscriminants)]
+#[derive(Clone, EnumDiscriminants)]
 #[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum Component {
@@ -422,6 +421,38 @@ impl Component {
     let pattern = u128::from_be_bytes(buf) >> offset;
     let prefix = IpWithPrefix::new(IpAddr::V6(pattern.into()), len).prefix();
     Ok(f(prefix, offset))
+  }
+}
+
+impl Debug for Component {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "Component({self})")
+  }
+}
+
+impl Display for Component {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::DestPrefix(pat, off) if pat.is_ipv6() && *off != 0 => {
+        write!(f, "dest_ip in {}/{}-{}", pat.prefix(), off, pat.len())
+      }
+      Self::DestPrefix(pat, _) => write!(f, "dest_ip in {pat}"),
+      Self::SrcPrefix(pat, off) if pat.is_ipv6() && *off != 0 => {
+        write!(f, "src_ip in {}/{}-{}", pat.prefix(), off, pat.len())
+      }
+      Self::SrcPrefix(pat, _) => write!(f, "src_ip in {pat}"),
+      Self::Protocol(ops) => ops.fmt(f, &"protocol"),
+      Self::Port(ops) => ops.fmt(f, &"port"),
+      Self::DestPort(ops) => ops.fmt(f, &"dest_port"),
+      Self::SrcPort(ops) => ops.fmt(f, &"src_port"),
+      Self::IcmpType(ops) => ops.fmt(f, &"icmp.type"),
+      Self::IcmpCode(ops) => ops.fmt(f, &"icmp.code"),
+      Self::TcpFlags(ops) => ops.fmt(f, &"tcp.flags"),
+      Self::PacketLen(ops) => ops.fmt(f, &"len"),
+      Self::Dscp(ops) => ops.fmt(f, &"dscp"),
+      Self::Fragment(ops) => ops.fmt(f, &"frag"),
+      Self::FlowLabel(ops) => ops.fmt(f, &"flow_label"),
+    }
   }
 }
 

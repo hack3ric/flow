@@ -563,18 +563,35 @@ pub enum Nlri {
 
 impl Nlri {
   fn serialize_mp_reach(&self, buf: &mut Vec<u8>) {
+    self.serialize_mp(buf, true);
+  }
+
+  fn serialize_mp_unreach(&self, buf: &mut Vec<u8>) {
+    self.serialize_mp(buf, false);
+  }
+
+  fn serialize_mp(&self, buf: &mut Vec<u8>, reach: bool) {
     match self {
       Self::Route { prefixes, next_hop } => {
         let mut iter = prefixes.iter().peekable();
         let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
         let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
 
-        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpReachNlri as u8]);
+        buf.extend([
+          PF_OPTIONAL | PF_EXT_LEN,
+          if reach {
+            PathAttr::MpReachNlri
+          } else {
+            PathAttr::MpUnreachNlri
+          } as u8,
+        ]);
         extend_with_u16_len(buf, |buf| {
           buf.extend(afi.to_be_bytes());
           buf.push(SAFI_UNICAST);
-          next_hop.serialize_mp(buf);
-          buf.push(0); // reserved
+          if reach {
+            next_hop.serialize_mp(buf);
+            buf.push(0); // reserved
+          }
           iter.for_each(|p| {
             assert_eq!(p.is_ipv4(), is_ipv4, "NLRI contains multiple kinds of prefix");
             p.serialize(buf)
@@ -585,43 +602,32 @@ impl Nlri {
     }
   }
 
-  fn serialize_mp_unreach(&self, buf: &mut Vec<u8>) {
-    match self {
-      Nlri::Route { prefixes, .. } => {
-        let mut iter = prefixes.iter().peekable();
-        let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
-        let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
-
-        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpUnreachNlri as u8]);
-        extend_with_u16_len(buf, |buf| {
-          buf.extend(afi.to_be_bytes());
-          buf.push(SAFI_UNICAST);
-          iter.for_each(|p| {
-            assert_eq!(p.is_ipv4(), is_ipv4, "NLRI contains multiple kinds of prefix");
-            p.serialize(buf)
-          });
-        });
-      }
-      Nlri::Flow(spec) => todo!(),
-    }
+  async fn recv_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    Self::recv_mp(reader, true).await
   }
 
-  async fn recv_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  async fn recv_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    Self::recv_mp(reader, false).await
+  }
+
+  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self, BgpError> {
     let afi = reader.read_u16().await?;
     let safi = reader.read_u8().await?;
-    let next_hop = NextHop::recv_mp(reader).await?;
-    let _reserved = reader.read_u8().await?;
+    let next_hop;
+    if reach {
+      next_hop = NextHop::recv_mp(reader).await?;
+      let _reserved = reader.read_u8().await?;
+    } else {
+      next_hop = if safi == SAFI_FLOW {
+        None
+      } else {
+        Some(NextHop::V6(Ipv6Addr::UNSPECIFIED, None))
+      };
+    };
     match (afi, safi, next_hop) {
-      (AFI_IPV4, SAFI_UNICAST, Some(next_hop)) => {
+      (AFI_IPV4, SAFI_UNICAST, Some(next_hop)) | (AFI_IPV6, SAFI_UNICAST, Some(next_hop @ NextHop::V6(..))) => {
         let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
-          prefixes.insert(prefix);
-        }
-        Ok(Self::Route { prefixes, next_hop })
-      }
-      (AFI_IPV6, SAFI_UNICAST, Some(next_hop @ NextHop::V6(..))) => {
-        let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv_v6(reader).await? {
+        while let Some(prefix) = IpPrefix::recv(reader, afi == AFI_IPV6).await? {
           prefixes.insert(prefix);
         }
         Ok(Self::Route { prefixes, next_hop })
@@ -634,36 +640,6 @@ impl Nlri {
         Ok(Self::Flow(specs))
       }
       (_, SAFI_UNICAST, None) | (_, SAFI_FLOW, Some(_)) => return Err(anyhow!("invalid next hop").into()),
-      _ => return Err(anyhow!("unknown (AFI, SAFI) tuple").into()),
-    }
-  }
-
-  async fn recv_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    let afi = reader.read_u16().await?;
-    let safi = reader.read_u8().await?;
-    let next_hop = NextHop::V6(Ipv6Addr::UNSPECIFIED, None);
-    match (afi, safi) {
-      (AFI_IPV4, SAFI_UNICAST) => {
-        let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
-          prefixes.insert(prefix);
-        }
-        Ok(Self::Route { prefixes, next_hop })
-      }
-      (AFI_IPV6, SAFI_UNICAST) => {
-        let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv_v6(reader).await? {
-          prefixes.insert(prefix);
-        }
-        Ok(Self::Route { prefixes, next_hop })
-      }
-      (_, SAFI_FLOW) => {
-        let mut specs = SmallVec::new_const();
-        while let Some(spec) = FlowSpec::recv(reader, afi == AFI_IPV6).await? {
-          specs.push(spec);
-        }
-        Ok(Self::Flow(specs))
-      }
       _ => return Err(anyhow!("unknown (AFI, SAFI) tuple").into()),
     }
   }

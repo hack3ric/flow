@@ -231,6 +231,14 @@ impl IpPrefix {
     Self::recv_generic::<128, 16, _, _>(reader, IpAddr::V6).await
   }
 
+  pub(crate) async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, IpPrefixError> {
+    if v6 {
+      Self::recv_v6(reader).await
+    } else {
+      Self::recv_v4(reader).await
+    }
+  }
+
   async fn recv_generic<const L: u8, const M: usize, T, R>(
     reader: &mut R,
     ctor: fn(T) -> IpAddr,
