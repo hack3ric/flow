@@ -116,10 +116,7 @@ impl FromStr for IpWithPrefix {
 impl From<IpAddr> for IpWithPrefix {
   #[inline]
   fn from(addr: IpAddr) -> Self {
-    Self {
-      addr,
-      prefix_len: prefix_max_len(addr),
-    }
+    Self { addr, prefix_len: prefix_max_len(addr) }
   }
 }
 
@@ -133,10 +130,7 @@ pub struct IpWithPrefixError {
 impl IpWithPrefixError {
   #[inline]
   fn new(kind: impl Into<IpWithPrefixErrorKind>, value: impl Into<String>) -> Self {
-    Self {
-      kind: kind.into(),
-      value: value.into(),
-    }
+    Self { kind: kind.into(), value: value.into() }
   }
 }
 
@@ -250,26 +244,17 @@ impl IpPrefix {
       return Ok(None);
     };
     if len > L {
-      return Err(IpPrefixError {
-        kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, L).into(),
-        value: None,
-      });
+      return Err(IpPrefixError { kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, L).into(), value: None });
     }
     let mut buf = [0; M];
     let prefix_bytes = len.div_ceil(8);
     reader.read_exact(&mut buf[0..prefix_bytes.into()]).await?;
-    let inner = IpWithPrefix {
-      addr: ctor(buf.into()),
-      prefix_len: len,
-    };
+    let inner = IpWithPrefix { addr: ctor(buf.into()), prefix_len: len };
     let result = inner.prefix();
     if result.inner == inner {
       Ok(Some(result))
     } else {
-      Err(IpPrefixError {
-        kind: IpPrefixErrorKind::TrailingBitsNonZero,
-        value: None,
-      })
+      Err(IpPrefixError { kind: IpPrefixErrorKind::TrailingBitsNonZero, value: None })
     }
   }
 }
@@ -293,18 +278,14 @@ impl FromStr for IpPrefix {
 
   #[inline]
   fn from_str(s: &str) -> Result<Self, Self::Err> {
-    let inner = s.parse::<IpWithPrefix>().map_err(|e| IpPrefixError {
-      kind: e.kind.into(),
-      value: Some(e.value),
-    })?;
+    let inner = s
+      .parse::<IpWithPrefix>()
+      .map_err(|e| IpPrefixError { kind: e.kind.into(), value: Some(e.value) })?;
     let result = inner.prefix();
     if result.inner == inner {
       Ok(result)
     } else {
-      Err(IpPrefixError {
-        kind: IpPrefixErrorKind::TrailingBitsNonZero,
-        value: Some(s.into()),
-      })
+      Err(IpPrefixError { kind: IpPrefixErrorKind::TrailingBitsNonZero, value: Some(s.into()) })
     }
   }
 }
@@ -334,10 +315,7 @@ impl Display for IpPrefixError {
 
 impl From<io::Error> for IpPrefixError {
   fn from(e: io::Error) -> Self {
-    Self {
-      kind: IpPrefixErrorKind::Io(e),
-      value: None,
-    }
+    Self { kind: IpPrefixErrorKind::Io(e), value: None }
   }
 }
 

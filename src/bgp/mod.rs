@@ -9,10 +9,16 @@ use log::info;
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
+use num::integer::gcd;
 use replace_with::replace_with_or_abort;
+use std::cmp::min;
+use std::future::Future;
 use std::net::SocketAddr;
-use tokio::io::BufReader;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::TcpStream;
+use tokio::select;
+use tokio::time::{interval, Interval};
 use State::*;
 
 pub struct Config {
@@ -20,6 +26,30 @@ pub struct Config {
   pub local_as: u32,
   pub remote_as: Option<u32>,
   pub remote_ip: Vec<IpPrefix>,
+  pub hold_timer: u16,
+}
+
+#[derive(Debug)]
+pub enum State {
+  Idle,
+  #[allow(dead_code)]
+  Connect, // never used in passive mode
+  Active,
+  OpenSent {
+    stream: BufReader<TcpStream>,
+  },
+  OpenConfirm {
+    stream: BufReader<TcpStream>,
+    remote_open: OpenMessage<'static>,
+  },
+  Established {
+    stream: BufReader<TcpStream>,
+    #[allow(unused)]
+    remote_open: OpenMessage<'static>,
+    clock: Interval,
+    hold_timer: Option<(Duration, Instant)>,
+    keepalive_timer: Option<(Duration, Instant)>,
+  },
 }
 
 /// A (currently passive only) BGP session.
@@ -70,14 +100,12 @@ impl Session {
     }
     let open = OpenMessage {
       my_as: self.config.local_as,
-      hold_time: 180,
+      hold_time: self.config.hold_timer,
       bgp_id: self.config.router_id,
       ..Default::default()
     };
     open.send(&mut stream).await?;
-    self.state = OpenSent {
-      stream: BufReader::new(stream),
-    };
+    self.state = OpenSent { stream: BufReader::new(stream) };
     info!("accepting BGP connection from {addr}");
     Ok(())
   }
@@ -91,27 +119,30 @@ impl Session {
   }
 
   async fn process_inner(&mut self) -> Result<(), BgpError> {
+    fn bad_type<'a>(
+      msg: Message,
+      stream: &'a mut (impl AsyncWrite + Unpin),
+    ) -> impl Future<Output = Result<(), BgpError>> + 'a {
+      BadType(msg.kind() as u8).send_and_return(stream)
+    }
+
     match &mut self.state {
       Idle | Connect | Active => pending().await,
       OpenSent { stream } => match Message::recv(stream).await? {
         Message::Open(msg) => {
           if self.config.remote_as.map_or(false, |x| msg.my_as != x) {
-            BadPeerAs.send_and_return(stream).await
+            BadPeerAs.send_and_return(stream).await?;
           } else if msg.hold_time == 1 || msg.hold_time == 2 {
-            UnacceptableHoldTime.send_and_return(stream).await
+            UnacceptableHoldTime.send_and_return(stream).await?;
           } else {
             Message::Keepalive.send(stream).await?;
             replace_with_or_abort(&mut self.state, |this| {
               let OpenSent { stream } = this else { unreachable!() };
-              OpenConfirm {
-                stream,
-                remote_open: msg,
-              }
+              OpenConfirm { stream, remote_open: msg }
             });
-            Ok(())
           }
         }
-        other => BadType(other.kind() as u8).send_and_return(stream).await,
+        other => bad_type(other, stream).await?,
       },
       OpenConfirm { stream, .. } => match Message::recv(stream).await? {
         Message::Keepalive => {
@@ -119,33 +150,53 @@ impl Session {
             let OpenConfirm { stream, remote_open } = this else {
               unreachable!()
             };
-            Established { stream, remote_open }
+            let hold_time = min(self.config.hold_timer, remote_open.hold_time);
+            let keepalive_time = hold_time / 3;
+            let hold_timer = (hold_time != 0)
+              .then(|| Duration::from_secs(hold_time.into()))
+              .map(|x| (x, Instant::now() + x));
+            let keepalive_timer = (keepalive_time != 0)
+              .then(|| Duration::from_secs(keepalive_time.into()))
+              .map(|x| (x, Instant::now() + x));
+            Established {
+              stream,
+              remote_open,
+              clock: interval(Duration::from_secs(gcd(hold_time, keepalive_time).into())),
+              hold_timer,
+              keepalive_timer,
+            }
           });
           info!("established");
-          Ok(())
         }
-        other => BadType(other.kind() as u8).send_and_return(stream).await,
+        other => bad_type(other, stream).await?,
       },
-      Established { .. } => pending().await, // TODO: recv update
+      Established { stream, clock, hold_timer, keepalive_timer, .. } => select! {
+        msg = Message::recv(stream) => {
+          match msg? {
+            Message::Update(msg) => {
+              info!("received update: {msg:#?}");
+              // TODO: process
+            }
+            Message::Keepalive => if let Some((dur, next)) = hold_timer {
+              *next = Instant::now() + *dur;
+            },
+            other => bad_type(other, stream).await?,
+          };
+        }
+        _ = clock.tick() => {
+          if let &mut Some((_, next)) = hold_timer {
+            if next <= Instant::now() {
+              Notification::HoldTimerExpired.send_and_return(stream).await?;
+            }
+          }
+          if let &mut Some((_, next)) = keepalive_timer {
+            if next <= Instant::now() {
+              Message::Keepalive.send(stream).await?;
+            }
+          }
+        }
+      },
     }
+    Ok(())
   }
-}
-
-#[derive(Debug)]
-pub enum State {
-  Idle,
-  #[allow(dead_code)]
-  Connect, // never used in passive mode
-  Active,
-  OpenSent {
-    stream: BufReader<TcpStream>,
-  },
-  OpenConfirm {
-    stream: BufReader<TcpStream>,
-    remote_open: OpenMessage<'static>,
-  },
-  Established {
-    stream: BufReader<TcpStream>,
-    remote_open: OpenMessage<'static>,
-  },
 }

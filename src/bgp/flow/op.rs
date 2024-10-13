@@ -147,11 +147,7 @@ impl<K: OpKind> Display for Op<K> {
 
 impl<K: OpKind> Clone for Op<K> {
   fn clone(&self) -> Self {
-    Self {
-      flags: self.flags.clone(),
-      value: self.value.clone(),
-      _k: PhantomData,
-    }
+    Self { flags: self.flags.clone(), value: self.value.clone(), _k: PhantomData }
   }
 }
 

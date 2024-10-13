@@ -453,10 +453,7 @@ impl UpdateMessage<'static> {
       return Err(Notification::Update(InvalidNetwork).into());
     }
     if let Some(next_hop) = old_next_hop {
-      result.old_nlri = Some(Nlri::Route {
-        prefixes: old_prefixes,
-        next_hop,
-      });
+      result.old_nlri = Some(Nlri::Route { prefixes: old_prefixes, next_hop });
     } else if !old_prefixes.is_empty() {
       return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
     }
@@ -479,10 +476,7 @@ impl UpdateMessage<'static> {
 impl MessageSend for UpdateMessage<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
     let old_nlri = match &self.old_nlri {
-      Some(Nlri::Route {
-        prefixes,
-        next_hop: NextHop::V4(next_hop),
-      }) => Some((prefixes, next_hop)),
+      Some(Nlri::Route { prefixes, next_hop: NextHop::V4(next_hop) }) => Some((prefixes, next_hop)),
       Some(_) => panic!("BGP-4 NLRI supports IPv4 only"),
       None => None,
     };
@@ -529,10 +523,7 @@ impl MessageSend for UpdateMessage<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nlri {
-  Route {
-    prefixes: HashSet<IpPrefix>,
-    next_hop: NextHop,
-  },
+  Route { prefixes: HashSet<IpPrefix>, next_hop: NextHop },
   // TODO: flowspec
 }
 

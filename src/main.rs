@@ -8,6 +8,7 @@ use env_logger::fmt::Formatter;
 use log::{error, info, Record};
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::process::exit;
 use tokio::net::TcpListener;
 use tokio::select;
 
@@ -38,6 +39,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     local_as: args.local_as,
     remote_as: args.remote_as,
     remote_ip: vec!["0.0.0.0/0".parse()?, "::/0".parse()?],
+    hold_timer: 180,
   });
   info!("Flow listening to {} as AS{}", args.bind, args.local_as);
   loop {
@@ -90,5 +92,6 @@ async fn main() {
     .init();
   if let Err(error) = run(args).await {
     error!("fatal error: {error}");
+    exit(1);
   }
 }
