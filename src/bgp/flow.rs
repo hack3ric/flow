@@ -1,13 +1,23 @@
-//! Flowspec Operators, as specified in [RFC 8955 Section 4.2.1](https://www.rfc-editor.org/rfc/rfc8955#section-4.2.1).
-
+use super::error::BgpError;
+use crate::net::{IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use anyhow::anyhow;
+use log::info;
 use smallvec::SmallVec;
+use std::borrow::Borrow;
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
 use std::marker::PhantomData;
+use std::net::IpAddr;
+use strum::{EnumDiscriminants, FromRepr};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Operator sequence with values.
 pub struct Ops<K: OpKind>(SmallVec<[Op<K>; 4]>);
+
+pub type NumericOps = Ops<NumericOp>;
+pub type BitmaskOps = Ops<BitmaskOp>;
 
 impl<K: OpKind> Ops<K> {
   pub fn serialize(&self, buf: &mut Vec<u8>) {
@@ -239,6 +249,180 @@ pub trait OpKind {
   const FLAGS_MASK: u8;
   fn op(flags: u8, data: u64, value: u64) -> bool;
   fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowSpec(BTreeSet<ComponentStore>);
+
+impl FlowSpec {
+  pub fn is_v4(&self) -> bool {
+    if let Component::DestPrefix(p, _) | Component::SrcPrefix(p, _) = &(self.0)
+      .get(&ComponentKind::DestPrefix)
+      .or_else(|| self.0.get(&ComponentKind::SrcPrefix))
+      .unwrap()
+      .0
+    {
+      p.is_ipv4()
+    } else {
+      unreachable!();
+    }
+  }
+
+  pub fn is_v6(&self) -> bool {
+    !self.is_v4()
+  }
+
+  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, BgpError> {
+    let mut len_bytes = [0; 2];
+    if let Ok(n) = reader.read_u8().await {
+      len_bytes[0] = n;
+    } else {
+      return Ok(None);
+    }
+    let len = if len_bytes[0] & 0xf0 == 0xf0 {
+      len_bytes[0] &= 0x0f;
+      len_bytes[1] = reader.read_u8().await?;
+      u16::from_be_bytes(len_bytes)
+    } else {
+      len_bytes[0].into()
+    };
+    let mut flow_reader = reader.take(len.into());
+    let mut set = BTreeSet::<ComponentStore>::new();
+    while let Some(comp) = Component::recv(&mut flow_reader, v6).await? {
+      if set.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
+        return Err(anyhow!("flowspec components must be unique and sorted by type").into());
+      }
+      set.insert(ComponentStore(comp));
+    }
+    Ok(Some(Self(set)))
+  }
+}
+
+#[derive(Debug, Clone)]
+struct ComponentStore(Component);
+
+impl PartialEq for ComponentStore {
+  fn eq(&self, other: &Self) -> bool {
+    self.0.kind() == other.0.kind()
+  }
+}
+
+impl Eq for ComponentStore {}
+
+impl PartialOrd for ComponentStore {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    self.0.kind().partial_cmp(&other.0.kind())
+  }
+}
+
+impl Ord for ComponentStore {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.0.kind().cmp(&other.0.kind())
+  }
+}
+
+impl Borrow<ComponentKind> for ComponentStore {
+  fn borrow(&self) -> &ComponentKind {
+    use Component::*;
+    use ComponentKind as CK;
+    match self.0 {
+      DestPrefix(..) => &CK::DestPrefix,
+      SrcPrefix(..) => &CK::SrcPrefix,
+      Protocol(..) => &CK::Protocol,
+      Port(..) => &CK::Port,
+      DestPort(..) => &CK::DestPort,
+      SrcPort(..) => &CK::SrcPort,
+      IcmpType(..) => &CK::IcmpType,
+      IcmpCode(..) => &CK::IcmpCode,
+      TcpFlags(..) => &CK::TcpFlags,
+      PacketLen(..) => &CK::PacketLen,
+      Dscp(..) => &CK::Dscp,
+      Fragment(..) => &CK::Fragment,
+      FlowLabel(..) => &CK::FlowLabel,
+    }
+  }
+}
+
+#[derive(Debug, Clone, EnumDiscriminants)]
+#[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
+#[repr(u8)]
+pub enum Component {
+  DestPrefix(IpPrefix, u8) = 1,
+  SrcPrefix(IpPrefix, u8) = 2,
+  Protocol(NumericOps) = 3,
+  Port(NumericOps) = 4,
+  DestPort(NumericOps) = 5,
+  SrcPort(NumericOps) = 6,
+  IcmpType(NumericOps) = 7,
+  IcmpCode(NumericOps) = 8,
+  TcpFlags(BitmaskOps) = 9,
+  PacketLen(NumericOps) = 10,
+  Dscp(NumericOps) = 11,
+  Fragment(BitmaskOps) = 12,
+  FlowLabel(NumericOps) = 13,
+}
+
+impl Component {
+  pub fn kind(&self) -> ComponentKind {
+    self.into()
+  }
+
+  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, BgpError> {
+    use ComponentKind as CK;
+
+    let Ok(kind) = reader.read_u8().await else {
+      return Ok(None);
+    };
+    let result = match ComponentKind::from_repr(kind) {
+      Some(CK::DestPrefix) if !v6 => Self::parse_v4_prefix(Self::DestPrefix, reader).await?,
+      Some(CK::SrcPrefix) if !v6 => Self::parse_v4_prefix(Self::SrcPrefix, reader).await?,
+      Some(CK::DestPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::DestPrefix, reader).await?,
+      Some(CK::SrcPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::SrcPrefix, reader).await?,
+      Some(CK::Protocol) => Self::Protocol(Ops::recv(reader).await?),
+      Some(CK::Port) => Self::Port(Ops::recv(reader).await?),
+      Some(CK::DestPort) => Self::DestPort(Ops::recv(reader).await?),
+      Some(CK::SrcPort) => Self::SrcPort(Ops::recv(reader).await?),
+      Some(CK::IcmpType) => Self::IcmpType(Ops::recv(reader).await?),
+      Some(CK::IcmpCode) => Self::IcmpCode(Ops::recv(reader).await?),
+      Some(CK::TcpFlags) => Self::TcpFlags(Ops::recv(reader).await?),
+      Some(CK::PacketLen) => Self::PacketLen(Ops::recv(reader).await?),
+      Some(CK::Dscp) => Self::Dscp(Ops::recv(reader).await?),
+      Some(CK::Fragment) => Self::Fragment(Ops::recv(reader).await?),
+      Some(CK::FlowLabel) => Self::FlowLabel(Ops::recv(reader).await?),
+      _ => return Err(anyhow!("unsupported flow component kind: {kind}").into()),
+    };
+    Ok(Some(result))
+  }
+
+  async fn parse_v4_prefix(
+    f: fn(IpPrefix, u8) -> Self,
+    reader: &mut (impl AsyncRead + Unpin),
+  ) -> Result<Self, BgpError> {
+    let prefix = IpPrefix::recv_v4(reader)
+      .await?
+      .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    Ok(f(prefix, 0))
+  }
+
+  async fn parse_v6_prefix_pattern(
+    f: fn(IpPrefix, u8) -> Self,
+    reader: &mut (impl AsyncRead + Unpin),
+  ) -> Result<Self, BgpError> {
+    let len = reader.read_u8().await?;
+    if len > 128 {
+      return Err(IpPrefixError { kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, 128).into(), value: None }.into());
+    }
+    let offset = reader.read_u8().await?;
+    if offset >= len {
+      return Err(anyhow!("IPv6 prefix component offset too big").into());
+    }
+    let mut buf = [0; 16];
+    let pattern_bytes = (len - offset).div_ceil(8);
+    reader.read_exact(&mut buf[0..pattern_bytes.into()]).await?;
+    let pattern = u128::from_be_bytes(buf) >> offset;
+    let prefix = IpWithPrefix::new(IpAddr::V6(pattern.into()), len).prefix();
+    Ok(f(prefix, offset))
+  }
 }
 
 #[cfg(test)]

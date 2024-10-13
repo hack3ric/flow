@@ -12,6 +12,8 @@ pub enum BgpError {
   Notification(#[from] Notification<'static>),
   #[error(transparent)]
   IpPrefix(IpPrefixError),
+  #[error(transparent)]
+  Anyhow(#[from] anyhow::Error),
 
   #[error("remote said: {0}")]
   Remote(Notification<'static>),

@@ -1,7 +1,12 @@
 use super::error::BgpError;
+use super::flow::FlowSpec;
 use crate::net::{IpPrefix, IpPrefixError};
+use anyhow::anyhow;
+use log::error;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
@@ -12,6 +17,9 @@ use OpenError::*;
 use UpdateError::*;
 
 pub const AS_TRANS: u16 = 23456;
+
+// pub const AS_SET: u8 = 1;
+pub const AS_SEQUENCE: u8 = 2;
 
 pub trait MessageSend {
   fn serialize_data(&self, buf: &mut Vec<u8>);
@@ -53,6 +61,7 @@ impl Message<'_> {
 impl Message<'static> {
   pub async fn recv_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     let mut header = [0; 19];
+    // TODO: conn closed if early eof when reading preamble
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
       return Err(Notification::Header(ConnNotSynced).into());
@@ -220,13 +229,18 @@ impl MessageSend for OpenMessage<'_> {
       // Capabilities
       buf.push(OPT_PARAM_CAP);
       extend_with_u8_len(buf, |buf| {
-        [(AFI_IPV4, SAFI_UNICAST), (AFI_IPV6, SAFI_UNICAST)]
-          .into_iter()
-          .for_each(|(afi, safi)| {
-            buf.extend([CAP_BGP_MP, 4]);
-            buf.extend(u16::to_be_bytes(afi));
-            buf.extend([0, safi]);
-          });
+        [
+          (AFI_IPV4, SAFI_UNICAST),
+          (AFI_IPV6, SAFI_UNICAST),
+          (AFI_IPV4, SAFI_FLOW),
+          (AFI_IPV6, SAFI_FLOW),
+        ]
+        .into_iter()
+        .for_each(|(afi, safi)| {
+          buf.extend([CAP_BGP_MP, 4]);
+          buf.extend(u16::to_be_bytes(afi));
+          buf.extend([0, safi]);
+        });
         buf.extend([CAP_4B_ASN, 4]);
         buf.extend(u32::to_be_bytes(self.my_as));
         self.other_caps.iter().for_each(|(kind, value)| {
@@ -279,7 +293,8 @@ pub enum PathAttr {
 // TODO: communities...
 #[derive(Debug, Clone)]
 pub struct UpdateMessage<'a> {
-  withdrawn: HashSet<IpPrefix>,
+  withdrawn: Option<Nlri>,
+  old_withdrawn: Option<Nlri>,
   nlri: Option<Nlri>,
   old_nlri: Option<Nlri>,
   origin: Origin,
@@ -301,7 +316,8 @@ impl UpdateMessage<'static> {
 
   async fn recv_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> Result<Self, BgpError> {
     let mut result = Self {
-      withdrawn: HashSet::new(),
+      withdrawn: None,
+      old_withdrawn: None,
       nlri: None,
       old_nlri: None,
       origin: Origin::Incomplete,
@@ -311,8 +327,13 @@ impl UpdateMessage<'static> {
 
     let withdrawn_len = reader.read_u16().await?;
     let mut withdrawn_reader = (&mut reader).take(withdrawn_len.into());
+    let mut withdrawn_prefixes = HashSet::new();
     while let Some(prefix) = IpPrefix::recv_v4(&mut withdrawn_reader).await? {
-      result.withdrawn.insert(prefix);
+      withdrawn_prefixes.insert(prefix);
+    }
+    if !withdrawn_prefixes.is_empty() {
+      result.old_withdrawn =
+        Some(Nlri::Route { prefixes: withdrawn_prefixes, next_hop: NextHop::V4(Ipv4Addr::UNSPECIFIED) });
     }
 
     let mut visited = HashSet::new();
@@ -365,15 +386,24 @@ impl UpdateMessage<'static> {
           };
         }
         Some(PathAttr::AsPath) => {
-          if len % 4 != 0 {
+          if len % 4 != 2 {
+            return Err(Notification::Update(MalformedAsPath).into());
+          }
+          let seg_type = pattrs_reader.read_u8().await?; // TODO: check seg_type
+          if seg_type != AS_SEQUENCE {
+            error!("unknown AS_PATH segment type: {seg_type}");
+            return Err(Notification::Update(MalformedAsPath).into());
+          }
+          let as_len = pattrs_reader.read_u8().await?;
+          if u16::from(as_len) != len / 4 {
             return Err(Notification::Update(MalformedAsPath).into());
           }
           let mut as_path = Vec::new();
-          let mut as_path_reader = (&mut pattrs_reader).take(len.into());
+          let mut as_path_reader = (&mut pattrs_reader).take((as_len * 4).into());
           while let Ok(asn) = as_path_reader.read_u32().await {
             as_path.push(asn);
           }
-          if result.as_path.len() != usize::from(len % 4) {
+          if as_path.len() != as_len.into() {
             return Err(Notification::Update(MalformedAsPath).into());
           }
           as_path.reverse();
@@ -396,7 +426,7 @@ impl UpdateMessage<'static> {
         Some(PathAttr::MpReachNlri) => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          match Nlri::recv_mp(&mut &opt_buf[..]).await {
+          match Nlri::recv_mp_reach(&mut &opt_buf[..]).await {
             Ok(nlri) => result.nlri = Some(nlri),
             Err(_) => {
               let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
@@ -405,18 +435,15 @@ impl UpdateMessage<'static> {
           }
         }
         Some(PathAttr::MpUnreachNlri) => {
+          // TODO: wrong
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          let mut unreach_reader = &*opt_buf;
-          let exec = async {
-            while let Some(prefix) = IpPrefix::recv_v6(&mut unreach_reader).await? {
-              result.withdrawn.insert(prefix);
+          match Nlri::recv_mp_unreach(&mut &opt_buf[..]).await {
+            Ok(nlri) => result.withdrawn = Some(nlri),
+            Err(_) => {
+              let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
+              return Err(Notification::Update(OptAttr(pattr_buf)).into());
             }
-            Ok::<_, IpPrefixError>(())
-          };
-          if exec.await.is_err() {
-            let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
           }
         }
 
@@ -483,20 +510,26 @@ impl MessageSend for UpdateMessage<'_> {
 
     buf.push(MessageKind::Update as u8);
 
-    // IPv4 withdrawn routes
+    // BGP-4 withdrawn routes
     extend_with_u16_len(buf, |buf| {
-      self.withdrawn.iter().filter(|x| x.is_ipv4()).for_each(|p| p.serialize(buf));
+      let Some(Nlri::Route { prefixes, .. }) = &self.old_withdrawn else {
+        panic!("BGP-4 withdrawn routes support IPv4 only");
+      };
+      prefixes.iter().for_each(|p| {
+        assert!(p.is_ipv4(), "BGP-4 withdrawn routes support IPv4 only");
+        p.serialize(buf)
+      });
     });
 
     extend_with_u16_len(buf, |buf| {
       // MP_REACH_NLRI
       if let Some(nlri) = &self.nlri {
-        nlri.serialize_mp(buf);
+        nlri.serialize_mp_reach(buf);
       }
+
       // MP_UNREACH_NLRI
-      if !self.withdrawn.is_empty() {
-        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpUnreachNlri as u8]);
-        self.withdrawn.iter().filter(|x| x.is_ipv6()).for_each(|p| p.serialize(buf));
+      if let Some(withdrawn) = &self.withdrawn {
+        withdrawn.serialize_mp_unreach(buf);
       }
 
       // Path attributes
@@ -505,13 +538,14 @@ impl MessageSend for UpdateMessage<'_> {
       buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, as_path_len]);
       buf.extend(self.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
 
+      // BGP-4 next hop
       if let Some((_, next_hop)) = &old_nlri {
         buf.extend([PF_WELL_KNOWN, PathAttr::NextHop as u8, 4]);
         buf.extend(next_hop.octets());
       }
     });
 
-    // IPv4 NLRI
+    // BGP-4 NLRI
     if let Some((prefixes, _)) = &old_nlri {
       prefixes.iter().for_each(|p| {
         assert!(p.is_ipv4(), "BGP-4 NLRI supports IPv4 only");
@@ -524,12 +558,11 @@ impl MessageSend for UpdateMessage<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nlri {
   Route { prefixes: HashSet<IpPrefix>, next_hop: NextHop },
-  // TODO: flowspec
+  Flow(SmallVec<[FlowSpec; 4]>),
 }
 
 impl Nlri {
-  /// Serialize to MP_REACH_NLRI.
-  fn serialize_mp(&self, buf: &mut Vec<u8>) {
+  fn serialize_mp_reach(&self, buf: &mut Vec<u8>) {
     match self {
       Self::Route { prefixes, next_hop } => {
         let mut iter = prefixes.iter().peekable();
@@ -548,29 +581,91 @@ impl Nlri {
           });
         });
       }
+      Self::Flow(spec) => todo!(),
     }
   }
 
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, IpPrefixError> {
+  fn serialize_mp_unreach(&self, buf: &mut Vec<u8>) {
+    match self {
+      Nlri::Route { prefixes, .. } => {
+        let mut iter = prefixes.iter().peekable();
+        let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
+        let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
+
+        buf.extend([PF_OPTIONAL | PF_EXT_LEN, PathAttr::MpUnreachNlri as u8]);
+        extend_with_u16_len(buf, |buf| {
+          buf.extend(afi.to_be_bytes());
+          buf.push(SAFI_UNICAST);
+          iter.for_each(|p| {
+            assert_eq!(p.is_ipv4(), is_ipv4, "NLRI contains multiple kinds of prefix");
+            p.serialize(buf)
+          });
+        });
+      }
+      Nlri::Flow(spec) => todo!(),
+    }
+  }
+
+  async fn recv_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     let afi = reader.read_u16().await?;
     let safi = reader.read_u8().await?;
     let next_hop = NextHop::recv_mp(reader).await?;
-    let mut prefixes = HashSet::new();
+    let _reserved = reader.read_u8().await?;
     match (afi, safi, next_hop) {
-      (AFI_IPV4, SAFI_UNICAST, _) => {
+      (AFI_IPV4, SAFI_UNICAST, Some(next_hop)) => {
+        let mut prefixes = HashSet::new();
         while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
           prefixes.insert(prefix);
         }
+        Ok(Self::Route { prefixes, next_hop })
       }
-      (AFI_IPV6, SAFI_UNICAST, NextHop::V6(..)) => {
+      (AFI_IPV6, SAFI_UNICAST, Some(next_hop @ NextHop::V6(..))) => {
+        let mut prefixes = HashSet::new();
         while let Some(prefix) = IpPrefix::recv_v6(reader).await? {
           prefixes.insert(prefix);
         }
+        Ok(Self::Route { prefixes, next_hop })
       }
-      // TODO: flow
-      _ => return Err(io::Error::other("dummy").into()),
+      (_, SAFI_FLOW, None) => {
+        let mut specs = SmallVec::new_const();
+        while let Some(spec) = FlowSpec::recv(reader, afi == AFI_IPV6).await? {
+          specs.push(spec);
+        }
+        Ok(Self::Flow(specs))
+      }
+      (_, SAFI_UNICAST, None) | (_, SAFI_FLOW, Some(_)) => return Err(anyhow!("invalid next hop").into()),
+      _ => return Err(anyhow!("unknown (AFI, SAFI) tuple").into()),
     }
-    todo!();
+  }
+
+  async fn recv_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    let afi = reader.read_u16().await?;
+    let safi = reader.read_u8().await?;
+    let next_hop = NextHop::V6(Ipv6Addr::UNSPECIFIED, None);
+    match (afi, safi) {
+      (AFI_IPV4, SAFI_UNICAST) => {
+        let mut prefixes = HashSet::new();
+        while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
+          prefixes.insert(prefix);
+        }
+        Ok(Self::Route { prefixes, next_hop })
+      }
+      (AFI_IPV6, SAFI_UNICAST) => {
+        let mut prefixes = HashSet::new();
+        while let Some(prefix) = IpPrefix::recv_v6(reader).await? {
+          prefixes.insert(prefix);
+        }
+        Ok(Self::Route { prefixes, next_hop })
+      }
+      (_, SAFI_FLOW) => {
+        let mut specs = SmallVec::new_const();
+        while let Some(spec) = FlowSpec::recv(reader, afi == AFI_IPV6).await? {
+          specs.push(spec);
+        }
+        Ok(Self::Flow(specs))
+      }
+      _ => return Err(anyhow!("unknown (AFI, SAFI) tuple").into()),
+    }
   }
 }
 
@@ -599,15 +694,16 @@ impl NextHop {
     }
   }
 
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
+  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Self>> {
     let len = reader.read_u8().await?;
     match len {
-      4 => Ok(Self::V4(reader.read_u32().await?.into())),
-      16 => Ok(Self::V6(reader.read_u128().await?.into(), None)),
-      32 => Ok(Self::V6(
+      0 => Ok(None),
+      4 => Ok(Some(Self::V4(reader.read_u32().await?.into()))),
+      16 => Ok(Some(Self::V6(reader.read_u128().await?.into(), None))),
+      32 => Ok(Some(Self::V6(
         reader.read_u128().await?.into(),
         Some(reader.read_u128().await?.into()),
-      )),
+      ))),
       _ => Err(io::Error::other("dummy")),
     }
   }
