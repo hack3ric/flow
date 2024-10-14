@@ -2,7 +2,7 @@ use super::error::BgpError;
 use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
 use crate::bgp::extend_with_u8_len;
-use crate::net::{IpPrefix, IpPrefixError};
+use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -212,16 +212,16 @@ impl MessageSend for OpenMessage<'_> {
       buf.push(OPT_PARAM_CAP);
       extend_with_u8_len(buf, |buf| {
         [
-          (AFI_IPV4, NlriKind::Unicast as u8),
-          (AFI_IPV6, NlriKind::Unicast as u8),
-          (AFI_IPV4, NlriKind::Flow as u8),
-          (AFI_IPV6, NlriKind::Flow as u8),
+          (Afi::Ipv4, NlriKind::Unicast),
+          (Afi::Ipv6, NlriKind::Unicast),
+          (Afi::Ipv4, NlriKind::Flow),
+          (Afi::Ipv6, NlriKind::Flow),
         ]
         .into_iter()
         .for_each(|(afi, safi)| {
           buf.extend([CAP_BGP_MP, 4]);
-          buf.extend(u16::to_be_bytes(afi));
-          buf.extend([0, safi]);
+          buf.extend(u16::to_be_bytes(afi as _));
+          buf.extend([0, safi as u8]);
         });
         buf.extend([CAP_4B_ASN, 4]);
         buf.extend(u32::to_be_bytes(self.my_as));
@@ -231,9 +231,9 @@ impl MessageSend for OpenMessage<'_> {
           buf.extend(&value[..]);
         });
         buf.extend([CAP_EXT_NEXTHOP, 6]);
-        buf.extend(AFI_IPV4.to_be_bytes());
-        buf.extend([0, NlriKind::Unicast as u8]);
-        buf.extend(AFI_IPV6.to_be_bytes());
+        buf.extend(u16::to_be_bytes(Afi::Ipv4 as _));
+        buf.extend([0, NlriKind::Unicast as _]);
+        buf.extend(u16::to_be_bytes(Afi::Ipv6 as _));
       });
 
       self.other_opt_params.iter().for_each(|(kind, value)| {
@@ -244,10 +244,6 @@ impl MessageSend for OpenMessage<'_> {
     });
   }
 }
-
-// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
-pub const AFI_IPV4: u16 = 1;
-pub const AFI_IPV6: u16 = 2;
 
 // Path attribute flags
 pub const PF_OPTIONAL: u8 = 0b1000_0000;
@@ -278,14 +274,17 @@ pub struct UpdateMessage<'a> {
   nlri: Option<Nlri>,
   old_nlri: Option<Nlri>,
   origin: Origin,
+
   /// AS path, stored in reverse.
   as_path: Cow<'a, [u32]>,
+
   /// Transitive but unrecognized path attributes.
   other_attrs: HashMap<u8, Cow<'a, [u8]>>,
 }
 
 impl UpdateMessage<'_> {
-  pub fn is_end_of_rib(&self) -> Option<(bool, NlriKind)> {
+  pub fn is_end_of_rib(&self) -> Option<(Afi, NlriKind)> {
+    use NlriContent::*;
     if self.old_withdrawn.is_some()
       || self.nlri.is_some()
       || self.old_nlri.is_some()
@@ -294,10 +293,11 @@ impl UpdateMessage<'_> {
     {
       return None;
     }
-
     match &self.withdrawn {
-      Some(Nlri { ipv6, content: kind }) => Some((*ipv6, kind.into())),
-      None => Some((false, NlriKind::Unicast)),
+      Some(Nlri { afi, content: c @ Unicast { prefixes, .. } }) if prefixes.is_empty() => Some((*afi, c.into())),
+      Some(Nlri { afi, content: c @ Flow { specs } }) if specs.is_empty() => Some((*afi, c.into())),
+      Some(_) => None,
+      None => Some((Afi::Ipv4, NlriKind::Unicast)),
     }
   }
 }
@@ -330,7 +330,7 @@ impl UpdateMessage<'static> {
       withdrawn_prefixes.insert(prefix);
     }
     if !withdrawn_prefixes.is_empty() {
-      result.old_withdrawn = Some(Nlri::new_route(false, withdrawn_prefixes, None)?);
+      result.old_withdrawn = Some(Nlri::new_route(Afi::Ipv4, withdrawn_prefixes, None)?);
     }
 
     let mut visited = HashSet::new();
@@ -477,7 +477,7 @@ impl UpdateMessage<'static> {
       return Err(Notification::Update(InvalidNetwork).into());
     }
     if let Some(next_hop) = old_next_hop {
-      result.old_nlri = Some(Nlri::new_route(false, old_prefixes, Some(next_hop))?);
+      result.old_nlri = Some(Nlri::new_route(Afi::Ipv4, old_prefixes, Some(next_hop))?);
     } else if !old_prefixes.is_empty() {
       return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
     }
@@ -628,7 +628,7 @@ impl Notification<'static> {
         Some(OEK::Unspecific) => Open(Unspecific),
         Some(OEK::UnsupportedVersion) => Open(UnsupportedVersion(ptr.read_u16().await?)),
         Some(OEK::BadPeerAs) => Open(BadPeerAs),
-        Some(OEK::BadBGPID) => Open(BadBGPID),
+        Some(OEK::BadBgpId) => Open(BadBgpId),
         Some(OEK::UnsupportedOptParam) => Open(UnsupportedOptParam),
         Some(OEK::UnacceptableHoldTime) => Open(UnacceptableHoldTime),
         _ => Unknown(code, subcode, to_vec(ptr).await?.into()),
@@ -720,7 +720,7 @@ pub enum OpenError {
   BadPeerAs = 2,
 
   #[error("bad BGP ID")]
-  BadBGPID = 3,
+  BadBgpId = 3,
 
   #[error("unsupported optional parameters")]
   UnsupportedOptParam = 4,

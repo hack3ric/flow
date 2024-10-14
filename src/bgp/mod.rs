@@ -43,6 +43,7 @@ pub enum State {
   OpenConfirm {
     stream: BufReader<TcpStream>,
     remote_open: OpenMessage<'static>,
+    // TODO: timer here
   },
   Established {
     stream: BufReader<TcpStream>,
@@ -58,14 +59,12 @@ pub enum State {
 ///
 /// Implemented RFCs:
 /// - RFC 4271: A Border Gateway Protocol 4 (BGP-4) \[partial\]
-///   - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
-///   - RFC 4760: Multiprotocol Extensions for BGP
-///     - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
-///       Routing (?)
-///
-/// To be implemented:
+/// - RFC 6793: BGP Support for Four-Octet Autonomous System (AS) Number Space
+/// - RFC 4760: Multiprotocol Extensions for BGP
+/// - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
+///   Routing (?)
 /// - RFC 8955: Dissemination of Flow Specification Rules
-///   - RFC 8956: Dissemination of Flow Specification Rules for IPv6
+/// - RFC 8956: Dissemination of Flow Specification Rules for IPv6
 pub struct Session {
   config: Config,
   state: State,
@@ -176,11 +175,10 @@ impl Session {
         msg = Message::recv(stream) => {
           match msg? {
             Message::Update(msg) => {
-              if let Some((ipv6, safi)) = msg.is_end_of_rib() {
-                let afi = if ipv6 { "IPv6" } else { "IPv6" };
+              if let Some((afi, safi)) = msg.is_end_of_rib() {
                 info!("received End-of-RIB of ({afi}, {safi:?})");
               } else {
-                info!("received update: {msg:#?}");
+                info!("received update: {msg:?}");
               }
               // TODO: process
             }

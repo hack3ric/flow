@@ -1,5 +1,5 @@
 use super::error::BgpError;
-use crate::net::{IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -14,23 +14,23 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct FlowSpec {
-  ipv6: bool,
+  afi: Afi,
   inner: BTreeSet<ComponentStore>,
 }
 
 impl FlowSpec {
-  pub fn new(ipv6: bool) -> Self {
-    Self { ipv6, inner: Default::default() }
+  pub fn new(afi: Afi) -> Self {
+    Self { afi, inner: Default::default() }
   }
   pub fn new_v4() -> Self {
-    Self::new(false)
+    Self::new(Afi::Ipv4)
   }
   pub fn new_v6() -> Self {
-    Self::new(true)
+    Self::new(Afi::Ipv6)
   }
 
   pub fn insert(&mut self, c: Component) -> Result<(), FlowError> {
-    if !c.is_valid(self.ipv6) {
+    if !c.is_valid(self.afi) {
       return Err(FlowError::Invalid);
     }
     let kind = c.kind();
@@ -44,17 +44,21 @@ impl FlowSpec {
     self.insert(c)?;
     Ok(self)
   }
+
+  pub fn afi(&self) -> Afi {
+    self.afi
+  }
   pub fn is_ipv4(&self) -> bool {
-    !self.ipv6
+    self.afi == Afi::Ipv4
   }
   pub fn is_ipv6(&self) -> bool {
-    self.ipv6
+    self.afi == Afi::Ipv6
   }
 
   pub fn serialize(&self, buf: &mut Vec<u8>) {
     let mut buf2 = Vec::new();
     self.inner.iter().for_each(|ComponentStore(c)| {
-      assert!(c.is_valid(self.ipv6)); // TODO: relax this if we have flowspec builder
+      assert!(c.is_valid(self.afi)); // TODO: relax this if we have flowspec builder
       c.serialize(&mut buf2);
     });
     let len: u16 = buf2.len().try_into().expect("flowspec length should fit in u16");
@@ -67,7 +71,7 @@ impl FlowSpec {
     buf.extend(buf2);
   }
 
-  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, ipv6: bool) -> Result<Option<Self>, BgpError> {
+  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
     let mut len_bytes = [0; 2];
     if let Ok(n) = reader.read_u8().await {
       len_bytes[0] = n;
@@ -83,7 +87,7 @@ impl FlowSpec {
     };
     let mut flow_reader = reader.take(len.into());
     let mut inner = BTreeSet::<ComponentStore>::new();
-    while let Some(comp) = Component::recv(&mut flow_reader, ipv6).await? {
+    while let Some(comp) = Component::recv(&mut flow_reader, afi).await? {
       if inner.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
         return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
       }
@@ -92,13 +96,13 @@ impl FlowSpec {
         return Err(FlowError::Duplicate(kind).into());
       }
     }
-    Ok(Some(Self { ipv6, inner }))
+    Ok(Some(Self { afi, inner }))
   }
   pub async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
-    Self::recv(reader, false).await
+    Self::recv(reader, Afi::Ipv4).await
   }
   pub async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
-    Self::recv(reader, true).await
+    Self::recv(reader, Afi::Ipv6).await
   }
 }
 
@@ -228,17 +232,17 @@ impl Component {
     }
   }
 
-  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, BgpError> {
+  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
     use ComponentKind as CK;
 
     let Ok(kind) = reader.read_u8().await else {
       return Ok(None);
     };
     let result = match ComponentKind::from_repr(kind) {
-      Some(CK::DstPrefix) if !v6 => Self::parse_v4_prefix(Self::DstPrefix, reader).await?,
-      Some(CK::SrcPrefix) if !v6 => Self::parse_v4_prefix(Self::SrcPrefix, reader).await?,
-      Some(CK::DstPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::DstPrefix, reader).await?,
-      Some(CK::SrcPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::SrcPrefix, reader).await?,
+      Some(CK::DstPrefix) if afi == Afi::Ipv4 => Self::parse_v4_prefix(Self::DstPrefix, reader).await?,
+      Some(CK::SrcPrefix) if afi == Afi::Ipv4 => Self::parse_v4_prefix(Self::SrcPrefix, reader).await?,
+      Some(CK::DstPrefix) if afi == Afi::Ipv6 => Self::parse_v6_prefix_pattern(Self::DstPrefix, reader).await?,
+      Some(CK::SrcPrefix) if afi == Afi::Ipv6 => Self::parse_v6_prefix_pattern(Self::SrcPrefix, reader).await?,
       Some(CK::Protocol) => Self::Protocol(Ops::recv(reader).await?),
       Some(CK::Port) => Self::Port(Ops::recv(reader).await?),
       Some(CK::DstPort) => Self::DstPort(Ops::recv(reader).await?),
@@ -255,11 +259,10 @@ impl Component {
     Ok(Some(result))
   }
 
-  fn is_valid(&self, v6: bool) -> bool {
-    if v6 {
-      self.is_valid_v6()
-    } else {
-      self.is_valid_v4()
+  fn is_valid(&self, afi: Afi) -> bool {
+    match afi {
+      Afi::Ipv4 => self.is_valid_v4(),
+      Afi::Ipv6 => self.is_valid_v6(),
     }
   }
 
@@ -481,10 +484,10 @@ impl<K: OpKind> Op<K> {
       0x100000000..=0xffffffffffffffff => 3,
     };
     match len {
-      0 => buf.push(self.value as u8),
-      1 => buf.extend((self.value as u16).to_be_bytes()),
-      2 => buf.extend((self.value as u32).to_be_bytes()),
-      3 => buf.extend(self.value.to_be_bytes()),
+      0 => buf.push(self.value as _),
+      1 => buf.extend(u16::to_be_bytes(self.value as _)),
+      2 => buf.extend(u32::to_be_bytes(self.value as _)),
+      3 => buf.extend(u64::to_be_bytes(self.value)),
       _ => unreachable!(),
     };
     buf[op_pos] = (self.flags & K::FLAGS_MASK) | (len << 4) | (u8::from(eol) << 7);

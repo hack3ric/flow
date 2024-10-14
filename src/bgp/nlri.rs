@@ -3,11 +3,10 @@
 use super::error::BgpError;
 use super::extend_with_u16_len;
 use super::flow::FlowSpec;
-use super::msg::{PathAttr, AFI_IPV4, AFI_IPV6, PF_EXT_LEN, PF_OPTIONAL};
-use crate::net::IpPrefix;
+use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
+use crate::net::{Afi, IpPrefix};
 use smallvec::SmallVec;
 use std::collections::HashSet;
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -16,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// Network Layer Reachability Information (NLRI).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nlri {
-  pub(super) ipv6: bool,
+  pub(super) afi: Afi,
   pub(super) content: NlriContent,
 }
 
@@ -25,32 +24,32 @@ pub struct Nlri {
 #[strum_discriminants(name(NlriKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum NlriContent {
-  Unicast { prefixes: HashSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LSM trie
+  Unicast { prefixes: HashSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LPM trie
   Flow { specs: SmallVec<[FlowSpec; 4]> } = 133,
 }
 
 impl Nlri {
-  pub fn new_route(ipv6: bool, prefixes: HashSet<IpPrefix>, next_hop: Option<NextHop>) -> Result<Self, NlriError> {
+  pub fn new_route(afi: Afi, prefixes: HashSet<IpPrefix>, next_hop: Option<NextHop>) -> Result<Self, NlriError> {
     for prefix in &prefixes {
-      if prefix.is_ipv6() != ipv6 {
-        return Err(NlriError::MultipleAddrFamilies(ipv6));
+      if prefix.afi() != afi {
+        return Err(NlriError::MultipleAddrFamilies(afi));
       }
     }
     let next_hop = match next_hop {
       Some(next_hop) => next_hop,
-      _ if ipv6 => NextHop::V6(Ipv6Addr::UNSPECIFIED, None),
+      _ if afi == Afi::Ipv6 => NextHop::V6(Ipv6Addr::UNSPECIFIED, None),
       _ => NextHop::V4(Ipv4Addr::UNSPECIFIED),
     };
-    Ok(Self { ipv6, content: NlriContent::Unicast { prefixes, next_hop } })
+    Ok(Self { afi, content: NlriContent::Unicast { prefixes, next_hop } })
   }
 
-  pub fn new_flow(ipv6: bool, specs: SmallVec<[FlowSpec; 4]>) -> Result<Self, NlriError> {
+  pub fn new_flow(afi: Afi, specs: SmallVec<[FlowSpec; 4]>) -> Result<Self, NlriError> {
     for spec in &specs {
-      if spec.is_ipv6() != ipv6 {
-        return Err(NlriError::MultipleAddrFamilies(ipv6));
+      if spec.afi() != afi {
+        return Err(NlriError::MultipleAddrFamilies(afi));
       }
     }
-    Ok(Self { ipv6, content: NlriContent::Flow { specs } })
+    Ok(Self { afi, content: NlriContent::Flow { specs } })
   }
 
   pub fn kind(&self) -> &NlriContent {
@@ -72,11 +71,7 @@ impl Nlri {
         PathAttr::MpUnreachNlri
       } as u8,
     ]);
-    if self.ipv6 {
-      buf.extend(AFI_IPV6.to_be_bytes());
-    } else {
-      buf.extend(AFI_IPV4.to_be_bytes());
-    }
+    buf.extend(u16::to_be_bytes(self.afi as _));
     match self.kind() {
       NlriContent::Unicast { prefixes, next_hop } => {
         extend_with_u16_len(buf, |buf| {
@@ -85,10 +80,7 @@ impl Nlri {
             next_hop.serialize_mp(buf);
             buf.push(0); // reserved
           }
-          prefixes.iter().for_each(|p| {
-            assert_eq!(p.is_ipv6(), self.ipv6, "NLRI contains multiple kinds of prefix");
-            p.serialize(buf)
-          });
+          prefixes.iter().for_each(|p| p.serialize(buf));
         });
       }
       NlriContent::Flow { specs } => {
@@ -97,10 +89,7 @@ impl Nlri {
           if reach {
             buf.extend([0; 2]); // null next hop, reserved
           }
-          specs.iter().for_each(|s| {
-            assert_eq!(s.is_ipv6(), self.ipv6, "NLRI contains flowspecs of multiple protocols");
-            s.serialize(buf);
-          });
+          specs.iter().for_each(|s| s.serialize(buf));
         });
       }
     }
@@ -122,24 +111,24 @@ impl Nlri {
     } else {
       next_hop = (safi != NlriKind::Flow as u8).then_some(NextHop::V6(Ipv6Addr::UNSPECIFIED, None));
     };
-    match (afi, NlriKind::from_repr(safi), next_hop) {
-      (AFI_IPV4, Some(NlriKind::Unicast), Some(next_hop))
-      | (AFI_IPV6, Some(NlriKind::Unicast), Some(next_hop @ NextHop::V6(..))) => {
+    match (Afi::from_repr(afi), NlriKind::from_repr(safi), next_hop) {
+      (Some(afi @ Afi::Ipv4), Some(NlriKind::Unicast), Some(next_hop))
+      | (Some(afi @ Afi::Ipv6), Some(NlriKind::Unicast), Some(next_hop @ NextHop::V6(..))) => {
         let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv(reader, afi == AFI_IPV6).await? {
+        while let Some(prefix) = IpPrefix::recv(reader, afi).await? {
           prefixes.insert(prefix);
         }
-        Ok(Self::new_route(afi == AFI_IPV6, prefixes, Some(next_hop))?)
+        Ok(Self::new_route(afi, prefixes, Some(next_hop))?)
       }
-      (_, Some(NlriKind::Flow), None) => {
+      (Some(afi), Some(NlriKind::Flow), None) => {
         let mut specs = SmallVec::new_const();
-        while let Some(spec) = FlowSpec::recv(reader, afi == AFI_IPV6).await? {
+        while let Some(spec) = FlowSpec::recv(reader, afi).await? {
           specs.push(spec);
         }
-        Ok(Self::new_flow(afi == AFI_IPV6, specs)?)
+        Ok(Self::new_flow(afi, specs)?)
       }
-      (_, Some(kind @ NlriKind::Unicast), None) | (_, Some(kind @ NlriKind::Flow), Some(_)) => {
-        return Err(NlriError::InvalidNextHop { ipv6: afi == AFI_IPV6, kind, next_hop }.into())
+      (Some(afi), Some(kind @ NlriKind::Unicast), None) | (Some(afi), Some(kind @ NlriKind::Flow), Some(_)) => {
+        return Err(NlriError::InvalidNextHop { afi, kind, next_hop }.into())
       }
       _ => return Err(NlriError::UnknownTuple(afi, safi).into()),
     }
@@ -174,7 +163,7 @@ impl NextHop {
     }
   }
 
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Self>> {
+  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
     let len = reader.read_u8().await?;
     match len {
       0 => Ok(None),
@@ -184,7 +173,7 @@ impl NextHop {
         reader.read_u128().await?.into(),
         Some(reader.read_u128().await?.into()),
       ))),
-      _ => Err(io::Error::other("dummy")),
+      _ => Err(NlriError::InvalidNextHopLen(len).into()),
     }
   }
 }
@@ -222,10 +211,15 @@ impl From<[Ipv6Addr; 2]> for NextHop {
 
 #[derive(Debug, Clone, Error)]
 pub enum NlriError {
-  #[error("{} NLRI contains {} information", if *.0 { "IPv6" } else { "IPv4" }, if *.0 { "IPv4" } else { "IPv6" })]
-  MultipleAddrFamilies(bool),
-  #[error("NLRI ({}, {kind:?}) contains invalid next hop: {next_hop:?}", if *.ipv6 { "IPv6" } else { "IPv4" })]
-  InvalidNextHop { ipv6: bool, kind: NlriKind, next_hop: Option<NextHop> },
+  #[error("{0} NLRI contains {} information", if *.0 == Afi::Ipv6 { Afi::Ipv4 } else { Afi::Ipv6 })]
+  MultipleAddrFamilies(Afi),
+
+  #[error("NLRI ({afi}, {kind:?}) contains invalid next hop: {next_hop:?}")]
+  InvalidNextHop { afi: Afi, kind: NlriKind, next_hop: Option<NextHop> },
+
+  #[error("invalid next hop length: {0}")]
+  InvalidNextHopLen(u8),
+
   #[error("unknown (AFI, SAFI) tuple: ({0}, {1})")]
   UnknownTuple(u16, u8),
 }

@@ -3,8 +3,26 @@ use std::io;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::str::FromStr;
+use strum::FromRepr;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
+#[repr(u16)]
+pub enum Afi {
+  Ipv4 = 1,
+  Ipv6 = 2,
+}
+
+impl Display for Afi {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Ipv4 => f.write_str("IPv4"),
+      Self::Ipv6 => f.write_str("IPv6"),
+    }
+  }
+}
 
 /// Max prefix length of a certain IP type.
 pub const fn prefix_max_len(prefix: IpAddr) -> u8 {
@@ -32,13 +50,11 @@ impl IpWithPrefix {
   }
 
   #[inline]
-  #[allow(dead_code)]
   pub const fn addr(self) -> IpAddr {
     self.addr
   }
 
   #[inline]
-  #[allow(dead_code)]
   pub const fn prefix_len(self) -> u8 {
     self.prefix_len
   }
@@ -68,10 +84,17 @@ impl IpWithPrefix {
   }
 
   #[inline]
+  pub const fn afi(&self) -> Afi {
+    if self.is_ipv4() {
+      Afi::Ipv4
+    } else {
+      Afi::Ipv6
+    }
+  }
+  #[inline]
   pub const fn is_ipv4(&self) -> bool {
     self.addr.is_ipv4()
   }
-
   #[inline]
   pub const fn is_ipv6(&self) -> bool {
     self.addr.is_ipv6()
@@ -201,10 +224,13 @@ impl IpPrefix {
   }
 
   #[inline]
+  pub const fn afi(&self) -> Afi {
+    self.inner.afi()
+  }
+  #[inline]
   pub const fn is_ipv4(&self) -> bool {
     self.inner.is_ipv4()
   }
-
   #[inline]
   pub const fn is_ipv6(&self) -> bool {
     self.inner.is_ipv6()
@@ -225,20 +251,20 @@ impl IpPrefix {
     }
   }
 
+  #[inline]
+  pub(crate) async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, IpPrefixError> {
+    match afi {
+      Afi::Ipv4 => Self::recv_v4(reader).await,
+      Afi::Ipv6 => Self::recv_v6(reader).await,
+    }
+  }
+  #[inline]
   pub(crate) async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
     Self::recv_generic::<32, 4, _, _>(reader, IpAddr::V4).await
   }
-
+  #[inline]
   pub(crate) async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
     Self::recv_generic::<128, 16, _, _>(reader, IpAddr::V6).await
-  }
-
-  pub(crate) async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, IpPrefixError> {
-    if v6 {
-      Self::recv_v6(reader).await
-    } else {
-      Self::recv_v4(reader).await
-    }
   }
 
   async fn recv_generic<const L: u8, const M: usize, T, R>(
