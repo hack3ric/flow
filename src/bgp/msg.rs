@@ -148,6 +148,7 @@ pub const OPT_PARAM_CAP: u8 = 2;
 
 pub const CAP_4B_ASN: u8 = 65;
 pub const CAP_BGP_MP: u8 = 1;
+pub const CAP_EXT_NEXTHOP: u8 = 5;
 
 #[derive(Debug, Clone, Default)]
 pub struct OpenMessage<'a> {
@@ -248,6 +249,10 @@ impl MessageSend for OpenMessage<'_> {
           buf.extend([*kind, len]);
           buf.extend(&value[..]);
         });
+        buf.extend([CAP_EXT_NEXTHOP, 6]);
+        buf.extend(AFI_IPV4.to_be_bytes());
+        buf.extend([0, SAFI_UNICAST]);
+        buf.extend(AFI_IPV6.to_be_bytes());
       });
 
       self.other_opt_params.iter().for_each(|(kind, value)| {
