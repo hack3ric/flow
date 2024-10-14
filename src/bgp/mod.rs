@@ -73,7 +73,7 @@ pub enum State {
 /// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 pub struct Session {
   config: Config,
-  state: State,
+  pub(crate) state: State,
 }
 
 impl Session {

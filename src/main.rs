@@ -45,7 +45,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
   loop {
     let select = async {
       select! {
-        result = listener.accept() => {
+        result = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
           let (stream, mut addr) = result?;
           addr.set_ip(addr.ip().to_canonical());
           bgp.accept(stream, addr).await?;
