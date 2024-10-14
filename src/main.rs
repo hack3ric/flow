@@ -1,5 +1,6 @@
 pub mod bgp;
 pub mod net;
+pub mod sync;
 
 use anstyle::{Reset, Style};
 use clap::Parser;
