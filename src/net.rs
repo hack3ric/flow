@@ -7,7 +7,6 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Max prefix length of a certain IP type.
-#[inline]
 pub const fn prefix_max_len(prefix: IpAddr) -> u8 {
   match prefix {
     IpAddr::V4(_) => 32,
@@ -153,10 +152,8 @@ pub struct IpPrefix {
 }
 
 impl IpPrefix {
-  pub const V4_ALL: Self =
-    Self { inner: IpWithPrefix { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix_len: 0 } };
-  pub const V6_ALL: Self =
-    Self { inner: IpWithPrefix { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), prefix_len: 0 } };
+  pub const V4_ALL: Self = Self { inner: IpWithPrefix { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix_len: 0 } };
+  pub const V6_ALL: Self = Self { inner: IpWithPrefix { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), prefix_len: 0 } };
 
   #[inline]
   pub fn new(prefix: IpAddr, len: u8) -> Self {
