@@ -254,21 +254,43 @@ pub trait OpKind {
 pub struct FlowSpec(BTreeSet<ComponentStore>);
 
 impl FlowSpec {
-  pub fn is_v4(&self) -> bool {
-    if let Component::DestPrefix(p, _) | Component::SrcPrefix(p, _) = &(self.0)
-      .get(&ComponentKind::DestPrefix)
+  pub fn is_ipv4(&self) -> bool {
+    if let Component::DstPrefix(p, _) | Component::SrcPrefix(p, _) = &(self.0)
+      .get(&ComponentKind::DstPrefix)
       .or_else(|| self.0.get(&ComponentKind::SrcPrefix))
       .unwrap()
       .0
     {
       p.is_ipv4()
     } else {
-      unreachable!();
+      panic!("does not know whether the flowspec is IPv4 or v6")
     }
   }
 
-  pub fn is_v6(&self) -> bool {
-    !self.is_v4()
+  pub fn is_ipv6(&self) -> bool {
+    !self.is_ipv4()
+  }
+
+  pub fn serialize(&self, buf: &mut Vec<u8>) {
+    let mut buf2 = Vec::new();
+    let ipv6 = self.is_ipv6();
+    self.0.iter().for_each(|ComponentStore(c)| {
+      assert!(!c.is_valid(ipv6)); // TODO: relax this if we have flowspec builder
+      if let Component::DstPrefix(prefix, 0) | Component::SrcPrefix(prefix, 0) = c {
+        if *prefix == IpPrefix::V4_ALL || *prefix == IpPrefix::V6_ALL {
+          return;
+        }
+      }
+      c.serialize(&mut buf2);
+    });
+    let len: u16 = buf2.len().try_into().expect("flowspec length should fit in u16");
+    assert!(len < 0xf000);
+    if len < 240 {
+      buf.push(len.try_into().unwrap());
+    } else {
+      buf.extend((len | 0xf000).to_be_bytes());
+    }
+    buf.extend(buf2);
   }
 
   pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, BgpError> {
@@ -293,12 +315,22 @@ impl FlowSpec {
       }
       set.insert(ComponentStore(comp));
     }
+    if !set.contains(&ComponentKind::DstPrefix) && !set.contains(&ComponentKind::SrcPrefix) {
+      let a = if v6 { IpPrefix::V6_ALL } else { IpPrefix::V4_ALL };
+      set.insert(ComponentStore(Component::DstPrefix(a, 0)));
+    }
     Ok(Some(Self(set)))
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ComponentStore(Component);
+
+impl Debug for ComponentStore {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    Debug::fmt(&self.0, f)
+  }
+}
 
 impl PartialEq for ComponentStore {
   fn eq(&self, other: &Self) -> bool {
@@ -325,11 +357,11 @@ impl Borrow<ComponentKind> for ComponentStore {
     use Component::*;
     use ComponentKind as CK;
     match self.0 {
-      DestPrefix(..) => &CK::DestPrefix,
+      DstPrefix(..) => &CK::DstPrefix,
       SrcPrefix(..) => &CK::SrcPrefix,
       Protocol(..) => &CK::Protocol,
       Port(..) => &CK::Port,
-      DestPort(..) => &CK::DestPort,
+      DstPort(..) => &CK::DstPort,
       SrcPort(..) => &CK::SrcPort,
       IcmpType(..) => &CK::IcmpType,
       IcmpCode(..) => &CK::IcmpCode,
@@ -346,11 +378,11 @@ impl Borrow<ComponentKind> for ComponentStore {
 #[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum Component {
-  DestPrefix(IpPrefix, u8) = 1,
+  DstPrefix(IpPrefix, u8) = 1,
   SrcPrefix(IpPrefix, u8) = 2,
   Protocol(NumericOps) = 3,
   Port(NumericOps) = 4,
-  DestPort(NumericOps) = 5,
+  DstPort(NumericOps) = 5,
   SrcPort(NumericOps) = 6,
   IcmpType(NumericOps) = 7,
   IcmpCode(NumericOps) = 8,
@@ -366,6 +398,31 @@ impl Component {
     self.into()
   }
 
+  pub fn serialize(&self, buf: &mut Vec<u8>) {
+    buf.push(self.kind() as u8);
+    match self {
+      Self::DstPrefix(prefix, offset) | Self::SrcPrefix(prefix, offset) => {
+        if let IpAddr::V6(v6) = prefix.prefix() {
+          let pattern_bytes = (prefix.len() - offset).div_ceil(8);
+          buf.extend([prefix.len(), *offset]);
+          buf.extend((v6.to_bits() << offset).to_be_bytes().into_iter().take(pattern_bytes.into()));
+        } else {
+          prefix.serialize(buf);
+        }
+      }
+      Self::Protocol(ops)
+      | Self::Port(ops)
+      | Self::DstPort(ops)
+      | Self::SrcPort(ops)
+      | Self::IcmpType(ops)
+      | Self::IcmpCode(ops)
+      | Self::PacketLen(ops)
+      | Self::Dscp(ops)
+      | Self::FlowLabel(ops) => ops.serialize(buf),
+      Self::TcpFlags(ops) | Self::Fragment(ops) => ops.serialize(buf),
+    }
+  }
+
   pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, v6: bool) -> Result<Option<Self>, BgpError> {
     use ComponentKind as CK;
 
@@ -373,13 +430,13 @@ impl Component {
       return Ok(None);
     };
     let result = match ComponentKind::from_repr(kind) {
-      Some(CK::DestPrefix) if !v6 => Self::parse_v4_prefix(Self::DestPrefix, reader).await?,
+      Some(CK::DstPrefix) if !v6 => Self::parse_v4_prefix(Self::DstPrefix, reader).await?,
       Some(CK::SrcPrefix) if !v6 => Self::parse_v4_prefix(Self::SrcPrefix, reader).await?,
-      Some(CK::DestPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::DestPrefix, reader).await?,
+      Some(CK::DstPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::DstPrefix, reader).await?,
       Some(CK::SrcPrefix) if v6 => Self::parse_v6_prefix_pattern(Self::SrcPrefix, reader).await?,
       Some(CK::Protocol) => Self::Protocol(Ops::recv(reader).await?),
       Some(CK::Port) => Self::Port(Ops::recv(reader).await?),
-      Some(CK::DestPort) => Self::DestPort(Ops::recv(reader).await?),
+      Some(CK::DstPort) => Self::DstPort(Ops::recv(reader).await?),
       Some(CK::SrcPort) => Self::SrcPort(Ops::recv(reader).await?),
       Some(CK::IcmpType) => Self::IcmpType(Ops::recv(reader).await?),
       Some(CK::IcmpCode) => Self::IcmpCode(Ops::recv(reader).await?),
@@ -391,6 +448,33 @@ impl Component {
       _ => return Err(anyhow!("unsupported flow component kind: {kind}").into()),
     };
     Ok(Some(result))
+  }
+
+  fn is_valid(&self, v6: bool) -> bool {
+    if v6 {
+      self.is_valid_v6()
+    } else {
+      self.is_valid_v4()
+    }
+  }
+
+  fn is_valid_v4(&self) -> bool {
+    use Component::*;
+    match self {
+      DstPrefix(prefix, _) | SrcPrefix(prefix, _) => prefix.is_ipv4(),
+      Fragment(ops) => ops.0.iter().all(|x| x.value & !0b1111 == 0),
+      FlowLabel(_) => false,
+      _ => true,
+    }
+  }
+
+  fn is_valid_v6(&self) -> bool {
+    use Component::*;
+    match self {
+      DstPrefix(prefix, _) | SrcPrefix(prefix, _) => prefix.is_ipv6(),
+      Fragment(ops) => ops.0.iter().all(|x| x.value & !0b1110 == 0),
+      _ => true,
+    }
   }
 
   async fn parse_v4_prefix(
@@ -433,17 +517,17 @@ impl Debug for Component {
 impl Display for Component {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match self {
-      Self::DestPrefix(pat, off) if pat.is_ipv6() && *off != 0 => {
-        write!(f, "dest_ip in {}/{}-{}", pat.prefix(), off, pat.len())
+      Self::DstPrefix(pat, off) if pat.is_ipv6() && *off != 0 => {
+        write!(f, "dst_ip in {}/{}-{}", pat.prefix(), off, pat.len())
       }
-      Self::DestPrefix(pat, _) => write!(f, "dest_ip in {pat}"),
+      Self::DstPrefix(pat, _) => write!(f, "dst_ip in {pat}"),
       Self::SrcPrefix(pat, off) if pat.is_ipv6() && *off != 0 => {
         write!(f, "src_ip in {}/{}-{}", pat.prefix(), off, pat.len())
       }
       Self::SrcPrefix(pat, _) => write!(f, "src_ip in {pat}"),
       Self::Protocol(ops) => ops.fmt(f, &"protocol"),
       Self::Port(ops) => ops.fmt(f, &"port"),
-      Self::DestPort(ops) => ops.fmt(f, &"dest_port"),
+      Self::DstPort(ops) => ops.fmt(f, &"dst_port"),
       Self::SrcPort(ops) => ops.fmt(f, &"src_port"),
       Self::IcmpType(ops) => ops.fmt(f, &"icmp.type"),
       Self::IcmpCode(ops) => ops.fmt(f, &"icmp.code"),

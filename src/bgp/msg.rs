@@ -571,20 +571,21 @@ impl Nlri {
   }
 
   fn serialize_mp(&self, buf: &mut Vec<u8>, reach: bool) {
+    let attr = [
+      PF_OPTIONAL | PF_EXT_LEN,
+      if reach {
+        PathAttr::MpReachNlri
+      } else {
+        PathAttr::MpUnreachNlri
+      } as u8,
+    ];
     match self {
       Self::Route { prefixes, next_hop } => {
         let mut iter = prefixes.iter().peekable();
-        let is_ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
-        let afi = if is_ipv4 { AFI_IPV4 } else { AFI_IPV6 };
+        let ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
+        let afi = if ipv4 { AFI_IPV4 } else { AFI_IPV6 };
 
-        buf.extend([
-          PF_OPTIONAL | PF_EXT_LEN,
-          if reach {
-            PathAttr::MpReachNlri
-          } else {
-            PathAttr::MpUnreachNlri
-          } as u8,
-        ]);
+        buf.extend(attr);
         extend_with_u16_len(buf, |buf| {
           buf.extend(afi.to_be_bytes());
           buf.push(SAFI_UNICAST);
@@ -593,12 +594,29 @@ impl Nlri {
             buf.push(0); // reserved
           }
           iter.for_each(|p| {
-            assert_eq!(p.is_ipv4(), is_ipv4, "NLRI contains multiple kinds of prefix");
+            assert_eq!(p.is_ipv4(), ipv4, "NLRI contains multiple kinds of prefix");
             p.serialize(buf)
           });
         });
       }
-      Self::Flow(spec) => todo!(),
+      Self::Flow(specs) => {
+        let mut iter = specs.iter().peekable();
+        let ipv4 = iter.peek().expect("NLRI contains no flow").is_ipv4();
+        let afi = if ipv4 { AFI_IPV4 } else { AFI_IPV6 };
+
+        buf.extend(attr);
+        extend_with_u16_len(buf, |buf| {
+          buf.extend(afi.to_be_bytes());
+          buf.push(SAFI_FLOW);
+          if reach {
+            buf.extend([0; 2]); // null next hop, reserved
+          }
+          iter.for_each(|s| {
+            assert_eq!(s.is_ipv4(), ipv4, "NLRI contains flowspecs of multiple protocols");
+            s.serialize(buf);
+          });
+        });
+      }
     }
   }
 
