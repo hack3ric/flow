@@ -63,8 +63,14 @@ pub enum State {
 /// - RFC 4760: Multiprotocol Extensions for BGP
 /// - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
 ///   Routing (?)
+/// - RFC 1997: BGP Communities Attribute
+/// - RFC 4360: BGP Extended Communities Attribute \[partial\]
+/// - RFC 8092: BGP Large Communities Attribute
 /// - RFC 8955: Dissemination of Flow Specification Rules
 /// - RFC 8956: Dissemination of Flow Specification Rules for IPv6
+///
+/// To implement:
+/// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 pub struct Session {
   config: Config,
   state: State,
@@ -75,12 +81,10 @@ impl Session {
     Self { config, state: Active }
   }
 
-  #[allow(dead_code)]
   pub fn start(&mut self) {
     self.state = Active;
   }
 
-  #[allow(dead_code)]
   pub async fn stop(&mut self) -> Result<(), BgpError> {
     match &mut self.state {
       Idle | Connect | Active => {}

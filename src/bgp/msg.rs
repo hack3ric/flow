@@ -258,15 +258,16 @@ pub enum PathAttr {
   Origin = 1,
   AsPath = 2,
   NextHop = 3,
+  Communities = 8,
   MpReachNlri = 14,
   MpUnreachNlri = 15,
+  ExtCommunities = 16,
+  LargeCommunities = 32,
 }
 
 // Strictly, according to RFC 7606 Section 5.1, one UPDATE message MUST NOT
 // contain more than one kind of (un)reachability information. However we allow
 // it here for compatibility reasons stated in the same section.
-//
-// TODO: communities...
 #[derive(Debug, Clone)]
 pub struct UpdateMessage<'a> {
   withdrawn: Option<Nlri>,
@@ -277,6 +278,10 @@ pub struct UpdateMessage<'a> {
 
   /// AS path, stored in reverse.
   as_path: Cow<'a, [u32]>,
+
+  comm: HashSet<[u16; 2]>,
+  ext_comm: HashSet<[u32; 2]>,
+  large_comm: HashSet<[u32; 3]>,
 
   /// Transitive but unrecognized path attributes.
   other_attrs: HashMap<u8, Cow<'a, [u8]>>,
@@ -289,6 +294,9 @@ impl UpdateMessage<'_> {
       || self.nlri.is_some()
       || self.old_nlri.is_some()
       || !self.as_path.is_empty()
+      || !self.comm.is_empty()
+      || !self.ext_comm.is_empty()
+      || !self.large_comm.is_empty()
       || !self.other_attrs.is_empty()
     {
       return None;
@@ -320,6 +328,9 @@ impl UpdateMessage<'static> {
       old_nlri: None,
       origin: Origin::Incomplete,
       as_path: Cow::Borrowed(&[]),
+      comm: HashSet::new(),
+      ext_comm: HashSet::new(),
+      large_comm: HashSet::new(),
       other_attrs: HashMap::new(),
     };
 
@@ -413,8 +424,68 @@ impl UpdateMessage<'static> {
           }
           old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
         }
+        // TODO: MED, local pref, atomic aggregate, aggregator
 
-        // Known optional attributes
+        // Known, optional, transitive attributes
+        Some(PathAttr::Communities | PathAttr::ExtCommunities | PathAttr::LargeCommunities)
+          if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 =>
+        {
+          return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
+        }
+        Some(PathAttr::Communities) => {
+          if len % 4 != 0 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(OptAttr(pattr_buf)).into());
+          }
+          let mut opt_buf = vec![0; len.into()];
+          pattrs_reader.read_exact(&mut opt_buf).await?;
+          result.comm = opt_buf
+            .chunks_exact(4)
+            .map(|x| {
+              [
+                u16::from_be_bytes(x[0..2].try_into().unwrap()),
+                u16::from_be_bytes(x[2..4].try_into().unwrap()),
+              ]
+            })
+            .collect();
+        }
+        Some(PathAttr::ExtCommunities) => {
+          if len % 8 != 0 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(OptAttr(pattr_buf)).into());
+          }
+          let mut opt_buf = vec![0; len.into()];
+          pattrs_reader.read_exact(&mut opt_buf).await?;
+          result.ext_comm = opt_buf
+            .chunks_exact(8)
+            .map(|x| {
+              [
+                u32::from_be_bytes(x[0..4].try_into().unwrap()),
+                u32::from_be_bytes(x[4..8].try_into().unwrap()),
+              ]
+            })
+            .collect();
+        }
+        Some(PathAttr::LargeCommunities) => {
+          if len % 12 != 0 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(OptAttr(pattr_buf)).into());
+          }
+          let mut opt_buf = vec![0; len.into()];
+          pattrs_reader.read_exact(&mut opt_buf).await?;
+          result.large_comm = opt_buf
+            .chunks_exact(12)
+            .map(|x| {
+              [
+                u32::from_be_bytes(x[0..4].try_into().unwrap()),
+                u32::from_be_bytes(x[4..8].try_into().unwrap()),
+                u32::from_be_bytes(x[8..12].try_into().unwrap()),
+              ]
+            })
+            .collect();
+        }
+
+        // Known, optional, non-transitive attributes
         Some(PathAttr::MpReachNlri | PathAttr::MpUnreachNlri)
           if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
         {
@@ -432,7 +503,6 @@ impl UpdateMessage<'static> {
           }
         }
         Some(PathAttr::MpUnreachNlri) => {
-          // TODO: wrong
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
           match Nlri::recv_mp_unreach(&mut &opt_buf[..]).await {
@@ -481,8 +551,6 @@ impl UpdateMessage<'static> {
     } else if !old_prefixes.is_empty() {
       return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
     }
-
-    PathAttr::NextHop as u16;
 
     if result.nlri.is_some() || result.old_nlri.is_some() {
       for attr in [PathAttr::Origin, PathAttr::AsPath] {
