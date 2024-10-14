@@ -1,5 +1,5 @@
-mod bgp;
-mod net;
+pub mod bgp;
+pub mod net;
 
 use anstyle::{Reset, Style};
 use clap::Parser;
@@ -39,7 +39,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     local_as: args.local_as,
     remote_as: args.remote_as,
     remote_ip: vec!["0.0.0.0/0".parse()?, "::/0".parse()?],
-    hold_timer: 180,
+    hold_timer: 240,
   });
   info!("Flow listening to {} as AS{}", args.bind, args.local_as);
   loop {

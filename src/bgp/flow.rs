@@ -1,6 +1,5 @@
 use super::error::BgpError;
 use crate::net::{IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
-use anyhow::anyhow;
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -10,6 +9,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use strum::{EnumDiscriminants, FromRepr};
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone, PartialEq, Eq)]
@@ -29,17 +29,18 @@ impl FlowSpec {
     Self::new(true)
   }
 
-  pub fn insert(&mut self, c: Component) -> Result<(), BgpError> {
+  pub fn insert(&mut self, c: Component) -> Result<(), FlowError> {
     if !c.is_valid(self.ipv6) {
-      return Err(anyhow!("invalid component").into());
+      return Err(FlowError::Invalid);
     }
+    let kind = c.kind();
     if !self.inner.insert(ComponentStore(c)) {
-      return Err(anyhow!("duplicate component").into());
+      return Err(FlowError::Duplicate(kind));
     }
     Ok(())
   }
 
-  pub fn with(mut self, c: Component) -> Result<Self, BgpError> {
+  pub fn with(mut self, c: Component) -> Result<Self, FlowError> {
     self.insert(c)?;
     Ok(self)
   }
@@ -84,10 +85,11 @@ impl FlowSpec {
     let mut inner = BTreeSet::<ComponentStore>::new();
     while let Some(comp) = Component::recv(&mut flow_reader, ipv6).await? {
       if inner.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
-        return Err(anyhow!("flowspec components must be unique and sorted by type").into());
+        return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
       }
+      let kind = comp.kind();
       if !inner.insert(ComponentStore(comp)) {
-        return Err(anyhow!("duplicate component").into());
+        return Err(FlowError::Duplicate(kind).into());
       }
     }
     Ok(Some(Self { ipv6, inner }))
@@ -248,7 +250,7 @@ impl Component {
       Some(CK::Dscp) => Self::Dscp(Ops::recv(reader).await?),
       Some(CK::Fragment) => Self::Fragment(Ops::recv(reader).await?),
       Some(CK::FlowLabel) => Self::FlowLabel(Ops::recv(reader).await?),
-      _ => return Err(anyhow!("unsupported flow component kind: {kind}").into()),
+      _ => return Err(FlowError::UnsupportedKind(kind).into()),
     };
     Ok(Some(result))
   }
@@ -300,7 +302,7 @@ impl Component {
     }
     let offset = reader.read_u8().await?;
     if offset >= len {
-      return Err(anyhow!("IPv6 prefix component offset too big").into());
+      return Err(FlowError::PrefixOffsetTooBig(offset, len).into());
     }
     let mut buf = [0; 16];
     let pattern_bytes = (len - offset).div_ceil(8);
@@ -682,6 +684,20 @@ pub trait OpKind {
   const FLAGS_MASK: u8;
   fn op(flags: u8, data: u64, value: u64) -> bool;
   fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result;
+}
+
+#[derive(Debug, Error)]
+pub enum FlowError {
+  #[error("invalid component")]
+  Invalid,
+  #[error("duplicate component {0:?}")]
+  Duplicate(ComponentKind),
+  #[error("components are not sorted")]
+  Unsorted,
+  #[error("unsupported component kind {0}")]
+  UnsupportedKind(u8),
+  #[error("IPv6 prefix component offset too big: {0} >= {1}")]
+  PrefixOffsetTooBig(u8, u8),
 }
 
 #[cfg(test)]

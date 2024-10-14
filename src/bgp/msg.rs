@@ -1,14 +1,13 @@
 use super::error::BgpError;
-use super::flow::FlowSpec;
+use super::extend_with_u16_len;
+use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
+use crate::bgp::extend_with_u8_len;
 use crate::net::{IpPrefix, IpPrefixError};
-use anyhow::anyhow;
 use log::error;
-use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -33,6 +32,7 @@ pub trait MessageSend {
     buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
   }
 
+  #[allow(async_fn_in_trait)]
   async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
     let mut buf = Vec::new();
     self.serialize_message(&mut buf);
@@ -105,25 +105,6 @@ impl MessageSend for Message<'_> {
       Self::Keepalive => buf.push(MessageKind::Keepalive as u8),
     }
   }
-}
-
-/// Track buffer extension length
-#[inline]
-fn extend_with_u8_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
-  let len_pos = buf.len();
-  buf.push(0);
-  extend(buf);
-  let len = buf.len() - len_pos - 1;
-  buf[len_pos] = len.try_into().expect("length should fit in u8");
-}
-
-#[inline]
-fn extend_with_u16_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
-  let len_pos = buf.len();
-  buf.extend([0; 2]);
-  extend(buf);
-  let len = u16::try_from(buf.len() - len_pos - 2).expect("");
-  buf[len_pos..len_pos + 2].copy_from_slice(&len.to_be_bytes())
 }
 
 async fn get_pattr_buf(
@@ -231,10 +212,10 @@ impl MessageSend for OpenMessage<'_> {
       buf.push(OPT_PARAM_CAP);
       extend_with_u8_len(buf, |buf| {
         [
-          (AFI_IPV4, SAFI_UNICAST),
-          (AFI_IPV6, SAFI_UNICAST),
-          (AFI_IPV4, SAFI_FLOW),
-          (AFI_IPV6, SAFI_FLOW),
+          (AFI_IPV4, NlriKind::Unicast as u8),
+          (AFI_IPV6, NlriKind::Unicast as u8),
+          (AFI_IPV4, NlriKind::Flow as u8),
+          (AFI_IPV6, NlriKind::Flow as u8),
         ]
         .into_iter()
         .for_each(|(afi, safi)| {
@@ -251,7 +232,7 @@ impl MessageSend for OpenMessage<'_> {
         });
         buf.extend([CAP_EXT_NEXTHOP, 6]);
         buf.extend(AFI_IPV4.to_be_bytes());
-        buf.extend([0, SAFI_UNICAST]);
+        buf.extend([0, NlriKind::Unicast as u8]);
         buf.extend(AFI_IPV6.to_be_bytes());
       });
 
@@ -267,12 +248,6 @@ impl MessageSend for OpenMessage<'_> {
 // https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
 pub const AFI_IPV4: u16 = 1;
 pub const AFI_IPV6: u16 = 2;
-
-pub const SAFI_UNICAST: u8 = 1;
-#[allow(dead_code)]
-pub const SAFI_MULTICAST: u8 = 2;
-#[allow(dead_code)]
-pub const SAFI_FLOW: u8 = 133;
 
 // Path attribute flags
 pub const PF_OPTIONAL: u8 = 0b1000_0000;
@@ -309,6 +284,24 @@ pub struct UpdateMessage<'a> {
   other_attrs: HashMap<u8, Cow<'a, [u8]>>,
 }
 
+impl UpdateMessage<'_> {
+  pub fn is_end_of_rib(&self) -> Option<(bool, NlriKind)> {
+    if self.old_withdrawn.is_some()
+      || self.nlri.is_some()
+      || self.old_nlri.is_some()
+      || !self.as_path.is_empty()
+      || !self.other_attrs.is_empty()
+    {
+      return None;
+    }
+
+    match &self.withdrawn {
+      Some(Nlri { ipv6, content: kind }) => Some((*ipv6, kind.into())),
+      None => Some((false, NlriKind::Unicast)),
+    }
+  }
+}
+
 impl UpdateMessage<'static> {
   async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     match Self::recv_inner(reader).await {
@@ -337,8 +330,7 @@ impl UpdateMessage<'static> {
       withdrawn_prefixes.insert(prefix);
     }
     if !withdrawn_prefixes.is_empty() {
-      result.old_withdrawn =
-        Some(Nlri::Route { prefixes: withdrawn_prefixes, next_hop: NextHop::V4(Ipv4Addr::UNSPECIFIED) });
+      result.old_withdrawn = Some(Nlri::new_route(false, withdrawn_prefixes, None)?);
     }
 
     let mut visited = HashSet::new();
@@ -485,7 +477,7 @@ impl UpdateMessage<'static> {
       return Err(Notification::Update(InvalidNetwork).into());
     }
     if let Some(next_hop) = old_next_hop {
-      result.old_nlri = Some(Nlri::Route { prefixes: old_prefixes, next_hop });
+      result.old_nlri = Some(Nlri::new_route(false, old_prefixes, Some(next_hop))?);
     } else if !old_prefixes.is_empty() {
       return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
     }
@@ -507,8 +499,8 @@ impl UpdateMessage<'static> {
 
 impl MessageSend for UpdateMessage<'_> {
   fn serialize_data(&self, buf: &mut Vec<u8>) {
-    let old_nlri = match &self.old_nlri {
-      Some(Nlri::Route { prefixes, next_hop: NextHop::V4(next_hop) }) => Some((prefixes, next_hop)),
+    let old_nlri = match &self.old_nlri.as_ref().map(Nlri::kind) {
+      Some(NlriContent::Unicast { prefixes, next_hop: NextHop::V4(next_hop), .. }) => Some((prefixes, next_hop)),
       Some(_) => panic!("BGP-4 NLRI supports IPv4 only"),
       None => None,
     };
@@ -517,7 +509,7 @@ impl MessageSend for UpdateMessage<'_> {
 
     // BGP-4 withdrawn routes
     extend_with_u16_len(buf, |buf| {
-      let Some(Nlri::Route { prefixes, .. }) = &self.old_withdrawn else {
+      let Some(NlriContent::Unicast { prefixes, .. }) = &self.old_withdrawn.as_ref().map(Nlri::kind) else {
         panic!("BGP-4 withdrawn routes support IPv4 only");
       };
       prefixes.iter().for_each(|p| {
@@ -557,185 +549,6 @@ impl MessageSend for UpdateMessage<'_> {
         p.serialize(buf);
       })
     }
-  }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Nlri {
-  Route { prefixes: HashSet<IpPrefix>, next_hop: NextHop },
-  Flow(SmallVec<[FlowSpec; 4]>),
-}
-
-impl Nlri {
-  fn serialize_mp_reach(&self, buf: &mut Vec<u8>) {
-    self.serialize_mp(buf, true);
-  }
-
-  fn serialize_mp_unreach(&self, buf: &mut Vec<u8>) {
-    self.serialize_mp(buf, false);
-  }
-
-  fn serialize_mp(&self, buf: &mut Vec<u8>, reach: bool) {
-    let attr = [
-      PF_OPTIONAL | PF_EXT_LEN,
-      if reach {
-        PathAttr::MpReachNlri
-      } else {
-        PathAttr::MpUnreachNlri
-      } as u8,
-    ];
-    match self {
-      Self::Route { prefixes, next_hop } => {
-        let mut iter = prefixes.iter().peekable();
-        let ipv4 = iter.peek().expect("NLRI contains no prefix").is_ipv4();
-        let afi = if ipv4 { AFI_IPV4 } else { AFI_IPV6 };
-
-        buf.extend(attr);
-        extend_with_u16_len(buf, |buf| {
-          buf.extend(afi.to_be_bytes());
-          buf.push(SAFI_UNICAST);
-          if reach {
-            next_hop.serialize_mp(buf);
-            buf.push(0); // reserved
-          }
-          iter.for_each(|p| {
-            assert_eq!(p.is_ipv4(), ipv4, "NLRI contains multiple kinds of prefix");
-            p.serialize(buf)
-          });
-        });
-      }
-      Self::Flow(specs) => {
-        let mut iter = specs.iter().peekable();
-        let ipv4 = iter.peek().expect("NLRI contains no flow").is_ipv4();
-        let afi = if ipv4 { AFI_IPV4 } else { AFI_IPV6 };
-
-        buf.extend(attr);
-        extend_with_u16_len(buf, |buf| {
-          buf.extend(afi.to_be_bytes());
-          buf.push(SAFI_FLOW);
-          if reach {
-            buf.extend([0; 2]); // null next hop, reserved
-          }
-          iter.for_each(|s| {
-            assert_eq!(s.is_ipv4(), ipv4, "NLRI contains flowspecs of multiple protocols");
-            s.serialize(buf);
-          });
-        });
-      }
-    }
-  }
-
-  async fn recv_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    Self::recv_mp(reader, true).await
-  }
-
-  async fn recv_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    Self::recv_mp(reader, false).await
-  }
-
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self, BgpError> {
-    let afi = reader.read_u16().await?;
-    let safi = reader.read_u8().await?;
-    let next_hop;
-    if reach {
-      next_hop = NextHop::recv_mp(reader).await?;
-      let _reserved = reader.read_u8().await?;
-    } else {
-      next_hop = if safi == SAFI_FLOW {
-        None
-      } else {
-        Some(NextHop::V6(Ipv6Addr::UNSPECIFIED, None))
-      };
-    };
-    match (afi, safi, next_hop) {
-      (AFI_IPV4, SAFI_UNICAST, Some(next_hop)) | (AFI_IPV6, SAFI_UNICAST, Some(next_hop @ NextHop::V6(..))) => {
-        let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv(reader, afi == AFI_IPV6).await? {
-          prefixes.insert(prefix);
-        }
-        Ok(Self::Route { prefixes, next_hop })
-      }
-      (_, SAFI_FLOW, None) => {
-        let mut specs = SmallVec::new_const();
-        while let Some(spec) = FlowSpec::recv(reader, afi == AFI_IPV6).await? {
-          specs.push(spec);
-        }
-        Ok(Self::Flow(specs))
-      }
-      (_, SAFI_UNICAST, None) | (_, SAFI_FLOW, Some(_)) => return Err(anyhow!("invalid next hop").into()),
-      _ => return Err(anyhow!("unknown (AFI, SAFI) tuple").into()),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NextHop {
-  V4(Ipv4Addr),
-  V6(Ipv6Addr, Option<Ipv6Addr>),
-}
-
-impl NextHop {
-  fn serialize_mp(&self, buf: &mut Vec<u8>) {
-    match self {
-      Self::V4(x) => {
-        buf.push(4);
-        buf.extend(x.octets());
-      }
-      Self::V6(x, Some(y)) => {
-        buf.push(32);
-        buf.extend(x.octets());
-        buf.extend(y.octets());
-      }
-      Self::V6(x, None) => {
-        buf.push(16);
-        buf.extend(x.octets());
-      }
-    }
-  }
-
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Self>> {
-    let len = reader.read_u8().await?;
-    match len {
-      0 => Ok(None),
-      4 => Ok(Some(Self::V4(reader.read_u32().await?.into()))),
-      16 => Ok(Some(Self::V6(reader.read_u128().await?.into(), None))),
-      32 => Ok(Some(Self::V6(
-        reader.read_u128().await?.into(),
-        Some(reader.read_u128().await?.into()),
-      ))),
-      _ => Err(io::Error::other("dummy")),
-    }
-  }
-}
-
-impl From<IpAddr> for NextHop {
-  fn from(ip: IpAddr) -> Self {
-    match ip {
-      IpAddr::V4(ip) => ip.into(),
-      IpAddr::V6(ip) => ip.into(),
-    }
-  }
-}
-
-impl From<Ipv4Addr> for NextHop {
-  fn from(ip: Ipv4Addr) -> Self {
-    Self::V4(ip)
-  }
-}
-
-impl From<Ipv6Addr> for NextHop {
-  fn from(ip: Ipv6Addr) -> Self {
-    if let [0xfe80, ..] = ip.segments() {
-      Self::V6([0; 8].into(), Some(ip))
-    } else {
-      Self::V6(ip, None)
-    }
-  }
-}
-
-impl From<[Ipv6Addr; 2]> for NextHop {
-  fn from(ips: [Ipv6Addr; 2]) -> Self {
-    Self::V6(ips[0], Some(ips[1]))
   }
 }
 
@@ -867,6 +680,7 @@ impl<'a> From<UpdateError<'a>> for Notification<'a> {
 }
 
 pub trait SendAndReturn {
+  #[allow(async_fn_in_trait)]
   async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BgpError>;
 }
 

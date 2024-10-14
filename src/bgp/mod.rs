@@ -1,6 +1,8 @@
-mod error;
-mod flow;
-mod msg;
+pub mod error;
+pub mod flow;
+pub mod msg;
+
+pub mod nlri;
 
 use crate::net::IpPrefix;
 use error::BgpError;
@@ -174,7 +176,12 @@ impl Session {
         msg = Message::recv(stream) => {
           match msg? {
             Message::Update(msg) => {
-              info!("received update: {msg:#?}");
+              if let Some((ipv6, safi)) = msg.is_end_of_rib() {
+                let afi = if ipv6 { "IPv6" } else { "IPv6" };
+                info!("received End-of-RIB of ({afi}, {safi:?})");
+              } else {
+                info!("received update: {msg:#?}");
+              }
               // TODO: process
             }
             Message::Keepalive => if let Some((dur, next)) = hold_timer {
@@ -199,4 +206,24 @@ impl Session {
     }
     Ok(())
   }
+}
+
+// Utilities
+
+#[inline]
+fn extend_with_u8_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
+  let len_pos = buf.len();
+  buf.push(0);
+  extend(buf);
+  let len = buf.len() - len_pos - 1;
+  buf[len_pos] = len.try_into().expect("length should fit in u8");
+}
+
+#[inline]
+fn extend_with_u16_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
+  let len_pos = buf.len();
+  buf.extend([0; 2]);
+  extend(buf);
+  let len = u16::try_from(buf.len() - len_pos - 2).expect("");
+  buf[len_pos..len_pos + 2].copy_from_slice(&len.to_be_bytes())
 }
