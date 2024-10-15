@@ -189,9 +189,14 @@ impl Display for GlobalAdmin {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrafficAction {
-  TrafficRateBytes(u16, f32),
-  TrafficRatePackets(u16, f32),
+  TrafficRateBytes { desc: u16, rate: f32 },
+  TrafficRatePackets { desc: u16, rate: f32 },
+  TrafficAction { terminal: bool, sample: bool },
+  RtRedirect { rt: GlobalAdmin, value: u32 },
+  RtRedirectIpv6 { rt: Ipv6Addr, value: u16 },
+  TrafficMarking { dscp: u8 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,7 +247,7 @@ impl Display for Ipv6ExtCommunity {
     match [self.kind, self.sub_kind] {
       [0x00, 0x02] => f.write_str("(route-target, ")?,
       [0x00, 0x03] => f.write_str("(route-origin, ")?,
-      [0x00, 0x0d] => f.write_str("(rt-redirect, ")?,
+      [0x00, 0x0d] => f.write_str("(rt-redirect-ipv6, ")?,
       bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
     }
     write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
