@@ -3,6 +3,8 @@ pub mod net;
 pub mod sync;
 
 use anstyle::{Reset, Style};
+use bgp::route::Routes;
+use bgp::{Config, Session};
 use clap::Parser;
 use clap_verbosity::{InfoLevel, Verbosity};
 use env_logger::fmt::Formatter;
@@ -10,6 +12,8 @@ use log::{error, info, Record};
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::process::exit;
+use std::rc::Rc;
+use sync::RwLock;
 use tokio::net::TcpListener;
 use tokio::select;
 
@@ -34,14 +38,17 @@ fn parse_bgp_bind(bind: &str) -> anyhow::Result<SocketAddr> {
 }
 
 async fn run(args: Args) -> anyhow::Result<()> {
+  let routes = Rc::new(RwLock::new(Routes::new()));
+
   let listener = TcpListener::bind(args.bind).await?;
-  let mut bgp = bgp::Session::new(bgp::Config {
+  let mut bgp = Session::new(routes.clone(), Config {
     router_id: 123456,
     local_as: args.local_as,
     remote_as: args.remote_as,
     remote_ip: vec!["0.0.0.0/0".parse()?, "::/0".parse()?],
     hold_timer: 240,
   });
+
   info!("Flow listening to {} as AS{}", args.bind, args.local_as);
   loop {
     let select = async {

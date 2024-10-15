@@ -4,7 +4,7 @@ use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::marker::PhantomData;
@@ -109,21 +109,25 @@ impl FlowSpec {
 
 impl Debug for FlowSpec {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    f.debug_set().entries(self.inner.iter().map(|ComponentStore(c)| c)).finish()
+    Display::fmt(self, f)
   }
 }
 
 impl Display for FlowSpec {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match self.afi {
+      Afi::Ipv4 => f.write_str("flow4 { ")?,
+      Afi::Ipv6 => f.write_str("flow6 { ")?,
+    }
     if let Some(ComponentStore(first)) = self.inner.first() {
-      write!(f, "({first})")?;
+      write!(f, "{first}")?;
     } else {
-      f.write_str("empty")?;
+      f.write_str("<empty>")?;
     }
     for ComponentStore(c) in self.inner.iter().skip(1) {
-      write!(f, " && ({c})")?;
+      write!(f, "; {c}")?;
     }
-    Ok(())
+    f.write_str(" }")
   }
 }
 
@@ -359,17 +363,17 @@ impl Display for Component {
         write!(f, "src_ip in {}/{}-{}", pat.prefix(), off, pat.len())
       }
       Self::SrcPrefix(pat, _) => write!(f, "src_ip in {pat}"),
-      Self::Protocol(ops) => ops.fmt(f, &"protocol"),
-      Self::Port(ops) => ops.fmt(f, &"port"),
-      Self::DstPort(ops) => ops.fmt(f, &"dst_port"),
-      Self::SrcPort(ops) => ops.fmt(f, &"src_port"),
-      Self::IcmpType(ops) => ops.fmt(f, &"icmp.type"),
-      Self::IcmpCode(ops) => ops.fmt(f, &"icmp.code"),
-      Self::TcpFlags(ops) => ops.fmt(f, &"tcp.flags"),
-      Self::PacketLen(ops) => ops.fmt(f, &"len"),
-      Self::Dscp(ops) => ops.fmt(f, &"dscp"),
-      Self::Fragment(ops) => ops.fmt(f, &"frag"),
-      Self::FlowLabel(ops) => ops.fmt(f, &"flow_label"),
+      Self::Protocol(ops) => write!(f, "protocol {ops}"),
+      Self::Port(ops) => write!(f, "port {ops}"),
+      Self::DstPort(ops) => write!(f, "dst_port {ops}"),
+      Self::SrcPort(ops) => write!(f, "src_port {ops}"),
+      Self::IcmpType(ops) => write!(f, "icmp.type {ops}"),
+      Self::IcmpCode(ops) => write!(f, "icmp.code {ops}"),
+      Self::TcpFlags(ops) => write!(f, "tcp.flags {ops}"),
+      Self::PacketLen(ops) => write!(f, "len {ops}"),
+      Self::Dscp(ops) => write!(f, "dscp {ops}"),
+      Self::Fragment(ops) => write!(f, "frag {ops}"),
+      Self::FlowLabel(ops) => write!(f, "flow_label {ops}"),
     }
   }
 }
@@ -452,21 +456,6 @@ impl<K: OpKind> Ops<K> {
     }
     result
   }
-
-  fn fmt(&self, f: &mut Formatter, data: &impl Display) -> fmt::Result {
-    K::fmt(f, self.0[0].flags, data, self.0[0].value)?;
-    if self.0.len() > 1 {
-      for op in &self.0[1..] {
-        if op.is_and() {
-          f.write_str(" && ")?;
-        } else {
-          f.write_str(" || ")?;
-        }
-        K::fmt(f, op.flags, data, op.value)?;
-      }
-    }
-    Ok(())
-  }
 }
 
 impl<K: OpKind> From<Op<K>> for Ops<K> {
@@ -483,7 +472,24 @@ impl<K: OpKind> Debug for Ops<K> {
 
 impl<K: OpKind> Display for Ops<K> {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    self.fmt(f, &"data")
+    if self.0.len() > 1 {
+      f.write_char('(')?;
+    }
+    K::fmt(f, self.0[0].flags, self.0[0].value)?;
+    if self.0.len() > 1 {
+      for op in &self.0[1..] {
+        if op.is_and() {
+          f.write_str(" && ")?;
+        } else {
+          f.write_str(" || ")?;
+        }
+        K::fmt(f, op.flags, op.value)?;
+      }
+    }
+    if self.0.len() > 1 {
+      f.write_char(')')?;
+    }
+    Ok(())
   }
 }
 
@@ -662,7 +668,7 @@ impl<K: OpKind> Display for Op<K> {
     } else {
       f.write_str("|| ")?;
     }
-    K::fmt(f, self.flags, &"data", self.value)
+    K::fmt(f, self.flags, self.value)
   }
 }
 
@@ -715,16 +721,16 @@ impl OpKind for Numeric {
     result
   }
 
-  fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result {
+  fn fmt(f: &mut Formatter, flags: u8, value: u64) -> fmt::Result {
     use NumericFlags::*;
     match NumericFlags::from_repr(flags & NumericFlags::True as u8).unwrap() {
       False => f.write_str("false"),
-      Lt => write!(f, "{data} < {value}"),
-      Gt => write!(f, "{data} > {value}"),
-      Eq => write!(f, "{data} == {value}"),
-      Le => write!(f, "{data} <= {value}"),
-      Ge => write!(f, "{data} >= {value}"),
-      Ne => write!(f, "{data} != {value}"),
+      Lt => write!(f, "<{value}"),
+      Gt => write!(f, ">{value}"),
+      Eq => write!(f, "={value}"),
+      Le => write!(f, "<={value}"),
+      Ge => write!(f, ">={value}"),
+      Ne => write!(f, "!={value}"),
       True => f.write_str("true"),
     }
   }
@@ -762,13 +768,13 @@ impl OpKind for Bitmask {
     }
   }
 
-  fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result {
+  fn fmt(f: &mut Formatter, flags: u8, value: u64) -> fmt::Result {
     use BitmaskFlags::*;
     match BitmaskFlags::from_repr(flags & (Self::NOT | Self::MATCH)).unwrap() {
-      Any => write!(f, "{data} & 0b{value:b} != 0"),
-      NotAny => write!(f, "{data} & 0b{value:b} == 0"),
-      All => write!(f, "{data} & 0b{value:b} == 0b{value:b}"),
-      NotAll => write!(f, "{data} & 0b{value:b} != 0b{value:b}"),
+      Any => write!(f, "<0b{value:b}"),
+      NotAny => write!(f, ">0b{value:b}"),
+      All => write!(f, "=0b{value:b}"),
+      NotAll => write!(f, "!=0b{value:b}"),
     }
   }
 }
@@ -776,7 +782,7 @@ impl OpKind for Bitmask {
 pub trait OpKind {
   const FLAGS_MASK: u8;
   fn op(flags: u8, data: u64, value: u64) -> bool;
-  fn fmt(f: &mut Formatter, flags: u8, data: &impl Display, value: u64) -> fmt::Result;
+  fn fmt(f: &mut Formatter, flags: u8, value: u64) -> fmt::Result;
 }
 
 #[derive(Debug, Error)]

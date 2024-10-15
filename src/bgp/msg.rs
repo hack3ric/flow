@@ -272,11 +272,11 @@ pub enum PathAttr {
 // it here for compatibility reasons stated in the same section.
 #[derive(Debug, Clone)]
 pub struct UpdateMessage<'a> {
-  withdrawn: Option<Nlri>,
-  old_withdrawn: Option<Nlri>,
-  nlri: Option<Nlri>,
-  old_nlri: Option<Nlri>,
-  route_info: RouteInfo<'a>,
+  pub withdrawn: Option<Nlri>,
+  pub old_withdrawn: Option<Nlri>,
+  pub nlri: Option<Nlri>,
+  pub old_nlri: Option<Nlri>,
+  pub route_info: RouteInfo<'a>,
 }
 
 impl UpdateMessage<'_> {
@@ -291,6 +291,14 @@ impl UpdateMessage<'_> {
       Some(_) => None,
       None => Some((Afi::Ipv4, NlriKind::Unicast)),
     }
+  }
+
+  pub fn contains_nlri(&self) -> bool {
+    self.nlri.is_some() || self.old_nlri.is_some()
+  }
+
+  pub fn contains_withdrawn(&self) -> bool {
+    self.withdrawn.is_some() || self.old_withdrawn.is_some()
   }
 }
 

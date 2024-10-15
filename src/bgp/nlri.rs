@@ -7,6 +7,7 @@ use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
 use crate::net::{Afi, IpPrefix};
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::fmt::{self, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -174,6 +175,16 @@ impl NextHop {
         Some(reader.read_u128().await?.into()),
       ))),
       _ => Err(NlriError::InvalidNextHopLen(len).into()),
+    }
+  }
+}
+
+impl Display for NextHop {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      NextHop::V4(ip) => Display::fmt(ip, f),
+      NextHop::V6(ip, None) => Display::fmt(ip, f),
+      NextHop::V6(ip, Some(ll)) => write!(f, "{ip} ({ll})"),
     }
   }
 }

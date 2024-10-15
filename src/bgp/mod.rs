@@ -5,6 +5,7 @@ pub mod nlri;
 pub mod route;
 
 use crate::net::IpPrefix;
+use crate::sync::RwLock;
 use error::BgpError;
 use futures::future::pending;
 use log::info;
@@ -13,9 +14,11 @@ use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
+use route::Routes;
 use std::cmp::min;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::TcpStream;
@@ -23,6 +26,7 @@ use tokio::select;
 use tokio::time::{interval, Interval};
 use State::*;
 
+#[derive(Debug)]
 pub struct Config {
   pub router_id: u32,
   pub local_as: u32,
@@ -73,14 +77,16 @@ pub enum State {
 ///
 /// To implement:
 /// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
+#[derive(Debug)]
 pub struct Session {
   config: Config,
   pub(crate) state: State,
+  pub(crate) routes: Rc<RwLock<Routes>>,
 }
 
 impl Session {
-  pub const fn new(config: Config) -> Self {
-    Self { config, state: Active }
+  pub const fn new(routes: Rc<RwLock<Routes>>, config: Config) -> Self {
+    Self { routes, config, state: Active }
   }
 
   pub fn start(&mut self) {
@@ -184,9 +190,26 @@ impl Session {
               if let Some((afi, safi)) = msg.is_end_of_rib() {
                 info!("received End-of-RIB of ({afi}, {safi:?})");
               } else {
-                info!("received update: {msg:?}");
+                let mut routes = self.routes.write().await;
+                if msg.nlri.is_some() || msg.old_nlri.is_some() {
+                  let route_info = Rc::new(msg.route_info);
+                  (msg.nlri)
+                    .into_iter()
+                    .chain(msg.old_nlri)
+                    .for_each(|n| routes.commit(n, route_info.clone()));
+                }
+                if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
+                  (msg.withdrawn)
+                    .into_iter()
+                    .chain(msg.old_withdrawn)
+                    .for_each(|n| routes.withdraw(n));
+                }
+                drop(routes);
+                let routes = self.routes.read().await;
+                // info!("updated routes:");
+                routes.print();
+                println!();
               }
-              // TODO: process
             }
             Message::Keepalive => if let Some((dur, next)) = hold_timer {
               *next = Instant::now() + *dur;

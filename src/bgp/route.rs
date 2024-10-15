@@ -1,16 +1,102 @@
 use super::flow::FlowSpec;
-use super::nlri::NextHop;
+use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::rc::Rc;
 use strum::FromRepr;
 
-#[derive(Debug)]
+/// Route storage for a session.
+#[derive(Debug, Default)]
 pub struct Routes {
-  unicast: HashMap<IpPrefix, (NextHop, RouteInfo<'static>)>,
-  flow: HashMap<FlowSpec, RouteInfo<'static>>,
+  unicast: HashMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
+  flow: HashMap<FlowSpec, Rc<RouteInfo<'static>>>,
+}
+
+impl Routes {
+  pub fn new() -> Self {
+    Default::default()
+  }
+
+  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) {
+    match nlri.content {
+      NlriContent::Unicast { prefixes, next_hop } => {
+        self.unicast.extend(prefixes.into_iter().map(|p| (p, (next_hop, info.clone()))))
+      }
+      NlriContent::Flow { specs } => {
+        self.flow.extend(specs.into_iter().map(|s| (s, info.clone())));
+      }
+    }
+  }
+
+  pub fn withdraw(&mut self, nlri: Nlri) {
+    match nlri.content {
+      NlriContent::Unicast { prefixes, .. } => {
+        for prefix in prefixes {
+          self.unicast.remove(&prefix);
+        }
+      }
+      NlriContent::Flow { specs } => {
+        for spec in specs {
+          self.flow.remove(&spec);
+        }
+      }
+    }
+  }
+
+  pub fn print(&self) {
+    fn print_info(info: &RouteInfo) {
+      println!("    Origin: {}", info.origin);
+      if !info.as_path.is_empty() {
+        let len = info.as_path.len();
+        print!("    AS Path: {}", info.as_path[len - 1]);
+        info.as_path[..len - 1].iter().rev().for_each(|x| print!(", {x}"));
+        println!();
+      }
+      if !info.comm.is_empty() {
+        let mut iter = info.comm.iter();
+        let [x, y] = iter.next().unwrap();
+        print!("    Communities: ({x}, {y})");
+        iter.for_each(|[x, y]| print!(", ({x}, {y})"));
+        println!();
+      }
+      if !info.ext_comm.is_empty() {
+        let mut iter = info.ext_comm.iter();
+        let first = iter.next().unwrap();
+        print!("    Extended Communities: {first}");
+        iter.for_each(|x| print!(", {x}"));
+        println!();
+      }
+      if !info.ipv6_ext_comm.is_empty() {
+        let mut iter = info.ipv6_ext_comm.iter();
+        let first = iter.next().unwrap();
+        print!("    IPv6 Specific Extended Communities: {first}");
+        iter.for_each(|x| print!(", {x}"));
+        println!();
+      }
+      if !info.large_comm.is_empty() {
+        let mut iter = info.large_comm.iter();
+        let [x, y, z] = iter.next().unwrap();
+        print!("    Large Communities: ({x}, {y}, {z})");
+        iter.for_each(|[x, y, z]| print!(", ({x}, {y}, {z})"));
+        println!();
+      }
+    }
+
+    for (prefix, (next_hop, info)) in &self.unicast {
+      println!("{prefix}:");
+      println!("    Next Hop: {next_hop}");
+      print_info(info);
+      println!();
+    }
+    for (spec, info) in &self.flow {
+      println!("{spec}:");
+      print_info(info);
+      println!();
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +136,16 @@ pub enum Origin {
   Igp = 0,
   Egp = 1,
   Incomplete = 2,
+}
+
+impl Display for Origin {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Igp => f.write_str("IGP"),
+      Self::Egp => f.write_str("EGP"),
+      Self::Incomplete => f.write_str("incomplete"),
+    }
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -175,8 +271,8 @@ impl Display for ExtCommunity {
       (Some(_), Some(_)) => unreachable!(),
       (Some((g, l)), None) => {
         match [self.kind(), self.sub_kind()] {
-          [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(route-target, ")?,
-          [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(route-origin, ")?,
+          [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(rt, ")?,
+          [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(ro, ")?,
           bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
         }
         if l > u16::MAX.into() {
@@ -265,8 +361,8 @@ impl Debug for Ipv6ExtCommunity {
 impl Display for Ipv6ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match [self.kind, self.sub_kind] {
-      [0x00, 0x02] => f.write_str("(route-target, ")?,
-      [0x00, 0x03] => f.write_str("(route-origin, ")?,
+      [0x00, 0x02] => f.write_str("(rt, ")?,
+      [0x00, 0x03] => f.write_str("(ro, ")?,
       [0x00, 0x0d] => f.write_str("(rt-redirect-ipv6, ")?,
       bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
     }
