@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromRepr)]
 #[repr(u16)]
 pub enum Afi {
   Ipv4 = 1,
@@ -33,7 +33,7 @@ pub const fn prefix_max_len(prefix: IpAddr) -> u8 {
 }
 
 /// IP address with its prefix length attached.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IpWithPrefix {
   addr: IpAddr,
   prefix_len: u8,
@@ -169,7 +169,7 @@ pub enum IpWithPrefixErrorKind {
 }
 
 /// IP prefix.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IpPrefix {
   inner: IpWithPrefix,
 }

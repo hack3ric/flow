@@ -13,7 +13,7 @@ use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlowSpec {
   afi: Afi,
   inner: BTreeSet<ComponentStore>,
@@ -172,7 +172,7 @@ impl Borrow<ComponentKind> for ComponentStore {
   }
 }
 
-#[derive(Clone, Hash, EnumDiscriminants)]
+#[derive(Clone, PartialEq, Eq, Hash, EnumDiscriminants)]
 #[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum Component {
@@ -315,6 +315,31 @@ impl Component {
     let prefix = IpWithPrefix::new(IpAddr::V6(pattern.into()), len).prefix();
     Ok(f(prefix, offset))
   }
+
+  fn prefix_offset(&self) -> Option<(IpPrefix, u8)> {
+    use Component::*;
+    match self {
+      DstPrefix(p, o) | SrcPrefix(p, o) => Some((*p, *o)),
+      _ => None,
+    }
+  }
+
+  fn numeric_ops(&self) -> Option<&Ops<Numeric>> {
+    use Component::*;
+    match self {
+      Protocol(ops) | Port(ops) | DstPort(ops) | SrcPort(ops) | IcmpType(ops) | IcmpCode(ops) | PacketLen(ops)
+      | Dscp(ops) | FlowLabel(ops) => Some(ops),
+      _ => None,
+    }
+  }
+
+  fn bitmask_ops(&self) -> Option<&Ops<Bitmask>> {
+    use Component::*;
+    match self {
+      TcpFlags(ops) | Fragment(ops) => Some(ops),
+      _ => None,
+    }
+  }
 }
 
 impl Debug for Component {
@@ -345,6 +370,33 @@ impl Display for Component {
       Self::Dscp(ops) => ops.fmt(f, &"dscp"),
       Self::Fragment(ops) => ops.fmt(f, &"frag"),
       Self::FlowLabel(ops) => ops.fmt(f, &"flow_label"),
+    }
+  }
+}
+
+impl PartialOrd for Component {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for Component {
+  fn cmp(&self, other: &Self) -> Ordering {
+    match self.kind().cmp(&other.kind()) {
+      Ordering::Equal => {}
+      ord => return ord,
+    }
+    if let (Some((ip1, off1)), Some((ip2, off2))) = (self.prefix_offset(), other.prefix_offset()) {
+      match off1.cmp(&off2) {
+        Ordering::Equal => ip1.cmp(&ip2),
+        ord => ord,
+      }
+    } else if let (Some(ops1), Some(ops2)) = (self.numeric_ops(), other.numeric_ops()) {
+      ops1.cmp(&ops2)
+    } else if let (Some(ops1), Some(ops2)) = (self.bitmask_ops(), other.bitmask_ops()) {
+      ops1.cmp(&ops2)
+    } else {
+      unreachable!()
     }
   }
 }
@@ -438,6 +490,30 @@ impl<K: OpKind> Display for Ops<K> {
 impl<K: OpKind> Clone for Ops<K> {
   fn clone(&self) -> Self {
     Self(self.0.clone())
+  }
+}
+
+impl<K: OpKind> PartialEq for Ops<K> {
+  fn eq(&self, other: &Self) -> bool {
+    self.0 == other.0
+  }
+}
+
+impl<K: OpKind> Eq for Ops<K> {}
+
+impl<K: OpKind> PartialOrd for Ops<K> {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(&other))
+  }
+}
+
+impl<K: OpKind> Ord for Ops<K> {
+  fn cmp(&self, other: &Self) -> Ordering {
+    let mut self_buf = Vec::new();
+    let mut other_buf = Vec::new();
+    self.serialize(&mut self_buf);
+    other.serialize(&mut other_buf);
+    self_buf.cmp(&other_buf)
   }
 }
 
