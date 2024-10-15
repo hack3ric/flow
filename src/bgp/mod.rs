@@ -1,8 +1,8 @@
 pub mod error;
 pub mod flow;
 pub mod msg;
-
 pub mod nlri;
+pub mod route;
 
 use crate::net::IpPrefix;
 use error::BgpError;
@@ -64,7 +64,9 @@ pub enum State {
 /// - RFC 2545: Use of BGP-4 Multiprotocol Extensions for IPv6 Inter-Domain
 ///   Routing (?)
 /// - RFC 1997: BGP Communities Attribute
-/// - RFC 4360: BGP Extended Communities Attribute \[partial\]
+/// - RFC 4360: BGP Extended Communities Attribute
+/// - RFC 5668: 4-Octet AS Specific BGP Extended Community
+/// - RFC 5701: IPv6 Address Specific BGP Extended Community Attribute
 /// - RFC 8092: BGP Large Communities Attribute
 /// - RFC 8955: Dissemination of Flow Specification Rules
 /// - RFC 8956: Dissemination of Flow Specification Rules for IPv6

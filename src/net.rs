@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr)]
 #[repr(u16)]
 pub enum Afi {
   Ipv4 = 1,
@@ -16,7 +16,7 @@ pub enum Afi {
 }
 
 impl Display for Afi {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match self {
       Self::Ipv4 => f.write_str("IPv4"),
       Self::Ipv6 => f.write_str("IPv6"),

@@ -5,6 +5,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::marker::PhantomData;
 use std::net::IpAddr;
@@ -12,7 +13,7 @@ use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct FlowSpec {
   afi: Afi,
   inner: BTreeSet<ComponentStore>,
@@ -126,7 +127,7 @@ impl Display for FlowSpec {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 struct ComponentStore(Component);
 
 impl PartialEq for ComponentStore {
@@ -171,7 +172,7 @@ impl Borrow<ComponentKind> for ComponentStore {
   }
 }
 
-#[derive(Clone, EnumDiscriminants)]
+#[derive(Clone, Hash, EnumDiscriminants)]
 #[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum Component {
@@ -440,6 +441,12 @@ impl<K: OpKind> Clone for Ops<K> {
   }
 }
 
+impl<K: OpKind> Hash for Ops<K> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.0.hash(state);
+  }
+}
+
 pub struct Op<K: OpKind> {
   flags: u8,
   value: u64,
@@ -598,6 +605,13 @@ impl<K: OpKind> PartialEq for Op<K> {
 }
 
 impl<K: OpKind> Eq for Op<K> {}
+
+impl<K: OpKind> Hash for Op<K> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.flags.hash(state);
+    self.value.hash(state);
+  }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRepr)]
 #[repr(u8)]

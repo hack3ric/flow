@@ -1,12 +1,13 @@
 use super::error::BgpError;
 use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
+use super::route::{Origin, RouteInfo};
 use crate::bgp::extend_with_u8_len;
+use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::io;
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -262,6 +263,7 @@ pub enum PathAttr {
   MpReachNlri = 14,
   MpUnreachNlri = 15,
   ExtCommunities = 16,
+  Ipv6ExtCommunities = 25,
   LargeCommunities = 32,
 }
 
@@ -274,31 +276,13 @@ pub struct UpdateMessage<'a> {
   old_withdrawn: Option<Nlri>,
   nlri: Option<Nlri>,
   old_nlri: Option<Nlri>,
-  origin: Origin,
-
-  /// AS path, stored in reverse.
-  as_path: Cow<'a, [u32]>,
-
-  comm: HashSet<[u16; 2]>,
-  ext_comm: HashSet<[u32; 2]>,
-  large_comm: HashSet<[u32; 3]>,
-
-  /// Transitive but unrecognized path attributes.
-  other_attrs: HashMap<u8, Cow<'a, [u8]>>,
+  route_info: RouteInfo<'a>,
 }
 
 impl UpdateMessage<'_> {
   pub fn is_end_of_rib(&self) -> Option<(Afi, NlriKind)> {
     use NlriContent::*;
-    if self.old_withdrawn.is_some()
-      || self.nlri.is_some()
-      || self.old_nlri.is_some()
-      || !self.as_path.is_empty()
-      || !self.comm.is_empty()
-      || !self.ext_comm.is_empty()
-      || !self.large_comm.is_empty()
-      || !self.other_attrs.is_empty()
-    {
+    if self.old_withdrawn.is_some() || self.nlri.is_some() || self.old_nlri.is_some() || !self.route_info.is_empty() {
       return None;
     }
     match &self.withdrawn {
@@ -326,12 +310,15 @@ impl UpdateMessage<'static> {
       old_withdrawn: None,
       nlri: None,
       old_nlri: None,
-      origin: Origin::Incomplete,
-      as_path: Cow::Borrowed(&[]),
-      comm: HashSet::new(),
-      ext_comm: HashSet::new(),
-      large_comm: HashSet::new(),
-      other_attrs: HashMap::new(),
+      route_info: RouteInfo {
+        origin: Origin::Incomplete,
+        as_path: Cow::Borrowed(&[]),
+        comm: HashSet::new(),
+        ext_comm: HashSet::new(),
+        ipv6_ext_comm: HashSet::new(),
+        large_comm: HashSet::new(),
+        other_attrs: HashMap::new(),
+      },
     };
 
     let withdrawn_len = reader.read_u16().await?;
@@ -385,7 +372,7 @@ impl UpdateMessage<'static> {
             return Err(Notification::Update(AttrLen(pattr_buf)).into());
           }
           let origin = pattrs_reader.read_u8().await?;
-          result.origin = match Origin::from_repr(origin) {
+          result.route_info.origin = match Origin::from_repr(origin) {
             Some(x) => x,
             None => {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [origin]).await?;
@@ -415,7 +402,7 @@ impl UpdateMessage<'static> {
             return Err(Notification::Update(MalformedAsPath).into());
           }
           as_path.reverse();
-          result.as_path = as_path.into();
+          result.route_info.as_path = as_path.into();
         }
         Some(PathAttr::NextHop) => {
           if len != 4 {
@@ -427,11 +414,12 @@ impl UpdateMessage<'static> {
         // TODO: MED, local pref, atomic aggregate, aggregator
 
         // Known, optional, transitive attributes
-        Some(PathAttr::Communities | PathAttr::ExtCommunities | PathAttr::LargeCommunities)
-          if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 =>
-        {
+        Some(
+          PathAttr::Communities | PathAttr::ExtCommunities | PathAttr::Ipv6ExtCommunities | PathAttr::LargeCommunities,
+        ) if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 => {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
+        #[rustfmt::skip]
         Some(PathAttr::Communities) => {
           if len % 4 != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
@@ -439,14 +427,12 @@ impl UpdateMessage<'static> {
           }
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.comm = opt_buf
+          result.route_info.comm = opt_buf
             .chunks_exact(4)
-            .map(|x| {
-              [
-                u16::from_be_bytes(x[0..2].try_into().unwrap()),
-                u16::from_be_bytes(x[2..4].try_into().unwrap()),
-              ]
-            })
+            .map(|x| [
+              u16::from_be_bytes(x[0..2].try_into().unwrap()),
+              u16::from_be_bytes(x[2..4].try_into().unwrap()),
+            ])
             .collect();
         }
         Some(PathAttr::ExtCommunities) => {
@@ -456,16 +442,30 @@ impl UpdateMessage<'static> {
           }
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.ext_comm = opt_buf
+          result.route_info.ext_comm = opt_buf
             .chunks_exact(8)
-            .map(|x| {
-              [
-                u32::from_be_bytes(x[0..4].try_into().unwrap()),
-                u32::from_be_bytes(x[4..8].try_into().unwrap()),
-              ]
-            })
+            .map(|x| ExtCommunity::from_bytes(x.try_into().unwrap()))
             .collect();
         }
+        Some(PathAttr::Ipv6ExtCommunities) => {
+          if len % 20 != 0 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(OptAttr(pattr_buf)).into());
+          }
+          let mut opt_buf = vec![0; len.into()];
+          pattrs_reader.read_exact(&mut opt_buf).await?;
+          result.route_info.ipv6_ext_comm = if let Some(comm) = opt_buf
+            .chunks_exact(20)
+            .map(|x| Ipv6ExtCommunity::from_bytes(x.try_into().unwrap()))
+            .collect()
+          {
+            comm
+          } else {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, opt_buf).await?;
+            return Err(Notification::Update(OptAttr(pattr_buf)).into());
+          }
+        }
+        #[rustfmt::skip]
         Some(PathAttr::LargeCommunities) => {
           if len % 12 != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
@@ -473,15 +473,13 @@ impl UpdateMessage<'static> {
           }
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.large_comm = opt_buf
+          result.route_info.large_comm = opt_buf
             .chunks_exact(12)
-            .map(|x| {
-              [
-                u32::from_be_bytes(x[0..4].try_into().unwrap()),
-                u32::from_be_bytes(x[4..8].try_into().unwrap()),
-                u32::from_be_bytes(x[8..12].try_into().unwrap()),
-              ]
-            })
+            .map(|x| [
+              u32::from_be_bytes(x[0..4].try_into().unwrap()),
+              u32::from_be_bytes(x[4..8].try_into().unwrap()),
+              u32::from_be_bytes(x[8..12].try_into().unwrap()),
+            ])
             .collect();
         }
 
@@ -527,7 +525,7 @@ impl UpdateMessage<'static> {
           // store transitive unknown attributes
           if flags & PF_TRANSITIVE != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            result.other_attrs.insert(kind, pattr_buf);
+            result.route_info.other_attrs.insert(kind, pattr_buf);
           }
           // silently ignore optional non-transitive unrecognized attributes
         }
@@ -598,16 +596,18 @@ impl MessageSend for UpdateMessage<'_> {
       }
 
       // Path attributes
-      buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.origin as u8]);
-      let as_path_len = u8::try_from(self.as_path.len() * 4).expect("AS path length should fit in u8");
+      buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.route_info.origin as u8]);
+      let as_path_len = u8::try_from(self.route_info.as_path.len() * 4).expect("AS path length should fit in u8");
       buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, as_path_len]);
-      buf.extend(self.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
+      buf.extend(self.route_info.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
 
       // BGP-4 next hop
       if let Some((_, next_hop)) = &old_nlri {
         buf.extend([PF_WELL_KNOWN, PathAttr::NextHop as u8, 4]);
         buf.extend(next_hop.octets());
       }
+
+      // TODO: communities
     });
 
     // BGP-4 NLRI
@@ -618,14 +618,6 @@ impl MessageSend for UpdateMessage<'_> {
       })
     }
   }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr)]
-#[repr(u8)]
-pub enum Origin {
-  Igp = 0,
-  Egp = 1,
-  Incomplete = 2,
 }
 
 #[derive(Debug, Clone, EnumDiscriminants, Error)]
