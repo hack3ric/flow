@@ -5,54 +5,58 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::ops::{Deref, DerefMut};
 use std::task::{Context, Poll, Waker};
 
-pub struct RwLock<T, const R: usize = 4, const W: usize = 4> {
-  raw: RawRwLock<R, W>,
+// TODO: prevent too many readers from blocking writers?
+
+#[derive(Debug)]
+pub struct RwLock<T> {
+  raw: RawRwLock,
   value: RefCell<T>, // TODO: use UnsafeCell
 }
 
-impl<T, const R: usize, const W: usize> RwLock<T, R, W> {
+impl<T> RwLock<T> {
   pub fn new(value: T) -> Self {
     Self { raw: RawRwLock::new(), value: RefCell::new(value) }
   }
 
-  pub async fn read(&self) -> RwLockReadGuard<T, R, W> {
+  pub async fn read(&self) -> RwLockReadGuard<T> {
     let _raw = self.raw.read().await;
     let value = self.value.borrow();
     RwLockReadGuard { _raw, value }
   }
 
-  pub async fn write(&self) -> RwLockWriteGuard<T, R, W> {
+  pub async fn write(&self) -> RwLockWriteGuard<T> {
     let _raw = self.raw.write().await;
     let value = self.value.borrow_mut();
     RwLockWriteGuard { _raw, value }
   }
 }
 
-pub struct RwLockReadGuard<'a, T, const R: usize, const W: usize> {
-  _raw: RawRwLockGuard<'a, R, W>,
+#[derive(Debug)]
+pub struct RwLockReadGuard<'a, T> {
+  _raw: RawRwLockGuard<'a>,
   value: Ref<'a, T>,
 }
 
-impl<T, const R: usize, const W: usize> Deref for RwLockReadGuard<'_, T, R, W> {
+impl<T> Deref for RwLockReadGuard<'_, T> {
   type Target = T;
   fn deref(&self) -> &Self::Target {
     &self.value
   }
 }
 
-pub struct RwLockWriteGuard<'a, T, const R: usize, const W: usize> {
-  _raw: RawRwLockGuard<'a, R, W>,
+pub struct RwLockWriteGuard<'a, T> {
+  _raw: RawRwLockGuard<'a>,
   value: RefMut<'a, T>,
 }
 
-impl<T, const R: usize, const W: usize> Deref for RwLockWriteGuard<'_, T, R, W> {
+impl<T> Deref for RwLockWriteGuard<'_, T> {
   type Target = T;
   fn deref(&self) -> &Self::Target {
     &self.value
   }
 }
 
-impl<T, const R: usize, const W: usize> DerefMut for RwLockWriteGuard<'_, T, R, W> {
+impl<T> DerefMut for RwLockWriteGuard<'_, T> {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.value
   }
@@ -60,13 +64,13 @@ impl<T, const R: usize, const W: usize> DerefMut for RwLockWriteGuard<'_, T, R, 
 
 /// Single-threaded raw read-write lock
 #[derive(Debug)]
-pub struct RawRwLock<const R: usize, const W: usize>(RefCell<Inner<R, W>>);
+pub struct RawRwLock(RefCell<Inner>);
 
 #[derive(Debug)]
-struct Inner<const R: usize, const W: usize> {
+struct Inner {
   state: State,
-  read_wakers: SmallVec<[Waker; R]>,
-  write_wakers: SmallVec<[Waker; W]>,
+  read_wakers: SmallVec<[Waker; 4]>,
+  write_wakers: SmallVec<[Waker; 4]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +80,7 @@ enum State {
   Vacant,
 }
 
-impl<const R: usize, const W: usize> RawRwLock<R, W> {
+impl RawRwLock {
   pub fn new() -> Self {
     Self(RefCell::new(Inner {
       state: State::Vacant,
@@ -86,8 +90,8 @@ impl<const R: usize, const W: usize> RawRwLock<R, W> {
   }
 }
 
-impl<const R: usize, const W: usize> RawRwLock<R, W> {
-  pub fn poll_read<'a>(&'a self, cx: &mut Context) -> Poll<RawRwLockGuard<'a, R, W>> {
+impl RawRwLock {
+  pub fn poll_read<'a>(&'a self, cx: &mut Context) -> Poll<RawRwLockGuard<'a>> {
     let mut inner = self.0.borrow_mut();
     match inner.state {
       State::Vacant => {
@@ -107,7 +111,7 @@ impl<const R: usize, const W: usize> RawRwLock<R, W> {
     }
   }
 
-  pub fn poll_write<'a>(&'a self, cx: &mut Context) -> Poll<RawRwLockGuard<'a, R, W>> {
+  pub fn poll_write<'a>(&'a self, cx: &mut Context) -> Poll<RawRwLockGuard<'a>> {
     let mut inner = self.0.borrow_mut();
     match inner.state {
       State::Vacant => {
@@ -122,18 +126,19 @@ impl<const R: usize, const W: usize> RawRwLock<R, W> {
     }
   }
 
-  pub fn read(&self) -> impl Future<Output = RawRwLockGuard<R, W>> + '_ {
+  pub fn read(&self) -> impl Future<Output = RawRwLockGuard> + '_ {
     poll_fn(|cx| self.poll_read(cx))
   }
 
-  pub fn write(&self) -> impl Future<Output = RawRwLockGuard<R, W>> + '_ {
+  pub fn write(&self) -> impl Future<Output = RawRwLockGuard> + '_ {
     poll_fn(|cx| self.poll_write(cx))
   }
 }
 
-pub struct RawRwLockGuard<'a, const R: usize, const W: usize>(&'a RefCell<Inner<R, W>>);
+#[derive(Debug)]
+pub struct RawRwLockGuard<'a>(&'a RefCell<Inner>);
 
-impl<const R: usize, const W: usize> Drop for RawRwLockGuard<'_, R, W> {
+impl Drop for RawRwLockGuard<'_> {
   fn drop(&mut self) {
     let mut inner = self.0.borrow_mut();
     let read_count = if let State::Read(count) = inner.state {
