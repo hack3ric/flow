@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr};
@@ -40,7 +41,6 @@ pub struct IpWithPrefix {
 }
 
 impl IpWithPrefix {
-  #[inline]
   pub const fn new(addr: IpAddr, prefix_len: u8) -> Self {
     assert!(
       prefix_len <= prefix_max_len(addr),
@@ -49,22 +49,18 @@ impl IpWithPrefix {
     Self { addr, prefix_len }
   }
 
-  #[inline]
   pub const fn addr(self) -> IpAddr {
     self.addr
   }
 
-  #[inline]
   pub const fn prefix_len(self) -> u8 {
     self.prefix_len
   }
 
-  #[inline]
   const fn mask_raw(self) -> u128 {
     u128::MAX.wrapping_shl((prefix_max_len(self.addr) - self.prefix_len) as u32)
   }
 
-  #[inline]
   pub fn mask(self) -> IpAddr {
     match self.addr {
       IpAddr::V4(_) => Ipv4Addr::from(self.mask_raw() as u32).into(),
@@ -72,7 +68,6 @@ impl IpWithPrefix {
     }
   }
 
-  #[inline]
   pub fn prefix(self) -> IpPrefix {
     let mut inner = self;
     match (&mut inner.addr, self.mask()) {
@@ -83,7 +78,6 @@ impl IpWithPrefix {
     IpPrefix { inner }
   }
 
-  #[inline]
   pub const fn afi(&self) -> Afi {
     if self.is_ipv4() {
       Afi::Ipv4
@@ -91,25 +85,23 @@ impl IpWithPrefix {
       Afi::Ipv6
     }
   }
-  #[inline]
+
   pub const fn is_ipv4(&self) -> bool {
     self.addr.is_ipv4()
   }
-  #[inline]
+
   pub const fn is_ipv6(&self) -> bool {
     self.addr.is_ipv6()
   }
 }
 
 impl Debug for IpWithPrefix {
-  #[inline]
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     Display::fmt(self, f)
   }
 }
 
 impl Display for IpWithPrefix {
-  #[inline]
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     write!(f, "{}/{}", self.addr, self.prefix_len)
   }
@@ -136,7 +128,6 @@ impl FromStr for IpWithPrefix {
 }
 
 impl From<IpAddr> for IpWithPrefix {
-  #[inline]
   fn from(addr: IpAddr) -> Self {
     Self { addr, prefix_len: prefix_max_len(addr) }
   }
@@ -150,7 +141,6 @@ pub struct IpWithPrefixError {
 }
 
 impl IpWithPrefixError {
-  #[inline]
   fn new(kind: impl Into<IpWithPrefixErrorKind>, value: impl Into<String>) -> Self {
     Self { kind: kind.into(), value: value.into() }
   }
@@ -169,7 +159,7 @@ pub enum IpWithPrefixErrorKind {
 }
 
 /// IP prefix.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IpPrefix {
   inner: IpWithPrefix,
 }
@@ -178,7 +168,6 @@ impl IpPrefix {
   pub const V4_ALL: Self = Self { inner: IpWithPrefix { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix_len: 0 } };
   pub const V6_ALL: Self = Self { inner: IpWithPrefix { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), prefix_len: 0 } };
 
-  #[inline]
   pub fn new(prefix: IpAddr, len: u8) -> Self {
     let inner = IpWithPrefix::new(prefix, len);
     let result = inner.prefix();
@@ -186,22 +175,18 @@ impl IpPrefix {
     result
   }
 
-  #[inline]
   pub const fn prefix(self) -> IpAddr {
     self.inner.addr
   }
 
-  #[inline]
   pub const fn len(self) -> u8 {
     self.inner.prefix_len
   }
 
-  #[inline]
   pub fn mask(self) -> IpAddr {
     self.inner.mask()
   }
 
-  #[inline]
   pub fn contains<T: Into<Self>>(self, other: T) -> bool {
     use std::cmp::Ordering::*;
     use IpAddr::*;
@@ -218,20 +203,18 @@ impl IpPrefix {
     }
   }
 
-  #[inline]
   pub const fn is_single(&self) -> bool {
     prefix_max_len(self.prefix()) == self.len()
   }
 
-  #[inline]
   pub const fn afi(&self) -> Afi {
     self.inner.afi()
   }
-  #[inline]
+
   pub const fn is_ipv4(&self) -> bool {
     self.inner.is_ipv4()
   }
-  #[inline]
+
   pub const fn is_ipv6(&self) -> bool {
     self.inner.is_ipv6()
   }
@@ -251,18 +234,17 @@ impl IpPrefix {
     }
   }
 
-  #[inline]
   pub(crate) async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, IpPrefixError> {
     match afi {
       Afi::Ipv4 => Self::recv_v4(reader).await,
       Afi::Ipv6 => Self::recv_v6(reader).await,
     }
   }
-  #[inline]
+
   pub(crate) async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
     Self::recv_generic::<32, 4, _, _>(reader, IpAddr::V4).await
   }
-  #[inline]
+
   pub(crate) async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
     Self::recv_generic::<128, 16, _, _>(reader, IpAddr::V6).await
   }
@@ -296,14 +278,12 @@ impl IpPrefix {
 }
 
 impl Debug for IpPrefix {
-  #[inline]
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     Display::fmt(&self.inner, f)
   }
 }
 
 impl Display for IpPrefix {
-  #[inline]
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     Display::fmt(&self.inner, f)
   }
@@ -312,7 +292,6 @@ impl Display for IpPrefix {
 impl FromStr for IpPrefix {
   type Err = IpPrefixError;
 
-  #[inline]
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     let inner = s
       .parse::<IpWithPrefix>()
@@ -327,9 +306,23 @@ impl FromStr for IpPrefix {
 }
 
 impl From<IpAddr> for IpPrefix {
-  #[inline]
   fn from(addr: IpAddr) -> Self {
     Self::new(addr, prefix_max_len(addr))
+  }
+}
+
+impl PartialOrd for IpPrefix {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for IpPrefix {
+  fn cmp(&self, other: &Self) -> Ordering {
+    match self.inner.prefix_len.cmp(&other.inner.prefix_len) {
+      Ordering::Equal => self.inner.addr.cmp(&other.inner.addr),
+      ord => ord,
+    }
   }
 }
 
