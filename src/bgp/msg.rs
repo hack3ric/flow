@@ -3,7 +3,7 @@ use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
 use super::route::{Origin, RouteInfo};
 use crate::bgp::extend_with_u8_len;
-use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity};
+use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
 use std::borrow::Cow;
@@ -427,7 +427,6 @@ impl UpdateMessage<'static> {
         ) if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 => {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
-        #[rustfmt::skip]
         Some(PathAttr::Communities) => {
           if len % 4 != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
@@ -437,10 +436,7 @@ impl UpdateMessage<'static> {
           pattrs_reader.read_exact(&mut opt_buf).await?;
           result.route_info.comm = opt_buf
             .chunks_exact(4)
-            .map(|x| [
-              u16::from_be_bytes(x[0..2].try_into().unwrap()),
-              u16::from_be_bytes(x[2..4].try_into().unwrap()),
-            ])
+            .map(|x| Community::from_bytes(x.try_into().unwrap()))
             .collect();
         }
         Some(PathAttr::ExtCommunities) => {
@@ -473,7 +469,6 @@ impl UpdateMessage<'static> {
             return Err(Notification::Update(OptAttr(pattr_buf)).into());
           }
         }
-        #[rustfmt::skip]
         Some(PathAttr::LargeCommunities) => {
           if len % 12 != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
@@ -483,11 +478,7 @@ impl UpdateMessage<'static> {
           pattrs_reader.read_exact(&mut opt_buf).await?;
           result.route_info.large_comm = opt_buf
             .chunks_exact(12)
-            .map(|x| [
-              u32::from_be_bytes(x[0..4].try_into().unwrap()),
-              u32::from_be_bytes(x[4..8].try_into().unwrap()),
-              u32::from_be_bytes(x[8..12].try_into().unwrap()),
-            ])
+            .map(|x| LargeCommunity::from_bytes(x.try_into().unwrap()))
             .collect();
         }
 

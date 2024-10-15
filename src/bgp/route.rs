@@ -2,7 +2,7 @@ use super::flow::FlowSpec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
@@ -11,8 +11,8 @@ use strum::FromRepr;
 /// Route storage for a session.
 #[derive(Debug, Default)]
 pub struct Routes {
-  unicast: HashMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
-  flow: HashMap<FlowSpec, Rc<RouteInfo<'static>>>,
+  unicast: BTreeMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
+  flow: BTreeMap<FlowSpec, Rc<RouteInfo<'static>>>,
 }
 
 impl Routes {
@@ -47,40 +47,40 @@ impl Routes {
   }
 
   pub fn print(&self) {
+    fn print_series<'a, I: Iterator<Item = &'a D>, D: Display + 'a>(mut iter: I) {
+      let Some(first) = iter.next() else {
+        print!("<empty>");
+        return;
+      };
+      print!("{first}");
+      iter.for_each(|x| print!(", {x}"));
+    }
+
     fn print_info(info: &RouteInfo) {
       println!("    Origin: {}", info.origin);
       if !info.as_path.is_empty() {
-        let len = info.as_path.len();
-        print!("    AS Path: {}", info.as_path[len - 1]);
-        info.as_path[..len - 1].iter().rev().for_each(|x| print!(", {x}"));
+        print!("    AS Path: ");
+        print_series(info.as_path.iter().rev());
         println!();
       }
       if !info.comm.is_empty() {
-        let mut iter = info.comm.iter();
-        let [x, y] = iter.next().unwrap();
-        print!("    Communities: ({x}, {y})");
-        iter.for_each(|[x, y]| print!(", ({x}, {y})"));
+        print!("    Communities: ");
+        print_series(info.comm.iter());
         println!();
       }
       if !info.ext_comm.is_empty() {
-        let mut iter = info.ext_comm.iter();
-        let first = iter.next().unwrap();
-        print!("    Extended Communities: {first}");
-        iter.for_each(|x| print!(", {x}"));
+        print!("    Extended Communities: ");
+        print_series(info.ext_comm.iter());
         println!();
       }
       if !info.ipv6_ext_comm.is_empty() {
-        let mut iter = info.ipv6_ext_comm.iter();
-        let first = iter.next().unwrap();
-        print!("    IPv6 Specific Extended Communities: {first}");
-        iter.for_each(|x| print!(", {x}"));
+        print!("    IPv6 Specific Extended Communities:");
+        print_series(info.ipv6_ext_comm.iter());
         println!();
       }
       if !info.large_comm.is_empty() {
-        let mut iter = info.large_comm.iter();
-        let [x, y, z] = iter.next().unwrap();
-        print!("    Large Communities: ({x}, {y}, {z})");
-        iter.for_each(|[x, y, z]| print!(", ({x}, {y}, {z})"));
+        print!("    Large Communities: ");
+        print_series(info.large_comm.iter());
         println!();
       }
     }
@@ -107,13 +107,13 @@ pub struct RouteInfo<'a> {
   pub(super) as_path: Cow<'a, [u32]>,
 
   /// RFC 1997 communities.
-  pub(super) comm: HashSet<[u16; 2]>,
+  pub(super) comm: HashSet<Community>,
   /// RFC 4360/5668 extended communities.
   pub(super) ext_comm: HashSet<ExtCommunity>,
   /// RFC 5701 IPv6 address-specific extended communities.
   pub(super) ipv6_ext_comm: HashSet<Ipv6ExtCommunity>,
   /// RFC 8092 large communities.
-  pub(super) large_comm: HashSet<[u32; 3]>,
+  pub(super) large_comm: HashSet<LargeCommunity>,
 
   /// Transitive but unrecognized path attributes.
   pub(super) other_attrs: HashMap<u8, Cow<'a, [u8]>>,
@@ -145,6 +145,30 @@ impl Display for Origin {
       Self::Egp => f.write_str("EGP"),
       Self::Incomplete => f.write_str("incomplete"),
     }
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Community([u16; 2]);
+
+impl Community {
+  pub fn from_bytes(bytes: [u8; 4]) -> Self {
+    Self([
+      u16::from_be_bytes([bytes[0], bytes[1]]),
+      u16::from_be_bytes([bytes[2], bytes[3]]),
+    ])
+  }
+}
+
+impl Debug for Community {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    Display::fmt(self, f)
+  }
+}
+
+impl Display for Community {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "({}, {})", self.0[0], self.0[1])
   }
 }
 
@@ -261,7 +285,7 @@ impl ExtCommunity {
 
 impl Debug for ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    write!(f, "ExtCommunity{self}")
+    Display::fmt(self, f)
   }
 }
 
@@ -367,6 +391,31 @@ impl Display for Ipv6ExtCommunity {
       bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
     }
     write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LargeCommunity([u32; 3]);
+
+impl LargeCommunity {
+  pub fn from_bytes(bytes: [u8; 12]) -> Self {
+    Self([
+      u32::from_be_bytes(bytes[0..4].try_into().unwrap()),
+      u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+      u32::from_be_bytes(bytes[8..12].try_into().unwrap()),
+    ])
+  }
+}
+
+impl Debug for LargeCommunity {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    Display::fmt(self, f)
+  }
+}
+
+impl Display for LargeCommunity {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "({}, {}, {})", self.0[0], self.0[1], self.0[2])
   }
 }
 
