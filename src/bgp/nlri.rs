@@ -1,10 +1,10 @@
 //! Network Layer Reachability Information (NLRI).
 
-use super::error::BgpError;
 use super::extend_with_u16_len;
 use super::flow::FlowSpec;
 use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
 use crate::net::{Afi, IpPrefix};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
@@ -96,13 +96,13 @@ impl Nlri {
     }
   }
 
-  pub async fn read_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  pub async fn read_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     Self::read_mp(reader, true).await
   }
-  pub async fn read_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  pub async fn read_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     Self::read_mp(reader, false).await
   }
-  pub async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self, BgpError> {
+  pub async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> super::Result<Self> {
     let afi = reader.read_u16().await?;
     let safi = reader.read_u8().await?;
     let next_hop;
@@ -139,7 +139,7 @@ impl Nlri {
 /// Next hop address.
 ///
 /// IPv6 next hop address may include a link-local IPv6 address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NextHop {
   V4(Ipv4Addr),
   V6(Ipv6Addr, Option<Ipv6Addr>),
@@ -164,7 +164,7 @@ impl NextHop {
     }
   }
 
-  async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+  async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
     let len = reader.read_u8().await?;
     match len {
       0 => Ok(None),

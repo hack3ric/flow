@@ -1,25 +1,27 @@
-pub mod error;
 pub mod flow;
 pub mod msg;
 pub mod nlri;
 pub mod route;
 
-use crate::net::IpPrefix;
+use crate::net::{IpPrefix, IpPrefixError, IpPrefixErrorKind};
 use crate::sync::RwLock;
-use error::BgpError;
+use flow::FlowError;
 use futures::future::pending;
 use log::info;
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
+use nlri::NlriError;
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
 use std::cmp::min;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
@@ -93,7 +95,7 @@ impl Session {
     self.state = Active;
   }
 
-  pub async fn stop(&mut self) -> Result<(), BgpError> {
+  pub async fn stop(&mut self) -> Result<()> {
     match &mut self.state {
       Idle | Connect | Active => {}
       OpenSent { stream } | OpenConfirm { stream, .. } | Established { stream, .. } => {
@@ -104,12 +106,12 @@ impl Session {
     Ok(())
   }
 
-  pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<(), BgpError> {
+  pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
     let ip = addr.ip();
     if !self.config.remote_ip.iter().any(|x| x.contains(ip)) {
-      return Err(BgpError::UnacceptableAddr(ip));
+      return Err(Error::UnacceptableAddr(ip));
     } else if !matches!(self.state, Active) {
-      return Err(BgpError::AlreadyRunning);
+      return Err(Error::AlreadyRunning);
     }
     let open = OpenMessage {
       my_as: self.config.local_as,
@@ -123,7 +125,7 @@ impl Session {
     Ok(())
   }
 
-  pub async fn process(&mut self) -> Result<(), BgpError> {
+  pub async fn process(&mut self) -> Result<()> {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
@@ -131,11 +133,8 @@ impl Session {
     result
   }
 
-  async fn process_inner(&mut self) -> Result<(), BgpError> {
-    fn bad_type<'a>(
-      msg: Message,
-      stream: &'a mut (impl AsyncWrite + Unpin),
-    ) -> impl Future<Output = Result<(), BgpError>> + 'a {
+  async fn process_inner(&mut self) -> Result<()> {
+    fn bad_type<'a>(msg: Message, stream: &'a mut (impl AsyncWrite + Unpin)) -> impl Future<Output = Result<()>> + 'a {
       BadType(msg.kind() as u8).send_and_return(stream)
     }
 
@@ -254,3 +253,41 @@ fn extend_with_u16_len<F: FnOnce(&mut Vec<u8>)>(buf: &mut Vec<u8>, extend: F) {
   let len = u16::try_from(buf.len() - len_pos - 2).expect("");
   buf[len_pos..len_pos + 2].copy_from_slice(&len.to_be_bytes())
 }
+
+#[derive(Debug, Error)]
+pub enum Error {
+  #[error("address {0} not acceptable")]
+  UnacceptableAddr(IpAddr),
+  #[error("session is already running")]
+  AlreadyRunning,
+
+  #[error(transparent)]
+  Notification(#[from] Notification<'static>),
+  #[error("remote said: {0}")]
+  Remote(Notification<'static>),
+
+  #[error(transparent)]
+  Io(#[from] io::Error),
+  #[error(transparent)]
+  IpPrefix(IpPrefixError),
+  #[error(transparent)]
+  Flow(#[from] FlowError),
+  #[error(transparent)]
+  Nlri(#[from] NlriError),
+  #[error(transparent)]
+  Bincode(#[from] bincode::Error),
+
+  #[error(transparent)]
+  Anyhow(#[from] anyhow::Error),
+}
+
+impl From<IpPrefixError> for Error {
+  fn from(e: IpPrefixError) -> Self {
+    match e.kind {
+      IpPrefixErrorKind::Io(e) => Self::Io(e),
+      _ => Self::IpPrefix(e),
+    }
+  }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;

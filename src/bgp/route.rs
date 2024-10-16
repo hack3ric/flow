@@ -1,6 +1,8 @@
 use super::flow::FlowSpec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
+use crate::util::MaybeRc;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
@@ -9,10 +11,10 @@ use std::rc::Rc;
 use strum::FromRepr;
 
 /// Route storage for a session.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Routes {
-  unicast: BTreeMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
-  flow: BTreeMap<FlowSpec, Rc<RouteInfo<'static>>>,
+  unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
+  flow: BTreeMap<FlowSpec, MaybeRc<RouteInfo<'static>>>,
 }
 
 impl Routes {
@@ -22,11 +24,11 @@ impl Routes {
 
   pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) {
     match nlri.content {
-      NlriContent::Unicast { prefixes, next_hop } => {
-        self.unicast.extend(prefixes.into_iter().map(|p| (p, (next_hop, info.clone()))))
-      }
+      NlriContent::Unicast { prefixes, next_hop } => self
+        .unicast
+        .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
-        self.flow.extend(specs.into_iter().map(|s| (s, info.clone())));
+        self.flow.extend(specs.into_iter().map(|s| (s, MaybeRc::Rc(info.clone()))));
       }
     }
   }
@@ -99,7 +101,7 @@ impl Routes {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteInfo<'a> {
   pub(super) origin: Origin,
 
@@ -126,7 +128,7 @@ impl RouteInfo<'_> {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Origin {
   Igp = 0,
@@ -145,7 +147,7 @@ impl Display for Origin {
 }
 
 /// RFC 1997 communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Community([u16; 2]);
 
 impl Community {
@@ -170,7 +172,7 @@ impl Display for Community {
 }
 
 /// RFC 4360/5668 extended communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExtCommunity([u8; 8]);
 
 impl ExtCommunity {
@@ -363,7 +365,7 @@ impl Display for TrafficFilterAction {
 }
 
 /// RFC 5701 IPv6 address-specific extended communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ipv6ExtCommunity {
   pub kind: u8,
   pub sub_kind: u8,
@@ -419,7 +421,7 @@ impl Display for Ipv6ExtCommunity {
 }
 
 /// RFC 8092 large communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LargeCommunity([u32; 3]);
 
 impl LargeCommunity {

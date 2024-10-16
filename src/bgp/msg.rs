@@ -1,4 +1,3 @@
-use super::error::BgpError;
 use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
 use super::route::{Origin, RouteInfo};
@@ -60,7 +59,7 @@ impl Message<'_> {
 }
 
 impl Message<'static> {
-  pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     let mut header = [0; 19];
     // TODO: conn closed if early eof when reading preamble
     reader.read_exact(&mut header).await?;
@@ -88,10 +87,10 @@ impl Message<'static> {
     }
   }
 
-  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
+  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> super::Result<Self> {
     match Message::read_raw(socket).await {
-      Ok(Message::Notification(n)) => Err(BgpError::Remote(n.into())),
-      Err(BgpError::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
+      Ok(Message::Notification(n)) => Err(super::Error::Remote(n.into())),
+      Err(super::Error::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
     }
   }
@@ -114,7 +113,7 @@ async fn get_pattr_buf(
   kind: u8,
   len: u16,
   read_data: impl IntoIterator<Item = u8>,
-) -> Result<Cow<'static, [u8]>, BgpError> {
+) -> super::Result<Cow<'static, [u8]>> {
   let mut pattr_buf = vec![flags, kind];
   if flags & PF_EXT_LEN == 0 {
     pattr_buf.push(len as u8);
@@ -143,14 +142,16 @@ pub struct OpenMessage<'a> {
 }
 
 impl OpenMessage<'static> {
-  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> super::Result<Self> {
     match Self::read_inner(ptr).await {
-      Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Notification::Open(Unspecific).into()),
+      Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+        Err(Notification::Open(Unspecific).into())
+      }
       other => other,
     }
   }
 
-  async fn read_inner<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  async fn read_inner<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     if reader.read_u8().await? != 4 {
       return Err(Notification::Open(UnsupportedVersion(4)).into());
     }
@@ -303,16 +304,16 @@ impl UpdateMessage<'_> {
 }
 
 impl UpdateMessage<'static> {
-  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     match Self::read_inner(reader).await {
-      Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+      Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
         Err(Notification::Update(MalformedAttrList).into())
       }
       other => other,
     }
   }
 
-  async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> Result<Self, BgpError> {
+  async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> super::Result<Self> {
     let mut result = Self {
       withdrawn: None,
       old_withdrawn: None,
@@ -357,7 +358,7 @@ impl UpdateMessage<'static> {
         flags: u8,
         kind: u8,
         len: u16,
-      ) -> Result<UpdateMessage<'static>, BgpError> {
+      ) -> super::Result<UpdateMessage<'static>> {
         let pattr_buf = get_pattr_buf(reader, flags, kind, len, []).await?;
         Err(Notification::Update(AttrFlags(pattr_buf)).into())
       }
@@ -665,7 +666,7 @@ impl Notification<'_> {
 }
 
 impl Notification<'static> {
-  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> super::Result<Self> {
     use Notification::*;
     use {HeaderErrorKind as HEK, NotificationKind as NK, OpenErrorKind as OEK, UpdateErrorKind as UEK};
 
@@ -740,11 +741,11 @@ impl<'a> From<UpdateError<'a>> for Notification<'a> {
 
 pub trait SendAndReturn {
   #[allow(async_fn_in_trait)]
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BgpError>;
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> super::Result<()>;
 }
 
 impl<T: Into<Notification<'static>>> SendAndReturn for T {
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<(), BgpError> {
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> super::Result<()> {
     let n = self.into();
     n.send(writer).await?;
     Err(n.into())

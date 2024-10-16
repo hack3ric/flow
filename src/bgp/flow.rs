@@ -1,5 +1,5 @@
-use super::error::BgpError;
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -13,7 +13,7 @@ use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FlowSpec {
   afi: Afi,
   inner: BTreeSet<ComponentStore>,
@@ -72,7 +72,7 @@ impl FlowSpec {
     buf.extend(buf2);
   }
 
-  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
     let mut len_bytes = [0; 2];
     if let Ok(n) = reader.read_u8().await {
       len_bytes[0] = n;
@@ -99,10 +99,10 @@ impl FlowSpec {
     }
     Ok(Some(Self { afi, inner }))
   }
-  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
     Self::read(reader, Afi::Ipv4).await
   }
-  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
     Self::read(reader, Afi::Ipv6).await
   }
 }
@@ -131,7 +131,7 @@ impl Display for FlowSpec {
   }
 }
 
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 struct ComponentStore(Component);
 
 impl PartialEq for ComponentStore {
@@ -176,7 +176,7 @@ impl Borrow<ComponentKind> for ComponentStore {
   }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, EnumDiscriminants)]
+#[derive(Clone, PartialEq, Eq, Hash, EnumDiscriminants, Serialize, Deserialize)]
 #[strum_discriminants(name(ComponentKind), derive(FromRepr, PartialOrd, Ord))]
 #[repr(u8)]
 pub enum Component {
@@ -237,7 +237,7 @@ impl Component {
     }
   }
 
-  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
     use ComponentKind as CK;
 
     let Ok(kind) = reader.read_u8().await else {
@@ -290,10 +290,7 @@ impl Component {
     }
   }
 
-  async fn parse_v4_prefix(
-    f: fn(IpPrefix, u8) -> Self,
-    reader: &mut (impl AsyncRead + Unpin),
-  ) -> Result<Self, BgpError> {
+  async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> super::Result<Self> {
     let prefix = IpPrefix::read_v4(reader)
       .await?
       .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
@@ -303,7 +300,7 @@ impl Component {
   async fn parse_v6_prefix_pattern(
     f: fn(IpPrefix, u8) -> Self,
     reader: &mut (impl AsyncRead + Unpin),
-  ) -> Result<Self, BgpError> {
+  ) -> super::Result<Self> {
     let len = reader.read_u8().await?;
     if len > 128 {
       return Err(IpPrefixError { kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, 128).into(), value: None }.into());
@@ -406,6 +403,7 @@ impl Ord for Component {
 }
 
 /// Operator sequence with values.
+#[derive(Serialize, Deserialize)]
 pub struct Ops<K: OpKind>(SmallVec<[Op<K>; 4]>);
 
 impl<K: OpKind> Ops<K> {
@@ -529,6 +527,7 @@ impl<K: OpKind> Hash for Ops<K> {
   }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Op<K: OpKind> {
   flags: u8,
   value: u64,
@@ -708,6 +707,7 @@ pub enum NumericFlags {
   True = 0b111,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Numeric {}
 
 impl OpKind for Numeric {
@@ -745,6 +745,7 @@ pub enum BitmaskFlags {
   NotAll = 0b11,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Bitmask {}
 
 impl Bitmask {

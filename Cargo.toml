@@ -6,15 +6,17 @@ edition = "2021"
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
+bincode = "1.3.3"
 clap = { version = "4.5.20", features = ["derive"] }
 clap-verbosity = "2.1.0"
-env_logger = "0.11.5"
+env_logger = { version = "0.11.5", default-features = false }
 futures = "0.3.30"
 log = "0.4.21"
 num = { version = "0.4.3", features = ["num-bigint"] }
 pin-project = "1.1.5"
 replace_with = "0.1.7"
-smallvec = { version = "1.13.2", features = ["union", "const_generics", "const_new"]}
+serde = { version = "1.0.210", features = ["derive"] }
+smallvec = { version = "1.13.2", features = ["union", "const_generics", "const_new", "serde"]}
 strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["rt", "net", "time", "sync", "macros", "io-util"] }
