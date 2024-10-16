@@ -74,7 +74,7 @@ impl Routes {
         println!();
       }
       if !info.ipv6_ext_comm.is_empty() {
-        print!("    IPv6 Specific Extended Communities:");
+        print!("    IPv6 Specific Extended Communities: ");
         print_series(info.ipv6_ext_comm.iter());
         println!();
       }
@@ -103,16 +103,12 @@ impl Routes {
 pub struct RouteInfo<'a> {
   pub(super) origin: Origin,
 
-  /// AS path, stored in reverse.
+  /// AS path, stored in reverse for easy prepending.
   pub(super) as_path: Cow<'a, [u32]>,
 
-  /// RFC 1997 communities.
   pub(super) comm: HashSet<Community>,
-  /// RFC 4360/5668 extended communities.
   pub(super) ext_comm: HashSet<ExtCommunity>,
-  /// RFC 5701 IPv6 address-specific extended communities.
   pub(super) ipv6_ext_comm: HashSet<Ipv6ExtCommunity>,
-  /// RFC 8092 large communities.
   pub(super) large_comm: HashSet<LargeCommunity>,
 
   /// Transitive but unrecognized path attributes.
@@ -148,6 +144,7 @@ impl Display for Origin {
   }
 }
 
+/// RFC 1997 communities.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Community([u16; 2]);
 
@@ -172,6 +169,7 @@ impl Display for Community {
   }
 }
 
+/// RFC 4360/5668 extended communities.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtCommunity([u8; 8]);
 
@@ -262,9 +260,9 @@ impl ExtCommunity {
     })
   }
 
-  pub fn traffic_action(self) -> Option<TrafficAction> {
-    use self::TrafficAction::*;
+  pub fn traffic_filter_action(self) -> Option<TrafficFilterAction> {
     use GlobalAdmin::*;
+    use TrafficFilterAction::*;
     if !self.iana_authority() || self.is_transitive() {
       return None;
     }
@@ -291,25 +289,24 @@ impl Debug for ExtCommunity {
 
 impl Display for ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    match (self.admins(), self.opaque_value()) {
-      (Some(_), Some(_)) => unreachable!(),
-      (Some((g, l)), None) => {
-        match [self.kind(), self.sub_kind()] {
-          [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(rt, ")?,
-          [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(ro, ")?,
-          bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
-        }
-        if l > u16::MAX.into() {
-          write!(f, "{g}, {l:#010x})")
-        } else {
-          write!(f, "{g}, {l:#06x})")
-        }
+    if let Some((g, l)) = self.admins() {
+      match [self.kind(), self.sub_kind()] {
+        [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(rt, ")?,
+        [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(ro, ")?,
+        bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
       }
-      (None, Some(val)) => {
-        let kind = u16::from_be_bytes([self.kind(), self.sub_kind()]);
-        write!(f, "({kind:#06x}, {val:#014x})")
+      if l > u16::MAX.into() {
+        write!(f, "{g}, {l:#010x})")
+      } else {
+        write!(f, "{g}, {l:#06x})")
       }
-      (None, None) => write!(f, "({:#018x})", u64::from_be_bytes(self.0)),
+    } else if let Some(val) = self.opaque_value() {
+      let kind = u16::from_be_bytes([self.kind(), self.sub_kind()]);
+      write!(f, "({kind:#06x}, {val:#014x})")
+    } else if let Some(act) = self.traffic_filter_action() {
+      Display::fmt(&act, f)
+    } else {
+      write!(f, "({:#018x})", u64::from_be_bytes(self.0))
     }
   }
 }
@@ -330,7 +327,7 @@ impl Display for GlobalAdmin {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TrafficAction {
+pub enum TrafficFilterAction {
   TrafficRateBytes { desc: u16, rate: f32 },
   TrafficRatePackets { desc: u16, rate: f32 },
   TrafficAction { terminal: bool, sample: bool },
@@ -339,6 +336,33 @@ pub enum TrafficAction {
   TrafficMarking { dscp: u8 },
 }
 
+impl Display for TrafficFilterAction {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    use TrafficFilterAction::*;
+    match self {
+      TrafficRateBytes { desc, rate } => write!(f, "(traffic-rate-bytes, {desc}, {rate})"),
+      TrafficRatePackets { desc, rate } => write!(f, "(traffic-rate-packets, {desc}, {rate})"),
+      TrafficAction { terminal, sample } => write!(
+        f,
+        "(traffic-action{}{})",
+        if *terminal { ", terminal" } else { "" },
+        if *sample { ", sample" } else { "" }
+      ),
+      RtRedirect { rt, value } => {
+        write!(f, "(rt-redirect, {rt}, ")?;
+        if *value > u16::MAX.into() {
+          write!(f, "{value:#010x})")
+        } else {
+          write!(f, "{value:#06x})")
+        }
+      }
+      RtRedirectIpv6 { rt, value } => write!(f, "(rt-redirect-ipv6, {rt}, {value:#06x})"),
+      TrafficMarking { dscp } => write!(f, "(traffic-marking, {dscp})"),
+    }
+  }
+}
+
+/// RFC 5701 IPv6 address-specific extended communities.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv6ExtCommunity {
   pub kind: u8,
@@ -394,6 +418,7 @@ impl Display for Ipv6ExtCommunity {
   }
 }
 
+/// RFC 8092 large communities.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LargeCommunity([u32; 3]);
 
