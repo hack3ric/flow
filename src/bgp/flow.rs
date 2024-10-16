@@ -56,11 +56,11 @@ impl FlowSpec {
     self.afi == Afi::Ipv6
   }
 
-  pub fn serialize(&self, buf: &mut Vec<u8>) {
+  pub fn write(&self, buf: &mut Vec<u8>) {
     let mut buf2 = Vec::new();
     self.inner.iter().for_each(|ComponentStore(c)| {
       assert!(c.is_valid(self.afi)); // TODO: relax this if we have flowspec builder
-      c.serialize(&mut buf2);
+      c.write(&mut buf2);
     });
     let len: u16 = buf2.len().try_into().expect("flowspec length should fit in u16");
     assert!(len < 0xf000);
@@ -72,7 +72,7 @@ impl FlowSpec {
     buf.extend(buf2);
   }
 
-  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
     let mut len_bytes = [0; 2];
     if let Ok(n) = reader.read_u8().await {
       len_bytes[0] = n;
@@ -88,7 +88,7 @@ impl FlowSpec {
     };
     let mut flow_reader = reader.take(len.into());
     let mut inner = BTreeSet::<ComponentStore>::new();
-    while let Some(comp) = Component::recv(&mut flow_reader, afi).await? {
+    while let Some(comp) = Component::read(&mut flow_reader, afi).await? {
       if inner.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
         return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
       }
@@ -99,11 +99,11 @@ impl FlowSpec {
     }
     Ok(Some(Self { afi, inner }))
   }
-  pub async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
-    Self::recv(reader, Afi::Ipv4).await
+  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+    Self::read(reader, Afi::Ipv4).await
   }
-  pub async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
-    Self::recv(reader, Afi::Ipv6).await
+  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+    Self::read(reader, Afi::Ipv6).await
   }
 }
 
@@ -212,7 +212,7 @@ impl Component {
     self.into()
   }
 
-  pub fn serialize(&self, buf: &mut Vec<u8>) {
+  pub fn write(&self, buf: &mut Vec<u8>) {
     buf.push(self.kind() as u8);
     match self {
       Self::DstPrefix(prefix, offset) | Self::SrcPrefix(prefix, offset) => {
@@ -221,7 +221,7 @@ impl Component {
           buf.extend([prefix.len(), *offset]);
           buf.extend((v6.to_bits() << offset).to_be_bytes().into_iter().take(pattern_bytes.into()));
         } else {
-          prefix.serialize(buf);
+          prefix.write(buf);
         }
       }
       Self::Protocol(ops)
@@ -232,12 +232,12 @@ impl Component {
       | Self::IcmpCode(ops)
       | Self::PacketLen(ops)
       | Self::Dscp(ops)
-      | Self::FlowLabel(ops) => ops.serialize(buf),
-      Self::TcpFlags(ops) | Self::Fragment(ops) => ops.serialize(buf),
+      | Self::FlowLabel(ops) => ops.write(buf),
+      Self::TcpFlags(ops) | Self::Fragment(ops) => ops.write(buf),
     }
   }
 
-  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, BgpError> {
     use ComponentKind as CK;
 
     let Ok(kind) = reader.read_u8().await else {
@@ -248,17 +248,17 @@ impl Component {
       Some(CK::SrcPrefix) if afi == Afi::Ipv4 => Self::parse_v4_prefix(Self::SrcPrefix, reader).await?,
       Some(CK::DstPrefix) if afi == Afi::Ipv6 => Self::parse_v6_prefix_pattern(Self::DstPrefix, reader).await?,
       Some(CK::SrcPrefix) if afi == Afi::Ipv6 => Self::parse_v6_prefix_pattern(Self::SrcPrefix, reader).await?,
-      Some(CK::Protocol) => Self::Protocol(Ops::recv(reader).await?),
-      Some(CK::Port) => Self::Port(Ops::recv(reader).await?),
-      Some(CK::DstPort) => Self::DstPort(Ops::recv(reader).await?),
-      Some(CK::SrcPort) => Self::SrcPort(Ops::recv(reader).await?),
-      Some(CK::IcmpType) => Self::IcmpType(Ops::recv(reader).await?),
-      Some(CK::IcmpCode) => Self::IcmpCode(Ops::recv(reader).await?),
-      Some(CK::TcpFlags) => Self::TcpFlags(Ops::recv(reader).await?),
-      Some(CK::PacketLen) => Self::PacketLen(Ops::recv(reader).await?),
-      Some(CK::Dscp) => Self::Dscp(Ops::recv(reader).await?),
-      Some(CK::Fragment) => Self::Fragment(Ops::recv(reader).await?),
-      Some(CK::FlowLabel) => Self::FlowLabel(Ops::recv(reader).await?),
+      Some(CK::Protocol) => Self::Protocol(Ops::read(reader).await?),
+      Some(CK::Port) => Self::Port(Ops::read(reader).await?),
+      Some(CK::DstPort) => Self::DstPort(Ops::read(reader).await?),
+      Some(CK::SrcPort) => Self::SrcPort(Ops::read(reader).await?),
+      Some(CK::IcmpType) => Self::IcmpType(Ops::read(reader).await?),
+      Some(CK::IcmpCode) => Self::IcmpCode(Ops::read(reader).await?),
+      Some(CK::TcpFlags) => Self::TcpFlags(Ops::read(reader).await?),
+      Some(CK::PacketLen) => Self::PacketLen(Ops::read(reader).await?),
+      Some(CK::Dscp) => Self::Dscp(Ops::read(reader).await?),
+      Some(CK::Fragment) => Self::Fragment(Ops::read(reader).await?),
+      Some(CK::FlowLabel) => Self::FlowLabel(Ops::read(reader).await?),
       _ => return Err(FlowError::UnsupportedKind(kind).into()),
     };
     Ok(Some(result))
@@ -294,7 +294,7 @@ impl Component {
     f: fn(IpPrefix, u8) -> Self,
     reader: &mut (impl AsyncRead + Unpin),
   ) -> Result<Self, BgpError> {
-    let prefix = IpPrefix::recv_v4(reader)
+    let prefix = IpPrefix::read_v4(reader)
       .await?
       .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
     Ok(f(prefix, 0))
@@ -424,15 +424,15 @@ impl<K: OpKind> Ops<K> {
     self.with(op.make_or())
   }
 
-  pub fn serialize(&self, buf: &mut Vec<u8>) {
-    self.0[..self.0.len() - 1].iter().for_each(|x| x.serialize(buf, false));
-    self.0.last().unwrap().serialize(buf, true);
+  pub fn write(&self, buf: &mut Vec<u8>) {
+    self.0[..self.0.len() - 1].iter().for_each(|x| x.write(buf, false));
+    self.0.last().unwrap().write(buf, true);
   }
 
-  pub async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
     let mut inner = Vec::new();
     loop {
-      let (op, eol) = Op::recv(reader).await?;
+      let (op, eol) = Op::read(reader).await?;
       inner.push(op);
       if eol {
         break;
@@ -517,8 +517,8 @@ impl<K: OpKind> Ord for Ops<K> {
   fn cmp(&self, other: &Self) -> Ordering {
     let mut self_buf = Vec::new();
     let mut other_buf = Vec::new();
-    self.serialize(&mut self_buf);
-    other.serialize(&mut other_buf);
+    self.write(&mut self_buf);
+    other.write(&mut other_buf);
     self_buf.cmp(&other_buf)
   }
 }
@@ -563,7 +563,7 @@ impl<K: OpKind> Op<K> {
     Ops::new(self).or(op)
   }
 
-  fn serialize(self, buf: &mut Vec<u8>, eol: bool) {
+  fn write(self, buf: &mut Vec<u8>, eol: bool) {
     let op_pos = buf.len();
     buf.push(0);
     let len = match self.value {
@@ -582,7 +582,7 @@ impl<K: OpKind> Op<K> {
     buf[op_pos] = (self.flags & K::FLAGS_MASK) | (len << 4) | (u8::from(eol) << 7);
   }
 
-  async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(Self, bool)> {
+  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(Self, bool)> {
     let flags = reader.read_u8().await?;
     let len = (flags & 0b0011_0000) >> 4;
     let value = match len {
@@ -818,7 +818,7 @@ mod tests {
       .expect_err("IPv4 flowspec component should not be inserted to IPv6 flowspec");
 
     let mut buf = Vec::new();
-    f.serialize(&mut buf);
+    f.write(&mut buf);
 
     #[rustfmt::skip]
     let buf_expected = [
@@ -831,7 +831,7 @@ mod tests {
     println!("{f}");
     println!("{buf:02x?}");
     assert_eq!(buf, buf_expected);
-    assert_eq!(f, FlowSpec::recv_v6(&mut &buf[..]).await?.unwrap());
+    assert_eq!(f, FlowSpec::read_v6(&mut &buf[..]).await?.unwrap());
 
     Ok(())
   }
@@ -843,7 +843,7 @@ mod tests {
   #[test_case(OP_BIT, &[0b10000001, 0b101], &[85, 1365, 65525, 65535], &[0, 1, 2, 114, 514]; "n bitand 0b101 eq 0b101")]
   #[tokio::test]
   async fn test_ops<K: OpKind>(_op: PhantomData<K>, mut seq: &[u8], aye: &[u64], nay: &[u64]) -> anyhow::Result<()> {
-    let ops = Ops::<K>::recv(&mut seq).await?;
+    let ops = Ops::<K>::read(&mut seq).await?;
     aye.iter().for_each(|&n| assert!(ops.op(n), "!ops.op({n})"));
     nay.iter().for_each(|&n| assert!(!ops.op(n), "ops.op({n})"));
     Ok(())

@@ -219,7 +219,7 @@ impl IpPrefix {
     self.inner.is_ipv6()
   }
 
-  pub fn serialize(self, buf: &mut Vec<u8>) {
+  pub fn write(self, buf: &mut Vec<u8>) {
     let prefix_bytes = self.len().div_ceil(8);
     buf.push(self.len());
     match self.prefix() {
@@ -234,22 +234,22 @@ impl IpPrefix {
     }
   }
 
-  pub(crate) async fn recv<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, IpPrefixError> {
+  pub(crate) async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, IpPrefixError> {
     match afi {
-      Afi::Ipv4 => Self::recv_v4(reader).await,
-      Afi::Ipv6 => Self::recv_v6(reader).await,
+      Afi::Ipv4 => Self::read_v4(reader).await,
+      Afi::Ipv6 => Self::read_v6(reader).await,
     }
   }
 
-  pub(crate) async fn recv_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
-    Self::recv_generic::<32, 4, _, _>(reader, IpAddr::V4).await
+  pub(crate) async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+    Self::read_generic::<32, 4, _, _>(reader, IpAddr::V4).await
   }
 
-  pub(crate) async fn recv_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
-    Self::recv_generic::<128, 16, _, _>(reader, IpAddr::V6).await
+  pub(crate) async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+    Self::read_generic::<128, 16, _, _>(reader, IpAddr::V6).await
   }
 
-  async fn recv_generic<const L: u8, const M: usize, T, R>(
+  async fn read_generic<const L: u8, const M: usize, T, R>(
     reader: &mut R,
     ctor: fn(T) -> IpAddr,
   ) -> Result<Option<Self>, IpPrefixError>

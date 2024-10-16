@@ -141,7 +141,7 @@ impl Session {
 
     match &mut self.state {
       Idle | Connect | Active => pending().await,
-      OpenSent { stream } => match Message::recv(stream).await? {
+      OpenSent { stream } => match Message::read(stream).await? {
         Message::Open(msg) => {
           if self.config.remote_as.map_or(false, |x| msg.my_as != x) {
             BadPeerAs.send_and_return(stream).await?;
@@ -157,7 +157,7 @@ impl Session {
         }
         other => bad_type(other, stream).await?,
       },
-      OpenConfirm { stream, .. } => match Message::recv(stream).await? {
+      OpenConfirm { stream, .. } => match Message::read(stream).await? {
         Message::Keepalive => {
           replace_with_or_abort(&mut self.state, |this| {
             let OpenConfirm { stream, remote_open } = this else {
@@ -184,7 +184,7 @@ impl Session {
         other => bad_type(other, stream).await?,
       },
       Established { stream, clock, hold_timer, keepalive_timer, .. } => select! {
-        msg = Message::recv(stream) => {
+        msg = Message::read(stream) => {
           match msg? {
             Message::Update(msg) => {
               if let Some((afi, safi)) = msg.is_end_of_rib() {

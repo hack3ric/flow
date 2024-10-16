@@ -57,13 +57,13 @@ impl Nlri {
     &self.content
   }
 
-  pub fn serialize_mp_reach(&self, buf: &mut Vec<u8>) {
-    self.serialize_mp(buf, true);
+  pub fn write_mp_reach(&self, buf: &mut Vec<u8>) {
+    self.write_mp(buf, true);
   }
-  pub fn serialize_mp_unreach(&self, buf: &mut Vec<u8>) {
-    self.serialize_mp(buf, false);
+  pub fn write_mp_unreach(&self, buf: &mut Vec<u8>) {
+    self.write_mp(buf, false);
   }
-  pub fn serialize_mp(&self, buf: &mut Vec<u8>, reach: bool) {
+  pub fn write_mp(&self, buf: &mut Vec<u8>, reach: bool) {
     buf.extend([
       PF_OPTIONAL | PF_EXT_LEN,
       if reach {
@@ -78,10 +78,10 @@ impl Nlri {
         extend_with_u16_len(buf, |buf| {
           buf.push(NlriKind::Unicast as u8);
           if reach {
-            next_hop.serialize_mp(buf);
+            next_hop.write_mp(buf);
             buf.push(0); // reserved
           }
-          prefixes.iter().for_each(|p| p.serialize(buf));
+          prefixes.iter().for_each(|p| p.write(buf));
         });
       }
       NlriContent::Flow { specs } => {
@@ -90,24 +90,24 @@ impl Nlri {
           if reach {
             buf.extend([0; 2]); // null next hop, reserved
           }
-          specs.iter().for_each(|s| s.serialize(buf));
+          specs.iter().for_each(|s| s.write(buf));
         });
       }
     }
   }
 
-  pub async fn recv_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    Self::recv_mp(reader, true).await
+  pub async fn read_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    Self::read_mp(reader, true).await
   }
-  pub async fn recv_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    Self::recv_mp(reader, false).await
+  pub async fn read_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    Self::read_mp(reader, false).await
   }
-  pub async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self, BgpError> {
+  pub async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self, BgpError> {
     let afi = reader.read_u16().await?;
     let safi = reader.read_u8().await?;
     let next_hop;
     if reach {
-      next_hop = NextHop::recv_mp(reader).await?;
+      next_hop = NextHop::read_mp(reader).await?;
       let _reserved = reader.read_u8().await?;
     } else {
       next_hop = (safi != NlriKind::Flow as u8).then_some(NextHop::V6(Ipv6Addr::UNSPECIFIED, None));
@@ -116,14 +116,14 @@ impl Nlri {
       (Some(afi @ Afi::Ipv4), Some(NlriKind::Unicast), Some(next_hop))
       | (Some(afi @ Afi::Ipv6), Some(NlriKind::Unicast), Some(next_hop @ NextHop::V6(..))) => {
         let mut prefixes = HashSet::new();
-        while let Some(prefix) = IpPrefix::recv(reader, afi).await? {
+        while let Some(prefix) = IpPrefix::read(reader, afi).await? {
           prefixes.insert(prefix);
         }
         Ok(Self::new_route(afi, prefixes, Some(next_hop))?)
       }
       (Some(afi), Some(NlriKind::Flow), None) => {
         let mut specs = SmallVec::new_const();
-        while let Some(spec) = FlowSpec::recv(reader, afi).await? {
+        while let Some(spec) = FlowSpec::read(reader, afi).await? {
           specs.push(spec);
         }
         Ok(Self::new_flow(afi, specs)?)
@@ -146,7 +146,7 @@ pub enum NextHop {
 }
 
 impl NextHop {
-  fn serialize_mp(&self, buf: &mut Vec<u8>) {
+  fn write_mp(&self, buf: &mut Vec<u8>) {
     match self {
       Self::V4(x) => {
         buf.push(4);
@@ -164,7 +164,7 @@ impl NextHop {
     }
   }
 
-  async fn recv_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
+  async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, BgpError> {
     let len = reader.read_u8().await?;
     match len {
       0 => Ok(None),

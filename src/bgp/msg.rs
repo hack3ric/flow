@@ -22,13 +22,13 @@ pub const AS_TRANS: u16 = 23456;
 pub const AS_SEQUENCE: u8 = 2;
 
 pub trait MessageSend {
-  fn serialize_data(&self, buf: &mut Vec<u8>);
+  fn write_data(&self, buf: &mut Vec<u8>);
 
-  fn serialize_message(&self, buf: &mut Vec<u8>) {
+  fn write_msg(&self, buf: &mut Vec<u8>) {
     let start_pos = buf.len();
     buf.extend([u8::MAX; 16]); // marker
     buf.extend([0; 2]); // reserved for length
-    self.serialize_data(buf);
+    self.write_data(buf);
     let total_len = u16::try_from(buf.len() - start_pos).expect("total_len should fit in u16");
     buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
   }
@@ -36,7 +36,7 @@ pub trait MessageSend {
   #[allow(async_fn_in_trait)]
   async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
     let mut buf = Vec::new();
-    self.serialize_message(&mut buf);
+    self.write_msg(&mut buf);
     writer.write_all(&buf).await?;
     writer.flush().await?;
     Ok(())
@@ -60,7 +60,7 @@ impl Message<'_> {
 }
 
 impl Message<'static> {
-  pub async fn recv_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     let mut header = [0; 19];
     // TODO: conn closed if early eof when reading preamble
     reader.read_exact(&mut header).await?;
@@ -80,16 +80,16 @@ impl Message<'static> {
 
     let mut msg_reader = reader.take(len.into());
     match MessageKind::from_repr(msg_type) {
-      Some(MessageKind::Open) => OpenMessage::recv(&mut msg_reader).await.map(Message::Open),
-      Some(MessageKind::Update) => UpdateMessage::recv(&mut msg_reader).await.map(Message::Update),
-      Some(MessageKind::Notification) => Notification::recv(&mut msg_reader).await.map(Message::Notification),
+      Some(MessageKind::Open) => OpenMessage::read(&mut msg_reader).await.map(Message::Open),
+      Some(MessageKind::Update) => UpdateMessage::read(&mut msg_reader).await.map(Message::Update),
+      Some(MessageKind::Notification) => Notification::read(&mut msg_reader).await.map(Message::Notification),
       Some(MessageKind::Keepalive) => Err(Notification::Header(BadLen(len)).into()),
       _ => Err(Notification::Header(BadType(msg_type)).into()),
     }
   }
 
-  pub async fn recv<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
-    match Message::recv_raw(socket).await {
+  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self, BgpError> {
+    match Message::read_raw(socket).await {
       Ok(Message::Notification(n)) => Err(BgpError::Remote(n.into())),
       Err(BgpError::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
@@ -98,11 +98,11 @@ impl Message<'static> {
 }
 
 impl MessageSend for Message<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
+  fn write_data(&self, buf: &mut Vec<u8>) {
     match self {
-      Self::Open(x) => x.serialize_data(buf),
-      Self::Update(x) => x.serialize_data(buf),
-      Self::Notification(x) => x.serialize_data(buf),
+      Self::Open(x) => x.write_data(buf),
+      Self::Update(x) => x.write_data(buf),
+      Self::Notification(x) => x.write_data(buf),
       Self::Keepalive => buf.push(MessageKind::Keepalive as u8),
     }
   }
@@ -143,14 +143,14 @@ pub struct OpenMessage<'a> {
 }
 
 impl OpenMessage<'static> {
-  async fn recv<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
-    match Self::recv_inner(ptr).await {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+    match Self::read_inner(ptr).await {
       Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Err(Notification::Open(Unspecific).into()),
       other => other,
     }
   }
 
-  async fn recv_inner<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+  async fn read_inner<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
     if reader.read_u8().await? != 4 {
       return Err(Notification::Open(UnsupportedVersion(4)).into());
     }
@@ -199,7 +199,7 @@ impl OpenMessage<'static> {
 }
 
 impl MessageSend for OpenMessage<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
+  fn write_data(&self, buf: &mut Vec<u8>) {
     assert!(self.my_as != AS_TRANS.into());
 
     buf.extend([MessageKind::Open as u8, 4]); // message type, BGP version
@@ -303,8 +303,8 @@ impl UpdateMessage<'_> {
 }
 
 impl UpdateMessage<'static> {
-  async fn recv<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
-    match Self::recv_inner(reader).await {
+  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self, BgpError> {
+    match Self::read_inner(reader).await {
       Err(BgpError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
         Err(Notification::Update(MalformedAttrList).into())
       }
@@ -312,7 +312,7 @@ impl UpdateMessage<'static> {
     }
   }
 
-  async fn recv_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> Result<Self, BgpError> {
+  async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> Result<Self, BgpError> {
     let mut result = Self {
       withdrawn: None,
       old_withdrawn: None,
@@ -332,7 +332,7 @@ impl UpdateMessage<'static> {
     let withdrawn_len = reader.read_u16().await?;
     let mut withdrawn_reader = (&mut reader).take(withdrawn_len.into());
     let mut withdrawn_prefixes = HashSet::new();
-    while let Some(prefix) = IpPrefix::recv_v4(&mut withdrawn_reader).await? {
+    while let Some(prefix) = IpPrefix::read_v4(&mut withdrawn_reader).await? {
       withdrawn_prefixes.insert(prefix);
     }
     if !withdrawn_prefixes.is_empty() {
@@ -491,7 +491,7 @@ impl UpdateMessage<'static> {
         Some(PathAttr::MpReachNlri) => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          match Nlri::recv_mp_reach(&mut &opt_buf[..]).await {
+          match Nlri::read_mp_reach(&mut &opt_buf[..]).await {
             Ok(nlri) => result.nlri = Some(nlri),
             Err(_) => {
               let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
@@ -502,7 +502,7 @@ impl UpdateMessage<'static> {
         Some(PathAttr::MpUnreachNlri) => {
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          match Nlri::recv_mp_unreach(&mut &opt_buf[..]).await {
+          match Nlri::read_mp_unreach(&mut &opt_buf[..]).await {
             Ok(nlri) => result.withdrawn = Some(nlri),
             Err(_) => {
               let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
@@ -535,7 +535,7 @@ impl UpdateMessage<'static> {
 
     let mut old_prefixes = HashSet::new();
     let exec = async {
-      while let Some(prefix) = IpPrefix::recv_v4(reader).await? {
+      while let Some(prefix) = IpPrefix::read_v4(reader).await? {
         old_prefixes.insert(prefix);
       }
       Ok::<_, IpPrefixError>(())
@@ -563,7 +563,7 @@ impl UpdateMessage<'static> {
 }
 
 impl MessageSend for UpdateMessage<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
+  fn write_data(&self, buf: &mut Vec<u8>) {
     let old_nlri = match &self.old_nlri.as_ref().map(Nlri::kind) {
       Some(NlriContent::Unicast { prefixes, next_hop: NextHop::V4(next_hop), .. }) => Some((prefixes, next_hop)),
       Some(_) => panic!("BGP-4 NLRI supports IPv4 only"),
@@ -579,19 +579,19 @@ impl MessageSend for UpdateMessage<'_> {
       };
       prefixes.iter().for_each(|p| {
         assert!(p.is_ipv4(), "BGP-4 withdrawn routes support IPv4 only");
-        p.serialize(buf)
+        p.write(buf)
       });
     });
 
     extend_with_u16_len(buf, |buf| {
       // MP_REACH_NLRI
       if let Some(nlri) = &self.nlri {
-        nlri.serialize_mp_reach(buf);
+        nlri.write_mp_reach(buf);
       }
 
       // MP_UNREACH_NLRI
       if let Some(withdrawn) = &self.withdrawn {
-        withdrawn.serialize_mp_unreach(buf);
+        withdrawn.write_mp_unreach(buf);
       }
 
       // Path attributes
@@ -613,7 +613,7 @@ impl MessageSend for UpdateMessage<'_> {
     if let Some((prefixes, _)) = &old_nlri {
       prefixes.iter().for_each(|p| {
         assert!(p.is_ipv4(), "BGP-4 NLRI supports IPv4 only");
-        p.serialize(buf);
+        p.write(buf);
       })
     }
   }
@@ -665,7 +665,7 @@ impl Notification<'_> {
 }
 
 impl Notification<'static> {
-  async fn recv<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self, BgpError> {
     use Notification::*;
     use {HeaderErrorKind as HEK, NotificationKind as NK, OpenErrorKind as OEK, UpdateErrorKind as UEK};
 
@@ -715,7 +715,7 @@ impl Notification<'static> {
 }
 
 impl MessageSend for Notification<'_> {
-  fn serialize_data(&self, buf: &mut Vec<u8>) {
+  fn write_data(&self, buf: &mut Vec<u8>) {
     buf.extend([MessageKind::Notification as u8, self.code(), self.subcode()]);
     match self {
       Self::Header(BadLen(x)) | Self::Open(UnsupportedVersion(x)) => buf.extend(u16::to_be_bytes(*x)),
