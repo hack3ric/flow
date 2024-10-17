@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io;
+use std::io::ErrorKind::UnexpectedEof;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::ParseIntError;
 use std::str::FromStr;
@@ -258,9 +259,10 @@ impl IpPrefix {
     T: From<[u8; M]>,
     R: AsyncRead + Unpin,
   {
-    let Ok(len) = reader.read_u8().await else {
-      // no more prefix to read
-      return Ok(None);
+    let len = match reader.read_u8().await {
+      Ok(len) => len,
+      Err(error) if error.kind() == UnexpectedEof => return Ok(None),
+      Err(error) => return Err(error.into()),
     };
     if len > L {
       return Err(IpPrefixError { kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, L).into(), value: None });

@@ -4,68 +4,76 @@ pub mod net;
 pub mod sync;
 pub mod util;
 
+mod args;
+
 use anstyle::{Reset, Style};
+use args::{Cli, Command, RunArgs};
 use bgp::route::Routes;
 use bgp::{Config, Session};
 use clap::Parser;
-use clap_verbosity::{InfoLevel, Verbosity};
 use env_logger::fmt::Formatter;
-use log::{error, info, Record};
+use futures::future::select;
+use futures::FutureExt;
+use ipc::IpcServer;
+use log::{error, info, warn, Record};
+use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, Write};
-use std::net::{IpAddr, SocketAddr};
-use std::process::exit;
+use std::net::Ipv4Addr;
+use std::process::ExitCode;
 use std::rc::Rc;
 use sync::RwLock;
 use tokio::net::TcpListener;
-use tokio::select;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::{pin, select};
 
-#[derive(Debug, Parser)]
-struct Args {
-  /// Address to bind.
-  #[arg(short, long, value_parser = parse_bgp_bind, default_value = "::")]
-  bind: SocketAddr,
-
-  #[arg(short, long, default_value = "65000")]
-  local_as: u32,
-  #[arg(short, long)]
-  remote_as: Option<u32>,
-
-  #[command(flatten)]
-  verbosity: Verbosity<InfoLevel>,
-}
-
-fn parse_bgp_bind(bind: &str) -> anyhow::Result<SocketAddr> {
-  let result = bind.parse().or_else(|_| bind.parse::<IpAddr>().map(|ip| (ip, 179).into()))?;
-  Ok(result)
-}
-
-async fn run(args: Args) -> anyhow::Result<()> {
+async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
   let routes = Rc::new(RwLock::new(Routes::new()));
 
   let listener = TcpListener::bind(args.bind).await?;
   let mut bgp = Session::new(routes.clone(), Config {
-    router_id: 123456,
+    router_id: args.router_id.map(Ipv4Addr::to_bits).unwrap_or(23456),
     local_as: args.local_as,
     remote_as: args.remote_as,
-    remote_ip: vec!["0.0.0.0/0".parse()?, "::/0".parse()?],
+    remote_ip: args.allowed_ips,
     hold_timer: 240,
   });
+
+  let mut ipc = IpcServer::new("/run/flow/flow.sock", routes)?;
+
+  let mut sigint = signal(SignalKind::interrupt())?;
+  let mut sigterm = signal(SignalKind::terminate())?;
 
   info!("Flow listening to {} as AS{}", args.bind, args.local_as);
   loop {
     let select = async {
+      pin! {
+        let sigint = sigint.recv().map(|_| "SIGINT");
+        let sigterm = sigterm.recv().map(|_| "SIGTERM");
+      }
       select! {
-        result = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
-          let (stream, mut addr) = result?;
+        r = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
+          let (stream, mut addr) = r?;
           addr.set_ip(addr.ip().to_canonical());
           bgp.accept(stream, addr).await?;
         }
-        result = bgp.process() => result?,
+        r = bgp.process() => match r {
+          Ok(()) => {}
+          Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
+          Err(error) => return Err(error.into()),
+        },
+        r = ipc.process() => r?,
+        x = select(sigint, sigterm) => {
+          let (x, _) = x.factor_first();
+          info!("{x} received, exiting");
+          return Ok(Some(ExitCode::SUCCESS))
+        }
       }
-      anyhow::Ok(())
+      anyhow::Ok(None)
     };
-    if let Err(error) = select.await {
-      error!("{error}");
+    match select.await {
+      Ok(Some(x)) => return Ok(x),
+      Ok(None) => {}
+      Err(error) => error!("{error}"),
     }
   }
 }
@@ -94,14 +102,33 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
-  let args = Args::parse();
+async fn main() -> ExitCode {
+  let cli = Cli::parse();
   env_logger::builder()
-    .filter_level(args.verbosity.log_level_filter())
+    .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)
     .init();
-  if let Err(error) = run(args).await {
-    error!("fatal error: {error}");
-    exit(1);
+  match cli.command {
+    Command::Run(args) => match run(args).await {
+      Ok(x) => x,
+      Err(error) => {
+        error!("fatal error: {error}");
+        ExitCode::FAILURE
+      }
+    },
+    Command::Show => {
+      let result = async {
+        let routes = ipc::get_routes("/run/flow/flow.sock").await?;
+        routes.print();
+        anyhow::Ok(())
+      };
+      match result.await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+          error!("{error}");
+          ExitCode::FAILURE
+        }
+      }
+    }
   }
 }

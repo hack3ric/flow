@@ -7,7 +7,7 @@ use crate::net::{IpPrefix, IpPrefixError, IpPrefixErrorKind};
 use crate::sync::RwLock;
 use flow::FlowError;
 use futures::future::pending;
-use log::info;
+use log::{debug, info};
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
@@ -185,31 +185,25 @@ impl Session {
       Established { stream, clock, hold_timer, keepalive_timer, .. } => select! {
         msg = Message::read(stream) => {
           match msg? {
-            Message::Update(msg) => {
-              if let Some((afi, safi)) = msg.is_end_of_rib() {
-                info!("received End-of-RIB of ({afi}, {safi:?})");
-              } else {
-                let mut routes = self.routes.write().await;
-                if msg.nlri.is_some() || msg.old_nlri.is_some() {
-                  let route_info = Rc::new(msg.route_info);
-                  (msg.nlri)
-                    .into_iter()
-                    .chain(msg.old_nlri)
-                    .for_each(|n| routes.commit(n, route_info.clone()));
-                }
-                if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
-                  (msg.withdrawn)
-                    .into_iter()
-                    .chain(msg.old_withdrawn)
-                    .for_each(|n| routes.withdraw(n));
-                }
-                drop(routes);
-                let routes = self.routes.read().await;
-                // info!("updated routes:");
-                routes.print();
-                println!();
+            Message::Update(msg) => if let Some((afi, safi)) = msg.is_end_of_rib() {
+              debug!("received End-of-RIB of ({afi}, {safi:?})");
+            } else {
+              debug!("received update: {msg:?}");
+              let mut routes = self.routes.write().await;
+              if msg.nlri.is_some() || msg.old_nlri.is_some() {
+                let route_info = Rc::new(msg.route_info);
+                (msg.nlri)
+                  .into_iter()
+                  .chain(msg.old_nlri)
+                  .for_each(|n| routes.commit(n, route_info.clone()));
               }
-            }
+              if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
+                (msg.withdrawn)
+                  .into_iter()
+                  .chain(msg.old_withdrawn)
+                  .for_each(|n| routes.withdraw(n));
+              }
+            },
             Message::Keepalive => if let Some((dur, next)) = hold_timer {
               *next = Instant::now() + *dur;
             },
@@ -274,11 +268,6 @@ pub enum Error {
   Flow(#[from] FlowError),
   #[error(transparent)]
   Nlri(#[from] NlriError),
-  #[error(transparent)]
-  Bincode(#[from] bincode::Error),
-
-  #[error(transparent)]
-  Anyhow(#[from] anyhow::Error),
 }
 
 impl From<IpPrefixError> for Error {

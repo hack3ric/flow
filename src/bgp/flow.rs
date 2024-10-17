@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display, Formatter, Write};
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::io::ErrorKind::UnexpectedEof;
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use strum::{EnumDiscriminants, FromRepr};
@@ -74,10 +75,10 @@ impl FlowSpec {
 
   pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
     let mut len_bytes = [0; 2];
-    if let Ok(n) = reader.read_u8().await {
-      len_bytes[0] = n;
-    } else {
-      return Ok(None);
+    match reader.read_u8().await {
+      Ok(n) => len_bytes[0] = n,
+      Err(error) if error.kind() == UnexpectedEof => return Ok(None),
+      Err(error) => return Err(error.into()),
     }
     let len = if len_bytes[0] & 0xf0 == 0xf0 {
       len_bytes[0] &= 0x0f;
@@ -240,8 +241,10 @@ impl Component {
   pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
     use ComponentKind as CK;
 
-    let Ok(kind) = reader.read_u8().await else {
-      return Ok(None);
+    let kind = match reader.read_u8().await {
+      Ok(kind) => kind,
+      Err(error) if error.kind() == UnexpectedEof => return Ok(None),
+      Err(error) => return Err(error.into()),
     };
     let result = match ComponentKind::from_repr(kind) {
       Some(CK::DstPrefix) if afi == Afi::Ipv4 => Self::parse_v4_prefix(Self::DstPrefix, reader).await?,
@@ -291,9 +294,7 @@ impl Component {
   }
 
   async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> super::Result<Self> {
-    let prefix = IpPrefix::read_v4(reader)
-      .await?
-      .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+    let prefix = IpPrefix::read_v4(reader).await?.ok_or_else(|| io::Error::from(UnexpectedEof))?;
     Ok(f(prefix, 0))
   }
 

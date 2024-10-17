@@ -13,8 +13,8 @@ use strum::FromRepr;
 /// Route storage for a session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Routes {
-  unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
-  flow: BTreeMap<FlowSpec, MaybeRc<RouteInfo<'static>>>,
+  pub unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
+  pub flow: BTreeMap<FlowSpec, MaybeRc<RouteInfo<'static>>>,
 }
 
 impl Routes {
