@@ -205,19 +205,19 @@ impl IpPrefix {
     }
   }
 
-  pub const fn is_single(&self) -> bool {
+  pub const fn is_single(self) -> bool {
     prefix_max_len(self.prefix()) == self.len()
   }
 
-  pub const fn afi(&self) -> Afi {
+  pub const fn afi(self) -> Afi {
     self.inner.afi()
   }
 
-  pub const fn is_ipv4(&self) -> bool {
+  pub const fn is_ipv4(self) -> bool {
     self.inner.is_ipv4()
   }
 
-  pub const fn is_ipv6(&self) -> bool {
+  pub const fn is_ipv6(self) -> bool {
     self.inner.is_ipv6()
   }
 

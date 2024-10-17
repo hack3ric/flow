@@ -1,4 +1,6 @@
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use nftables::{expr, stmt};
+use num::Integer;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
@@ -267,14 +269,14 @@ impl Component {
     Ok(Some(result))
   }
 
-  fn is_valid(&self, afi: Afi) -> bool {
+  pub fn is_valid(&self, afi: Afi) -> bool {
     match afi {
       Afi::Ipv4 => self.is_valid_v4(),
       Afi::Ipv6 => self.is_valid_v6(),
     }
   }
 
-  fn is_valid_v4(&self) -> bool {
+  pub fn is_valid_v4(&self) -> bool {
     use Component::*;
     match self {
       DstPrefix(prefix, offset) | SrcPrefix(prefix, offset) => prefix.is_ipv4() && *offset == 0,
@@ -284,12 +286,111 @@ impl Component {
     }
   }
 
-  fn is_valid_v6(&self) -> bool {
+  pub fn is_valid_v6(&self) -> bool {
     use Component::*;
     match self {
       DstPrefix(prefix, offset) | SrcPrefix(prefix, offset) => prefix.is_ipv6() && *offset < prefix.len(),
       Fragment(ops) => ops.0.iter().all(|x| x.value & !0b1110 == 0),
       _ => true,
+    }
+  }
+
+  pub fn write_nft_stmt(&self, buf: &mut Vec<stmt::Statement>) {
+    fn prefix_stmt(field: String, prefix: IpPrefix) -> stmt::Statement {
+      stmt::Statement::Match(stmt::Match {
+        op: stmt::Operator::EQ,
+        left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+          expr::PayloadField {
+            protocol: match prefix.afi() {
+              Afi::Ipv4 => "ip".into(),
+              Afi::Ipv6 => "ip6".into(),
+            },
+            field,
+          },
+        ))),
+        right: expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
+          addr: Box::new(expr::Expression::String(format!("{}", prefix.prefix()))),
+          len: prefix.len().into(),
+        })),
+      })
+    }
+
+    fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::Statement>) {
+      let addr_offset = if src { 192 } else { 64 };
+
+      buf.push(stmt::Statement::Match(stmt::Match {
+        op: stmt::Operator::EQ,
+        left: expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::Nfproto })),
+        right: expr::Expression::String("ipv6".into()),
+      }));
+
+      let start_32bit = offset.next_multiple_of(32);
+      let pre_rem = start_32bit - offset;
+      let end_32bit = pattern.len().prev_multiple_of(&32); // this uses num::Integer, not std
+      let post_rem = pattern.len() - end_32bit;
+
+      let IpAddr::V6(ip) = pattern.prefix() else {
+        unreachable!();
+      };
+      if pre_rem > 0 {
+        let num = ip.to_bits() >> (128 - start_32bit);
+        buf.push(stmt::Statement::Match(stmt::Match {
+          op: stmt::Operator::EQ,
+          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
+            expr::PayloadRaw {
+              base: expr::PayloadBase::NH,
+              offset: addr_offset + offset as u32,
+              len: pre_rem.into(),
+            },
+          ))),
+          right: expr::Expression::Number(num.try_into().unwrap()),
+        }));
+      }
+      debug_assert!(start_32bit <= end_32bit);
+      for i in (start_32bit..end_32bit).step_by(32) {
+        let num = (ip.to_bits() >> (pattern.len() - 32 - i)) as u32;
+        buf.push(stmt::Statement::Match(stmt::Match {
+          op: stmt::Operator::EQ,
+          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
+            expr::PayloadRaw { base: expr::PayloadBase::NH, offset: addr_offset + i as u32, len: 32 },
+          ))),
+          right: expr::Expression::Number(num),
+        }));
+      }
+      if post_rem > 0 {
+        let num = ((ip.to_bits() >> (128 - pattern.len())) as u32) & (u32::MAX >> (32 - post_rem));
+        buf.push(stmt::Statement::Match(stmt::Match {
+          op: stmt::Operator::EQ,
+          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
+            expr::PayloadRaw {
+              base: expr::PayloadBase::NH,
+              offset: addr_offset + end_32bit as u32,
+              len: post_rem.into(),
+            },
+          ))),
+          right: expr::Expression::Number(num),
+        }));
+      }
+    }
+
+    match self {
+      Self::DstPrefix(prefix, 0) => buf.push(prefix_stmt("daddr".into(), *prefix)),
+      Self::SrcPrefix(prefix, 0) => buf.push(prefix_stmt("saddr".into(), *prefix)),
+      Self::DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
+      Self::SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
+      // TODO: Ops<NumericOp> -> Range
+      // TODO: Ops<BitmaskOp> -> (TCP flags, frag, ...)
+      Self::Protocol(ops) => todo!(),
+      Self::Port(ops) => todo!(),
+      Self::DstPort(ops) => todo!(),
+      Self::SrcPort(ops) => todo!(),
+      Self::IcmpType(ops) => todo!(),
+      Self::IcmpCode(ops) => todo!(),
+      Self::TcpFlags(ops) => todo!(),
+      Self::PacketLen(ops) => todo!(),
+      Self::Dscp(ops) => todo!(),
+      Self::Fragment(ops) => todo!(),
+      Self::FlowLabel(ops) => todo!(),
     }
   }
 

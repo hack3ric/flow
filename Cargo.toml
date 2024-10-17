@@ -12,6 +12,7 @@ clap-verbosity = "2.1.0"
 env_logger = { version = "0.11.5", default-features = false }
 futures = "0.3.30"
 log = "0.4.21"
+nftables = "0.4.1"
 num = { version = "0.4.3", features = ["num-bigint"] }
 pin-project = "1.1.5"
 replace_with = "0.1.7"
