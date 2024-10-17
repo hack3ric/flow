@@ -34,16 +34,13 @@ pub struct RunArgs {
   #[arg(short, long)]
   pub remote_as: Option<u32>,
 
-  #[arg(short = 'i', long)]
-  pub router_id: Option<Ipv4Addr>,
+  #[arg(short = 'i', long, default_value_t = [127, 0, 0, 1].into())]
+  pub router_id: Ipv4Addr,
 
   #[arg(
     short, long,
     value_parser = IpPrefix::from_str,
-    default_values_t = [
-      IpPrefix::new(Ipv4Addr::UNSPECIFIED.into(), 0),
-      IpPrefix::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-    ],
+    default_values_t = [IpPrefix::V4_ALL, IpPrefix::V6_ALL],
   )]
   pub allowed_ips: Vec<IpPrefix>,
 }

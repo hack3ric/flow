@@ -7,6 +7,7 @@ pub mod util;
 mod args;
 
 use anstyle::{Reset, Style};
+use anyhow::Context;
 use args::{Cli, Command, RunArgs};
 use bgp::route::Routes;
 use bgp::{Config, Session};
@@ -18,7 +19,6 @@ use ipc::IpcServer;
 use log::{error, info, warn, Record};
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, Write};
-use std::net::Ipv4Addr;
 use std::process::ExitCode;
 use std::rc::Rc;
 use sync::RwLock;
@@ -26,24 +26,32 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{pin, select};
 
-async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
+async fn run(args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   let routes = Rc::new(RwLock::new(Routes::new()));
 
-  let listener = TcpListener::bind(args.bind).await?;
-  let mut bgp = Session::new(routes.clone(), Config {
-    router_id: args.router_id.map(Ipv4Addr::to_bits).unwrap_or(23456),
-    local_as: args.local_as,
-    remote_as: args.remote_as,
-    remote_ip: args.allowed_ips,
-    hold_timer: 240,
-  });
+  let listener = TcpListener::bind(args.bind)
+    .await
+    .with_context(|| format!("failed to bind to {}", args.bind))?;
+  let mut bgp = Session::new(
+    routes.clone(),
+    Config {
+      router_id: args.router_id,
+      local_as: args.local_as,
+      remote_as: args.remote_as,
+      remote_ip: args.allowed_ips,
+      hold_timer: 240,
+    },
+  );
 
-  let mut ipc = IpcServer::new("/run/flow/flow.sock", routes)?;
+  let mut ipc = IpcServer::new(sock_path, routes).with_context(|| format!("failed to create socket at {sock_path}"))?;
 
-  let mut sigint = signal(SignalKind::interrupt())?;
-  let mut sigterm = signal(SignalKind::terminate())?;
+  let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
+  let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
 
-  info!("Flow listening to {} as AS{}", args.bind, args.local_as);
+  info!(
+    "Flow listening to {} as AS{}, router ID {}",
+    args.bind, args.local_as, args.router_id,
+  );
   loop {
     let select = async {
       pin! {
@@ -51,20 +59,20 @@ async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
         let sigterm = sigterm.recv().map(|_| "SIGTERM");
       }
       select! {
-        r = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
-          let (stream, mut addr) = r?;
+        result = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
+          let (stream, mut addr) = result.context("failed to accept TCP connection")?;
           addr.set_ip(addr.ip().to_canonical());
-          bgp.accept(stream, addr).await?;
+          bgp.accept(stream, addr).await.context("failed to accept BGP connection")?;
         }
-        r = bgp.process() => match r {
+        result = bgp.process() => match result {
           Ok(()) => {}
           Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
-          Err(error) => return Err(error.into()),
+          Err(_) => result.context("failed to process BGP")?,
         },
-        r = ipc.process() => r?,
-        x = select(sigint, sigterm) => {
-          let (x, _) = x.factor_first();
-          info!("{x} received, exiting");
+        result = ipc.process() => result.context("failed to process IPC")?,
+        signal = select(sigint, sigterm) => {
+          let (signal, _) = signal.factor_first();
+          info!("{signal} received, exiting");
           return Ok(Some(ExitCode::SUCCESS))
         }
       }
@@ -73,7 +81,7 @@ async fn run(args: RunArgs) -> anyhow::Result<ExitCode> {
     match select.await {
       Ok(Some(x)) => return Ok(x),
       Ok(None) => {}
-      Err(error) => error!("{error}"),
+      Err(error) => error!("{error:?}"),
     }
   }
 }
@@ -104,28 +112,31 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();
+  let sock_path = "/run/flow/flow.sock";
   env_logger::builder()
     .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)
     .init();
   match cli.command {
-    Command::Run(args) => match run(args).await {
+    Command::Run(args) => match run(args, sock_path).await {
       Ok(x) => x,
       Err(error) => {
-        error!("fatal error: {error}");
+        error!("fatal error: {error:?}");
         ExitCode::FAILURE
       }
     },
     Command::Show => {
       let result = async {
-        let routes = ipc::get_routes("/run/flow/flow.sock").await?;
+        let routes = ipc::get_routes(sock_path)
+          .await
+          .with_context(|| format!("failed to connect to {sock_path}"))?;
         routes.print();
         anyhow::Ok(())
       };
       match result.await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-          error!("{error}");
+          error!("{error:?}");
           ExitCode::FAILURE
         }
       }

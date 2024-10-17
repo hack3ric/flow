@@ -2,6 +2,7 @@ use super::flow::FlowSpec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use crate::util::MaybeRc;
+use anstyle::{AnsiColor, Color, Reset, Style};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -49,6 +50,10 @@ impl Routes {
   }
 
   pub fn print(&self) {
+    const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
+    const BOLD: Style = Style::new().bold();
+    const RESET: Reset = Reset;
+
     fn print_series<'a, I: Iterator<Item = &'a D>, D: Display + 'a>(mut iter: I) {
       let Some(first) = iter.next() else {
         print!("<empty>");
@@ -59,42 +64,42 @@ impl Routes {
     }
 
     fn print_info(info: &RouteInfo) {
-      println!("    Origin: {}", info.origin);
+      println!("    {BOLD}Origin:{RESET} {}", info.origin);
       if !info.as_path.is_empty() {
-        print!("    AS Path: ");
+        print!("    {BOLD}AS Path:{RESET} ");
         print_series(info.as_path.iter().rev());
         println!();
       }
       if !info.comm.is_empty() {
-        print!("    Communities: ");
+        print!("    {BOLD}Communities:{RESET} ");
         print_series(info.comm.iter());
         println!();
       }
       if !info.ext_comm.is_empty() {
-        print!("    Extended Communities: ");
+        print!("    {BOLD}Extended Communities:{RESET} ");
         print_series(info.ext_comm.iter());
         println!();
       }
       if !info.ipv6_ext_comm.is_empty() {
-        print!("    IPv6 Specific Extended Communities: ");
+        print!("    {BOLD}IPv6 Specific Extended Communities:{RESET} ");
         print_series(info.ipv6_ext_comm.iter());
         println!();
       }
       if !info.large_comm.is_empty() {
-        print!("    Large Communities: ");
+        print!("    {BOLD}Large Communities:{RESET} ");
         print_series(info.large_comm.iter());
         println!();
       }
     }
 
     for (prefix, (next_hop, info)) in &self.unicast {
-      println!("{prefix}:");
-      println!("    Next Hop: {next_hop}");
+      println!("{FG_GREEN_BOLD}Unicast{RESET} {prefix}");
+      println!("    {BOLD}Next Hop:{RESET} {next_hop}");
       print_info(info);
       println!();
     }
     for (spec, info) in &self.flow {
-      println!("{spec}:");
+      println!("{FG_GREEN_BOLD}Flowspec{RESET} {spec}");
       print_info(info);
       println!();
     }
@@ -265,7 +270,7 @@ impl ExtCommunity {
   pub fn traffic_filter_action(self) -> Option<TrafficFilterAction> {
     use GlobalAdmin::*;
     use TrafficFilterAction::*;
-    if !self.iana_authority() || self.is_transitive() {
+    if !self.iana_authority() || !self.is_transitive() {
       return None;
     }
     let Some((g, l)) = self.admins() else {
@@ -291,7 +296,9 @@ impl Debug for ExtCommunity {
 
 impl Display for ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    if let Some((g, l)) = self.admins() {
+    if let Some(act) = self.traffic_filter_action() {
+      Display::fmt(&act, f)
+    } else if let Some((g, l)) = self.admins() {
       match [self.kind(), self.sub_kind()] {
         [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(rt, ")?,
         [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(ro, ")?,
@@ -305,8 +312,6 @@ impl Display for ExtCommunity {
     } else if let Some(val) = self.opaque_value() {
       let kind = u16::from_be_bytes([self.kind(), self.sub_kind()]);
       write!(f, "({kind:#06x}, {val:#014x})")
-    } else if let Some(act) = self.traffic_filter_action() {
-      Display::fmt(&act, f)
     } else {
       write!(f, "({:#018x})", u64::from_be_bytes(self.0))
     }

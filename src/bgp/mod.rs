@@ -18,7 +18,7 @@ use route::Routes;
 use std::cmp::min;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -30,7 +30,7 @@ use State::*;
 
 #[derive(Debug)]
 pub struct Config {
-  pub router_id: u32,
+  pub router_id: Ipv4Addr,
   pub local_as: u32,
   pub remote_as: Option<u32>,
   pub remote_ip: Vec<IpPrefix>,
@@ -116,7 +116,7 @@ impl Session {
     let open = OpenMessage {
       my_as: self.config.local_as,
       hold_time: self.config.hold_timer,
-      bgp_id: self.config.router_id,
+      bgp_id: self.config.router_id.to_bits(),
       ..Default::default()
     };
     open.send(&mut stream).await?;
