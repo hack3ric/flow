@@ -201,7 +201,7 @@ impl OpenMessage<'static> {
 
 impl MessageSend for OpenMessage<'_> {
   fn write_data(&self, buf: &mut Vec<u8>) {
-    assert!(self.my_as != AS_TRANS.into());
+    assert!(self.my_as != AS_TRANS as u32);
 
     buf.extend([MessageKind::Open as u8, 4]); // message type, BGP version
     buf.extend(u16::to_be_bytes(self.my_as.try_into().unwrap_or(AS_TRANS))); // my AS (2b)
@@ -407,7 +407,7 @@ impl UpdateMessage<'static> {
           while let Ok(asn) = as_path_reader.read_u32().await {
             as_path.push(asn);
           }
-          if as_path.len() != as_len.into() {
+          if as_path.len() != as_len as usize {
             return Err(Notification::Update(MalformedAsPath).into());
           }
           as_path.reverse();

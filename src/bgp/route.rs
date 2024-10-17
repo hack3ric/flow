@@ -49,6 +49,11 @@ impl Routes {
     }
   }
 
+  pub fn withdraw_all(&mut self) {
+    self.unicast.retain(|_, _| false);
+    self.flow.retain(|_, _| false);
+  }
+
   pub fn print(&self) {
     const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
     const BOLD: Style = Style::new().bold();

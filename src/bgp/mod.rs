@@ -129,6 +129,7 @@ impl Session {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
+      self.routes.write().await.withdraw_all();
     }
     result
   }
