@@ -1,9 +1,10 @@
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use crate::util::Intersect;
 use nftables::{expr, stmt};
 use num::Integer;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Display, Formatter, Write};
@@ -12,6 +13,7 @@ use std::io;
 use std::io::ErrorKind::UnexpectedEof;
 use std::marker::PhantomData;
 use std::net::IpAddr;
+use std::ops::{Add, RangeInclusive};
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -295,7 +297,7 @@ impl Component {
     }
   }
 
-  pub fn write_nft_stmt(&self, buf: &mut Vec<stmt::Statement>) {
+  pub fn write_nft_stmt(&self, afi: Afi, buf: &mut Vec<stmt::Statement>) {
     fn prefix_stmt(field: String, prefix: IpPrefix) -> stmt::Statement {
       stmt::Statement::Match(stmt::Match {
         op: stmt::Operator::EQ,
@@ -373,19 +375,55 @@ impl Component {
       }
     }
 
+    // TODO: meta l4proto
+    fn range_stmt(protocol: String, field: String, ops: &Ops<Numeric>) -> stmt::Statement {
+      let allowed = ops
+        .to_ranges()
+        .into_iter()
+        .map(|x| {
+          let (start, end) = x.into_inner();
+          // HACK: does nftables itself support 64-bit integers? We shrink it for now.
+          let expr = if start == end {
+            expr::Expression::Number(start as u32)
+          } else {
+            expr::Expression::Range(expr::Range {
+              range: vec![
+                expr::Expression::Number(start as u32),
+                expr::Expression::Number(end as u32),
+              ],
+            })
+          };
+          expr::SetItem::Element(expr)
+        })
+        .collect();
+      stmt::Statement::Match(stmt::Match {
+        op: stmt::Operator::EQ,
+        left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+          expr::PayloadField { protocol, field },
+        ))),
+        right: expr::Expression::Named(expr::NamedExpression::Set(allowed)),
+      })
+    }
+
     match self {
       Self::DstPrefix(prefix, 0) => buf.push(prefix_stmt("daddr".into(), *prefix)),
       Self::SrcPrefix(prefix, 0) => buf.push(prefix_stmt("saddr".into(), *prefix)),
       Self::DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
       Self::SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
-      // TODO: Ops<NumericOp> -> Range
-      // TODO: Ops<BitmaskOp> -> (TCP flags, frag, ...)
       Self::Protocol(ops) => todo!(),
-      Self::Port(ops) => todo!(),
-      Self::DstPort(ops) => todo!(),
-      Self::SrcPort(ops) => todo!(),
-      Self::IcmpType(ops) => todo!(),
-      Self::IcmpCode(ops) => todo!(),
+      Self::Port(ops) => todo!(), // TODO: duplicate current statement list
+      Self::DstPort(ops) => buf.push(range_stmt("th".into(), "dport".into(), ops)),
+      Self::SrcPort(ops) => buf.push(range_stmt("th".into(), "sport".into(), ops)),
+      Self::IcmpType(ops) => buf.push(range_stmt(
+        if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" }.into(),
+        "type".into(),
+        ops,
+      )),
+      Self::IcmpCode(ops) => buf.push(range_stmt(
+        if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" }.into(),
+        "code".into(),
+        ops,
+      )),
       Self::TcpFlags(ops) => todo!(),
       Self::PacketLen(ops) => todo!(),
       Self::Dscp(ops) => todo!(),
@@ -510,7 +548,7 @@ pub struct Ops<K: OpKind>(SmallVec<[Op<K>; 4]>);
 
 impl<K: OpKind> Ops<K> {
   pub fn new(op: Op<K>) -> Self {
-    Self(smallvec![op])
+    Self(smallvec![op.make_or()])
   }
 
   pub fn with(mut self, op: Op<K>) -> Self {
@@ -531,12 +569,17 @@ impl<K: OpKind> Ops<K> {
 
   pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
     let mut inner = Vec::new();
+    let mut first = true;
     loop {
-      let (op, eol) = Op::read(reader).await?;
+      let (mut op, eol) = Op::read(reader).await?;
+      if first {
+        op = op.make_or();
+      }
       inner.push(op);
       if eol {
         break;
       }
+      first = false;
     }
     assert!(inner.len() > 0);
     inner[0].flags &= 0b1011_1111; // make sure first is always OR
@@ -555,6 +598,49 @@ impl<K: OpKind> Ops<K> {
       }
     }
     result
+  }
+}
+
+impl Ops<Numeric> {
+  pub fn to_ranges(&self) -> Vec<RangeInclusive<u64>> {
+    let mut buf = Vec::new();
+    let mut cur = SmallVec::<[_; 4]>::new();
+    cur.extend(self.0[0].to_range_iter());
+
+    for op in &self.0[1..] {
+      if op.is_and() {
+        if cur.is_empty() {
+          continue;
+        }
+        let Some((r1, r2)) = op.to_ranges() else {
+          cur.clear();
+          continue;
+        };
+
+        let mut addition = SmallVec::<[_; 4]>::new();
+        cur.retain(|x| {
+          if let Some(y) = x.clone().intersect(r1.clone()) {
+            if let Some(r2) = &r2 {
+              addition.extend(x.clone().intersect(r2.clone()));
+            }
+            *x = y;
+            return true;
+          } else if let Some(r2) = &r2 {
+            if let Some(y) = x.clone().intersect(r2.clone()) {
+              *x = y;
+              return true;
+            }
+          }
+          false
+        });
+        cur.extend(addition);
+      } else {
+        buf.extend(cur.drain(..));
+        cur.extend(op.to_range_iter());
+      }
+    }
+    buf.extend(cur);
+    buf
   }
 }
 
@@ -722,6 +808,28 @@ impl Op<Numeric> {
   pub fn ne(value: u64) -> Self {
     Self::num(NumericFlags::Ne, value)
   }
+
+  pub fn to_ranges(self) -> Option<(RangeInclusive<u64>, Option<RangeInclusive<u64>>)> {
+    use NumericFlags::*;
+    match NumericFlags::from_repr(self.flags & 0b111).unwrap() {
+      False => None,
+      Lt => Some((0..=self.value - 1, None)),
+      Gt => Some((self.value + 1..=u64::MAX, None)),
+      Eq => Some((self.value..=self.value, None)),
+      Le => Some((0..=self.value, None)),
+      Ge => Some((self.value..=u64::MAX, None)),
+      Ne => Some((0..=self.value - 1, Some(self.value + 1..=u64::MAX))),
+      True => Some((0..=u64::MAX, None)),
+    }
+  }
+
+  pub fn to_range_iter(self) -> impl Iterator<Item = RangeInclusive<u64>> + Clone {
+    self
+      .to_ranges()
+      .map(|(a, b)| [Some(a), b].into_iter().flatten())
+      .into_iter()
+      .flatten()
+  }
 }
 
 impl Op<Bitmask> {
@@ -753,6 +861,21 @@ impl Op<Bitmask> {
   }
   pub fn not_all(value: u64) -> Self {
     Self::bit(BitmaskFlags::NotAll, value)
+  }
+
+  pub fn to_truth_table(self) -> TruthTable {
+    use BitmaskFlags::*;
+    let (inv, init) = match (BitmaskFlags::from_repr(self.flags & 0b11).unwrap(), self.value) {
+      (Any | NotAll, 0) => (false, None), // always false
+      (NotAny | All, 0) => (true, None),  // always true
+      (Any, _) => (true, Some(0)),
+      (NotAny, _) => (false, Some(0)),
+      (All, _) => (false, Some(self.value)),
+      (NotAll, _) => (true, Some(self.value)),
+    };
+    let mut truth = BTreeSet::new();
+    truth.extend(init);
+    TruthTable { mask: self.value, inv, truth }
   }
 }
 
@@ -888,6 +1011,121 @@ pub trait OpKind {
   fn fmt(f: &mut Formatter, flags: u8, value: u64) -> fmt::Result;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruthTable {
+  mask: u64,
+  inv: bool,
+  truth: BTreeSet<u64>,
+}
+
+impl TruthTable {
+  pub fn always_true() -> Self {
+    Self { mask: 0, inv: false, truth: BTreeSet::new() }
+  }
+
+  pub fn always_false() -> Self {
+    Self { mask: 0, inv: false, truth: BTreeSet::new() }
+  }
+
+  pub fn is_always_true(&self) -> bool {
+    self.inv && self.truth.is_empty() || !self.inv && self.truth.len() == 1 << self.mask.count_ones()
+  }
+
+  pub fn is_always_false(&self) -> bool {
+    !self.inv && self.truth.is_empty() || self.inv && self.truth.len() == 1 << self.mask.count_ones()
+  }
+
+  pub fn and(&self, other: &Self) -> Self {
+    if self.is_always_false() || other.is_always_false() {
+      Self::always_false()
+    } else if self.is_always_true() {
+      other.clone()
+    } else if other.is_always_true() {
+      self.clone()
+    } else {
+      match (self.inv, other.inv) {
+        (false, false) => self.truth_intersection(other, false),
+        (true, true) => self.truth_union(other, true),
+        (false, true) => self.truth_difference(other, false),
+        (true, false) => other.and(self),
+      }
+    }
+  }
+
+  pub fn or(&self, other: &Self) -> Self {
+    if self.is_always_true() || other.is_always_true() {
+      Self::always_true()
+    } else if self.is_always_false() {
+      other.clone()
+    } else if other.is_always_false() {
+      self.clone()
+    } else {
+      match (self.inv, other.inv) {
+        (false, false) => self.truth_union(other, false),
+        (true, true) => self.truth_intersection(other, true),
+        (false, true) => other.truth_difference(self, true),
+        (true, false) => other.or(self),
+      }
+    }
+  }
+
+  pub fn not(mut self) -> Self {
+    self.inv = !self.inv;
+    self
+  }
+
+  fn expand_set(&self, other_mask: u64) -> Cow<BTreeSet<u64>> {
+    if self.mask | other_mask == self.mask {
+      Cow::Borrowed(&self.truth)
+    } else {
+      let rem = other_mask & !self.mask;
+      let set = iter_masked(rem)
+        .map(|a| self.truth.iter().map(move |b| a | b))
+        .flatten()
+        .collect();
+      Cow::Owned(set)
+    }
+  }
+
+  fn truth_intersection(&self, other: &Self, inv: bool) -> Self {
+    self.truth_op(other, inv, |a, b| a.intersection(b).copied().collect())
+  }
+  fn truth_union(&self, other: &Self, inv: bool) -> Self {
+    self.truth_op(other, inv, |a, b| a.union(b).copied().collect())
+  }
+  fn truth_difference(&self, other: &Self, inv: bool) -> Self {
+    self.truth_op(other, inv, |a, b| a.difference(b).copied().collect())
+  }
+  fn truth_op<F>(&self, other: &Self, inv: bool, f: F) -> Self
+  where
+    F: for<'a> FnOnce(&'a BTreeSet<u64>, &'a BTreeSet<u64>) -> BTreeSet<u64>,
+  {
+    Self {
+      mask: self.mask | other.mask,
+      inv,
+      truth: f(&self.expand_set(other.mask), &other.expand_set(self.mask)),
+    }
+  }
+}
+
+fn pos_of_set_bits(mut mask: u64) -> SmallVec<[u8; 6]> {
+  let mut pos = SmallVec::with_capacity(mask.count_ones().try_into().unwrap());
+  while mask.trailing_zeros() < 64 {
+    pos.push(dbg!(mask.trailing_zeros()).try_into().unwrap());
+    mask ^= 1 << mask.trailing_zeros();
+  }
+  pos
+}
+
+/// Iterator over every possible value under the mask.
+fn iter_masked(mask: u64) -> impl Iterator<Item = u64> + Clone {
+  let pos = pos_of_set_bits(mask);
+  let empty_zero = pos.is_empty().then_some(0);
+  (0u64..1 << mask.count_ones())
+    .map(move |x| pos.iter().enumerate().map(|(i, p)| ((x >> i) & 1) << p).fold(0, Add::add))
+    .chain(empty_zero)
+}
+
 #[derive(Debug, Error)]
 pub enum FlowError {
   #[error("invalid component")]
@@ -950,5 +1188,28 @@ mod tests {
     aye.iter().for_each(|&n| assert!(ops.op(n), "!ops.op({n})"));
     nay.iter().for_each(|&n| assert!(!ops.op(n), "ops.op({n})"));
     Ok(())
+  }
+
+  #[test_case(&[0b00000011, 114, 0b01010100, 2, 2, 0b10000001, 1], &[114..=513, 1..=1])]
+  #[test_case(&[0b00000110, 114, 0b01010110, 2, 2, 0b11010110, 7, 127], &[0..=113, 115..=513, 515..=1918, 1920..=u64::MAX])]
+  #[tokio::test]
+  async fn test_ops_numeric(mut seq: &[u8], result: &[RangeInclusive<u64>]) -> anyhow::Result<()> {
+    let ops = Ops::<Numeric>::read(&mut seq).await?;
+    let ranges = ops.to_ranges();
+    println!("{ranges:?}");
+    assert_eq!(ranges, result);
+    Ok(())
+  }
+
+  #[test]
+  fn test_truth_table() {
+    let op1 = Op::bit(BitmaskFlags::All, 0b0000);
+    let op2 = Op::bit(BitmaskFlags::Any, 0b000010);
+    let tt = op1.to_truth_table().or(&op2.to_truth_table());
+    println!("{:04b} {}", tt.mask, tt.inv);
+    for i in tt.truth.iter() {
+      print!("{i:04b} ");
+    }
+    println!();
   }
 }
