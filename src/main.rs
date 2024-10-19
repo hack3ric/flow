@@ -1,6 +1,7 @@
 pub mod bgp;
 pub mod ipc;
 pub mod net;
+pub mod nft;
 pub mod sync;
 pub mod util;
 
