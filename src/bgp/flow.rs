@@ -297,8 +297,15 @@ impl Component {
     }
   }
 
-  pub fn write_nft_stmt(&self, afi: Afi, buf: &mut Vec<stmt::Statement>) {
+  // TODO: edge cases (e.g. always true/false); simple case optimization
+  pub fn write_nft_stmt(&self, afi: Afi, buf: &mut Vec<stmt::Statement>) -> Option<Vec<Vec<stmt::Statement>>> {
     use Component::*;
+
+    fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression {
+      expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
+        expr::PayloadRaw { base, offset, len },
+      )))
+    }
 
     fn prefix_stmt(field: String, prefix: IpPrefix) -> stmt::Statement {
       stmt::Statement::Match(stmt::Match {
@@ -340,13 +347,7 @@ impl Component {
         let num = ip.to_bits() >> (128 - start_32bit);
         buf.push(stmt::Statement::Match(stmt::Match {
           op: stmt::Operator::EQ,
-          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
-            expr::PayloadRaw {
-              base: expr::PayloadBase::NH,
-              offset: addr_offset + offset as u32,
-              len: pre_rem.into(),
-            },
-          ))),
+          left: make_payload_raw(expr::PayloadBase::NH, addr_offset + offset as u32, pre_rem.into()),
           right: expr::Expression::Number(num.try_into().unwrap()),
         }));
       }
@@ -355,9 +356,7 @@ impl Component {
         let num = (ip.to_bits() >> (pattern.len() - 32 - i)) as u32;
         buf.push(stmt::Statement::Match(stmt::Match {
           op: stmt::Operator::EQ,
-          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
-            expr::PayloadRaw { base: expr::PayloadBase::NH, offset: addr_offset + i as u32, len: 32 },
-          ))),
+          left: make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
           right: expr::Expression::Number(num),
         }));
       }
@@ -365,13 +364,7 @@ impl Component {
         let num = ((ip.to_bits() >> (128 - pattern.len())) as u32) & (u32::MAX >> (32 - post_rem));
         buf.push(stmt::Statement::Match(stmt::Match {
           op: stmt::Operator::EQ,
-          left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
-            expr::PayloadRaw {
-              base: expr::PayloadBase::NH,
-              offset: addr_offset + end_32bit as u32,
-              len: post_rem.into(),
-            },
-          ))),
+          left: make_payload_raw(expr::PayloadBase::NH, addr_offset + end_32bit as u32, post_rem.into()),
           right: expr::Expression::Number(num),
         }));
       }
@@ -425,7 +418,12 @@ impl Component {
         expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::L4proto })),
         ops,
       )),
-      Port(ops) => todo!("need to duplicate current statement list into dport and sport"),
+      Port(ops) => {
+        let mut dup = buf.clone();
+        buf.push(range_stmt_field("th".into(), "dport".into(), ops));
+        dup.push(range_stmt_field("th".into(), "sport".into(), ops));
+        return Some(vec![dup]);
+      }
       DstPort(ops) => buf.push(range_stmt_field("th".into(), "dport".into(), ops)),
       SrcPort(ops) => buf.push(range_stmt_field("th".into(), "sport".into(), ops)),
       IcmpType(ops) => buf.push(range_stmt_field(icmp_ver.into(), "type".into(), ops)),
@@ -446,10 +444,7 @@ impl Component {
             Box::new(expr::Expression::Number(truth_table.mask as u32)),
           )),
           right: expr::Expression::Named(expr::NamedExpression::Set(
-            truth_table
-              .truth
-              .iter()
-              .copied()
+            (truth_table.truth.iter().copied())
               .map(|x| expr::SetItem::Element(expr::Expression::Number(x as u32)))
               .collect(),
           )),
@@ -466,9 +461,112 @@ impl Component {
         buf.push(range_stmt_field(ip_ver.into(), "length".into(), &ops))
       }
       Dscp(ops) => buf.push(range_stmt_field(ip_ver.into(), "dscp".into(), ops)),
-      Fragment(ops) => todo!("need to seperate ORs into different statement lists"),
+      Fragment(ops) => {
+        // TODO: reduce clone
+        // int frag_op_value = [LF,FF,IsF,DF]
+        // possible: [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
+        let mask = if afi == Afi::Ipv4 { 0b1111 } else { 0b1110 };
+        let tt = ops.to_truth_table();
+        let tt = tt.shrink_set(mask);
+        let valid_set = [0b0001, 0b0010, 0b1010, 0b0100, 0b1000].into_iter().collect();
+        let mut new_set: BTreeSet<_> = tt.possible_values_masked().intersection(&valid_set).copied().collect();
+        if new_set.remove(&0b1010) {
+          new_set.insert(0b1000);
+        }
+        let mut iter = new_set.into_iter().peekable();
+        let mut stmts = SmallVec::<[_; 4]>::new();
+
+        // DF (IPv4): @nh,17,1 == 1
+        if let Some(0b0001) = iter.peek() {
+          iter.next();
+          stmts.push((
+            stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::EQ,
+              left: make_payload_raw(expr::PayloadBase::NH, 17, 1),
+              right: expr::Expression::Number(1),
+            }),
+            None,
+          ));
+        }
+
+        // IsF: {ip,frag} frag-off != 0
+        if let Some(0b0010) = iter.peek() {
+          iter.next();
+          stmts.push((
+            stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::NEQ,
+              left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+                expr::PayloadField {
+                  protocol: if afi == Afi::Ipv4 { "ip" } else { "frag" }.into(),
+                  field: "frag-off".into(),
+                },
+              ))),
+              right: expr::Expression::Number(0),
+            }),
+            None,
+          ));
+        }
+
+        // FF: {ip,frag} frag-off == 0 && (@nh,18,1) == 1
+        if let Some(0b0100) = iter.peek() {
+          iter.next();
+          stmts.push((
+            stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::EQ,
+              left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+                expr::PayloadField {
+                  protocol: if afi == Afi::Ipv4 { "ip" } else { "frag" }.into(),
+                  field: "frag-off".into(),
+                },
+              ))),
+              right: expr::Expression::Number(0),
+            }),
+            Some(stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::EQ,
+              left: make_payload_raw(expr::PayloadBase::NH, 18, 1),
+              right: expr::Expression::Number(1),
+            })),
+          ));
+        }
+
+        // LF: {ip,frag} frag-off != 0 && (@nh,18,1) == 0
+        if let Some(0b1000) = iter.peek() {
+          iter.next();
+          stmts.push((
+            stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::NEQ,
+              left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+                expr::PayloadField {
+                  protocol: if afi == Afi::Ipv4 { "ip" } else { "frag" }.into(),
+                  field: "frag-off".into(),
+                },
+              ))),
+              right: expr::Expression::Number(0),
+            }),
+            Some(stmt::Statement::Match(stmt::Match {
+              op: stmt::Operator::EQ,
+              left: make_payload_raw(expr::PayloadBase::NH, 18, 1),
+              right: expr::Expression::Number(0),
+            })),
+          ));
+        }
+
+        if !stmts.is_empty() {
+          let len_gt_1 = stmts.len() > 1;
+          let mut iter = stmts.into_iter();
+          let (first1, first2) = iter.next().unwrap();
+          buf.extend([Some(first1), first2].into_iter().flatten());
+          if len_gt_1 {
+            let split = iter
+              .map(|(s1, s2)| buf.iter().cloned().chain([Some(s1), s2].into_iter().flatten()).collect())
+              .collect();
+            return Some(split);
+          }
+        }
+      }
       FlowLabel(ops) => buf.push(range_stmt_field("ip6".into(), "flowlabel".into(), ops)),
     }
+    None
   }
 
   async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> super::Result<Self> {
@@ -692,18 +790,19 @@ impl Ops<Bitmask> {
     let mut buf = TruthTable::always_false();
     let mut cur = self.0[0].to_truth_table();
 
+    // TODO: reduce clones
     for op in &self.0[1..] {
       if op.is_and() {
         if cur.is_always_false() {
           continue;
         }
-        cur = cur.and(&op.to_truth_table());
+        cur = cur.and(&op.to_truth_table()).into_owned();
       } else {
-        buf = buf.or(&cur);
+        buf = buf.or(&cur).into_owned();
         cur = op.to_truth_table();
       }
     }
-    buf = buf.or(&cur);
+    buf = buf.or(&cur).into_owned();
     buf
   }
 }
@@ -1123,35 +1222,35 @@ impl TruthTable {
     !self.inv && self.truth.is_empty() || self.inv && self.truth.len() == 1 << self.mask.count_ones()
   }
 
-  pub fn and(&self, other: &Self) -> Self {
+  pub fn and<'a>(&'a self, other: &'a Self) -> Cow<'a, Self> {
     if self.is_always_false() || other.is_always_false() {
-      Self::always_false()
+      Cow::Owned(Self::always_false())
     } else if self.is_always_true() {
-      other.clone()
+      Cow::Borrowed(other)
     } else if other.is_always_true() {
-      self.clone()
+      Cow::Borrowed(self)
     } else {
       match (self.inv, other.inv) {
-        (false, false) => self.truth_intersection(other, false),
-        (true, true) => self.truth_union(other, true),
-        (false, true) => self.truth_difference(other, false),
+        (false, false) => Cow::Owned(self.truth_intersection(other, false)),
+        (true, true) => Cow::Owned(self.truth_union(other, true)),
+        (false, true) => Cow::Owned(self.truth_difference(other, false)),
         (true, false) => other.and(self),
       }
     }
   }
 
-  pub fn or(&self, other: &Self) -> Self {
+  pub fn or<'a>(&'a self, other: &'a Self) -> Cow<'a, Self> {
     if self.is_always_true() || other.is_always_true() {
-      Self::always_true()
+      Cow::Owned(Self::always_true())
     } else if self.is_always_false() {
-      other.clone()
+      Cow::Borrowed(other)
     } else if other.is_always_false() {
-      self.clone()
+      Cow::Borrowed(self)
     } else {
       match (self.inv, other.inv) {
-        (false, false) => self.truth_union(other, false),
-        (true, true) => self.truth_intersection(other, true),
-        (false, true) => other.truth_difference(self, true),
+        (false, false) => Cow::Owned(self.truth_union(other, false)),
+        (true, true) => Cow::Owned(self.truth_intersection(other, true)),
+        (false, true) => Cow::Owned(other.truth_difference(self, true)),
         (true, false) => other.or(self),
       }
     }
@@ -1160,6 +1259,33 @@ impl TruthTable {
   pub fn not(mut self) -> Self {
     self.inv = !self.inv;
     self
+  }
+
+  fn possible_values_masked(&self) -> Cow<BTreeSet<u64>> {
+    if self.inv {
+      Cow::Owned(
+        iter_masked(self.mask)
+          .collect::<BTreeSet<_>>()
+          .difference(&self.truth)
+          .copied()
+          .collect(),
+      )
+    } else {
+      Cow::Borrowed(&self.truth)
+    }
+  }
+
+  pub fn shrink_set(&self, other_mask: u64) -> Cow<Self> {
+    let new_mask = self.mask & other_mask;
+    if new_mask == self.mask {
+      Cow::Borrowed(self)
+    } else {
+      Cow::Owned(Self {
+        mask: new_mask,
+        inv: self.inv,
+        truth: self.truth.iter().map(|v| v & new_mask).collect(),
+      })
+    }
   }
 
   fn expand_set(&self, other_mask: u64) -> Cow<BTreeSet<u64>> {
@@ -1206,7 +1332,7 @@ fn pos_of_set_bits(mut mask: u64) -> SmallVec<[u8; 6]> {
 }
 
 /// Iterator over every possible value under the mask.
-fn iter_masked(mask: u64) -> impl Iterator<Item = u64> + Clone {
+fn iter_masked(mask: u64) -> impl Iterator<Item = u64> + Clone + 'static {
   let pos = pos_of_set_bits(mask);
   let empty_zero = pos.is_empty().then_some(0);
   (0u64..1 << mask.count_ones())
@@ -1293,7 +1419,7 @@ mod tests {
   fn test_truth_table() {
     let op1 = Op::bit(BitmaskFlags::All, 0b0000);
     let op2 = Op::bit(BitmaskFlags::Any, 0b000010);
-    let tt = op1.to_truth_table().or(&op2.to_truth_table());
+    let tt = op1.to_truth_table().or(&op2.to_truth_table()).into_owned();
     println!("{:04b} {}", tt.mask, tt.inv);
     for i in tt.truth.iter() {
       print!("{i:04b} ");
