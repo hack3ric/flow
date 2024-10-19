@@ -12,47 +12,63 @@ use std::net::IpAddr;
 use std::ops::{Add, RangeInclusive};
 
 impl Component {
-  // TODO: edge cases (e.g. always true/false); simple case optimization
-  pub fn write_nft_stmt(&self, afi: Afi, buf: &mut Vec<stmt::Statement>) -> Option<Vec<Vec<stmt::Statement>>> {
+  /// Results:
+  /// - `Ok(None)`: new statements appended, do not duplicate current statement list
+  /// - `Ok(Some(_))`: new statements appended, statement list duplicated and serving as logical OR,
+  /// - `Err(())`: current component matches nothing, so the statement list should be removed
+  pub fn to_nft_stmt(
+    &self,
+    afi: Afi,
+    buf: &mut Vec<stmt::Statement>,
+  ) -> Result<Option<Vec<Vec<stmt::Statement>>>, ()> {
+    // TODO: simple case optimization
     use Component::*;
-
     let ip_ver = if afi == Afi::Ipv4 { "ip" } else { "ip6" };
     let icmp_ver = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
-
     match self {
-      DstPrefix(prefix, 0) => buf.push(prefix_stmt("daddr", *prefix)),
-      SrcPrefix(prefix, 0) => buf.push(prefix_stmt("saddr", *prefix)),
+      DstPrefix(prefix, 0) => buf.extend(prefix_stmt("daddr", *prefix)),
+      SrcPrefix(prefix, 0) => buf.extend(prefix_stmt("saddr", *prefix)),
       DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
       SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
-      Protocol(ops) => buf.push(range_stmt(
+      Protocol(ops) => buf.extend(range_stmt(
         expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::L4proto })),
         ops,
-      )),
+      )?),
       Port(ops) => {
-        let mut dup = buf.clone();
-        buf.push(range_stmt(make_payload_field("th", "dport"), ops));
-        dup.push(range_stmt(make_payload_field("th", "sport"), ops));
-        return Some(vec![dup]);
+        if let Some(dport) = range_stmt(make_payload_field("th", "dport"), ops)? {
+          buf.push(dport);
+          if let Some(sport) = range_stmt(make_payload_field("th", "sport"), ops)? {
+            let mut dup = buf.clone();
+            dup.push(sport);
+            return Ok(Some(vec![dup]));
+          }
+        }
       }
-      DstPort(ops) => buf.push(range_stmt(make_payload_field("th", "dport"), ops)),
-      SrcPort(ops) => buf.push(range_stmt(make_payload_field("th", "sport"), ops)),
-      IcmpType(ops) => buf.push(range_stmt(make_payload_field(icmp_ver, "type"), ops)),
-      IcmpCode(ops) => buf.push(range_stmt(make_payload_field(icmp_ver, "code"), ops)),
+      DstPort(ops) => buf.extend(range_stmt(make_payload_field("th", "dport"), ops)?),
+      SrcPort(ops) => buf.extend(range_stmt(make_payload_field("th", "sport"), ops)?),
+      IcmpType(ops) => buf.extend(range_stmt(make_payload_field(icmp_ver, "type"), ops)?),
+      IcmpCode(ops) => buf.extend(range_stmt(make_payload_field(icmp_ver, "code"), ops)?),
       TcpFlags(ops) => {
-        let truth_table = ops.to_truth_table();
+        let tt = ops.to_truth_table();
+        let tt = tt.shrink_set(0b11111111);
+        if tt.is_always_false() {
+          return Err(());
+        } else if tt.is_always_true() {
+          return Ok(None);
+        }
         // HACK: does nftables itself support 64-bit integers? We shrink it for now.
         buf.push(make_match(
-          if truth_table.inv {
+          if tt.inv {
             stmt::Operator::NEQ
           } else {
             stmt::Operator::EQ
           },
           expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
             Box::new(make_payload_field("tcp", "flags")),
-            Box::new(expr::Expression::Number(truth_table.mask as u32)),
+            Box::new(expr::Expression::Number(tt.mask as u32)),
           )),
           expr::Expression::Named(expr::NamedExpression::Set(
-            (truth_table.truth.iter().copied())
+            (tt.truth.iter().copied())
               .map(|x| expr::SetItem::Element(expr::Expression::Number(x as u32)))
               .collect(),
           )),
@@ -66,9 +82,9 @@ impl Component {
           ops.offset(-40);
           Cow::Owned(ops)
         };
-        buf.push(range_stmt(make_payload_field(ip_ver, "length"), &ops))
+        buf.extend(range_stmt(make_payload_field(ip_ver, "length"), &ops)?)
       }
-      Dscp(ops) => buf.push(range_stmt(make_payload_field(ip_ver, "dscp"), ops)),
+      Dscp(ops) => buf.extend(range_stmt(make_payload_field(ip_ver, "dscp"), ops)?),
       Fragment(ops) => {
         // TODO: reduce clone
         // int frag_op_value = [LF,FF,IsF,DF]
@@ -137,13 +153,13 @@ impl Component {
             let split = iter
               .map(|(s1, s2)| buf.iter().cloned().chain([Some(s1), s2].into_iter().flatten()).collect())
               .collect();
-            return Some(split);
+            return Ok(Some(split));
           }
         }
       }
-      FlowLabel(ops) => buf.push(range_stmt(make_payload_field("ip6", "flowlabel"), ops)),
+      FlowLabel(ops) => buf.extend(range_stmt(make_payload_field("ip6", "flowlabel"), ops)?),
     }
-    None
+    Ok(None)
   }
 }
 
@@ -163,18 +179,24 @@ fn make_payload_field(protocol: impl ToString, field: impl ToString) -> expr::Ex
   )))
 }
 
-fn prefix_stmt(field: impl ToString, prefix: IpPrefix) -> stmt::Statement {
-  make_match(
-    stmt::Operator::EQ,
-    make_payload_field(if prefix.afi() == Afi::Ipv4 { "ip" } else { "ip6" }, field),
-    expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
-      addr: Box::new(expr::Expression::String(format!("{}", prefix.prefix()))),
-      len: prefix.len().into(),
-    })),
-  )
+fn prefix_stmt(field: impl ToString, prefix: IpPrefix) -> Option<stmt::Statement> {
+  (prefix.len() != 0).then(|| {
+    make_match(
+      stmt::Operator::EQ,
+      make_payload_field(if prefix.afi() == Afi::Ipv4 { "ip" } else { "ip6" }, field),
+      expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
+        addr: Box::new(expr::Expression::String(format!("{}", prefix.prefix()))),
+        len: prefix.len().into(),
+      })),
+    )
+  })
 }
 
 fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::Statement>) {
+  if pattern.len() == 0 {
+    return;
+  }
+
   let addr_offset = if src { 192 } else { 64 };
 
   buf.push(make_match(
@@ -218,9 +240,14 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
   }
 }
 
-fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> stmt::Statement {
-  let allowed = ops
-    .to_ranges()
+fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> Result<Option<stmt::Statement>, ()> {
+  let ranges = ops.to_ranges();
+  if is_sorted_ranges_always_true(&ranges) {
+    return Ok(None);
+  } else if ranges.is_empty() {
+    return Err(());
+  }
+  let allowed = ranges
     .into_iter()
     .map(|x| {
       let (start, end) = x.into_inner();
@@ -238,11 +265,11 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> stmt::Statement {
       expr::SetItem::Element(expr)
     })
     .collect();
-  make_match(
+  Ok(Some(make_match(
     stmt::Operator::EQ,
     left,
     expr::Expression::Named(expr::NamedExpression::Set(allowed)),
-  )
+  )))
 }
 
 impl Ops<Numeric> {
