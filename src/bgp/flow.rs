@@ -298,6 +298,8 @@ impl Component {
   }
 
   pub fn write_nft_stmt(&self, afi: Afi, buf: &mut Vec<stmt::Statement>) {
+    use Component::*;
+
     fn prefix_stmt(field: String, prefix: IpPrefix) -> stmt::Statement {
       stmt::Statement::Match(stmt::Match {
         op: stmt::Operator::EQ,
@@ -375,8 +377,7 @@ impl Component {
       }
     }
 
-    // TODO: meta l4proto
-    fn range_stmt(protocol: String, field: String, ops: &Ops<Numeric>) -> stmt::Statement {
+    fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> stmt::Statement {
       let allowed = ops
         .to_ranges()
         .into_iter()
@@ -398,37 +399,75 @@ impl Component {
         .collect();
       stmt::Statement::Match(stmt::Match {
         op: stmt::Operator::EQ,
-        left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
-          expr::PayloadField { protocol, field },
-        ))),
+        left,
         right: expr::Expression::Named(expr::NamedExpression::Set(allowed)),
       })
     }
 
+    fn range_stmt_field(protocol: String, field: String, ops: &Ops<Numeric>) -> stmt::Statement {
+      range_stmt(
+        expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
+          expr::PayloadField { protocol, field },
+        ))),
+        ops,
+      )
+    }
+
+    let ip_ver = if afi == Afi::Ipv4 { "ip" } else { "ip6" };
+    let icmp_ver = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
+
     match self {
-      Self::DstPrefix(prefix, 0) => buf.push(prefix_stmt("daddr".into(), *prefix)),
-      Self::SrcPrefix(prefix, 0) => buf.push(prefix_stmt("saddr".into(), *prefix)),
-      Self::DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
-      Self::SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
-      Self::Protocol(ops) => todo!(),
-      Self::Port(ops) => todo!(), // TODO: duplicate current statement list
-      Self::DstPort(ops) => buf.push(range_stmt("th".into(), "dport".into(), ops)),
-      Self::SrcPort(ops) => buf.push(range_stmt("th".into(), "sport".into(), ops)),
-      Self::IcmpType(ops) => buf.push(range_stmt(
-        if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" }.into(),
-        "type".into(),
+      DstPrefix(prefix, 0) => buf.push(prefix_stmt("daddr".into(), *prefix)),
+      SrcPrefix(prefix, 0) => buf.push(prefix_stmt("saddr".into(), *prefix)),
+      DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
+      SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
+      Protocol(ops) => buf.push(range_stmt(
+        expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::L4proto })),
         ops,
       )),
-      Self::IcmpCode(ops) => buf.push(range_stmt(
-        if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" }.into(),
-        "code".into(),
-        ops,
-      )),
-      Self::TcpFlags(ops) => todo!(),
-      Self::PacketLen(ops) => todo!(),
-      Self::Dscp(ops) => todo!(),
-      Self::Fragment(ops) => todo!(),
-      Self::FlowLabel(ops) => todo!(),
+      Port(ops) => todo!("need to duplicate current statement list into dport and sport"),
+      DstPort(ops) => buf.push(range_stmt_field("th".into(), "dport".into(), ops)),
+      SrcPort(ops) => buf.push(range_stmt_field("th".into(), "sport".into(), ops)),
+      IcmpType(ops) => buf.push(range_stmt_field(icmp_ver.into(), "type".into(), ops)),
+      IcmpCode(ops) => buf.push(range_stmt_field(icmp_ver.into(), "code".into(), ops)),
+      TcpFlags(ops) => {
+        let truth_table = ops.to_truth_table();
+        // HACK: does nftables itself support 64-bit integers? We shrink it for now.
+        buf.push(stmt::Statement::Match(stmt::Match {
+          op: if truth_table.inv {
+            stmt::Operator::NEQ
+          } else {
+            stmt::Operator::EQ
+          },
+          left: expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
+            Box::new(expr::Expression::Named(expr::NamedExpression::Payload(
+              expr::Payload::PayloadField(expr::PayloadField { protocol: "tcp".into(), field: "flags".into() }),
+            ))),
+            Box::new(expr::Expression::Number(truth_table.mask as u32)),
+          )),
+          right: expr::Expression::Named(expr::NamedExpression::Set(
+            truth_table
+              .truth
+              .iter()
+              .copied()
+              .map(|x| expr::SetItem::Element(expr::Expression::Number(x as u32)))
+              .collect(),
+          )),
+        }))
+      }
+      PacketLen(ops) => {
+        let ops = if afi == Afi::Ipv4 {
+          Cow::Borrowed(ops)
+        } else {
+          let mut ops = ops.clone();
+          ops.offset(-40);
+          Cow::Owned(ops)
+        };
+        buf.push(range_stmt_field(ip_ver.into(), "length".into(), &ops))
+      }
+      Dscp(ops) => buf.push(range_stmt_field(ip_ver.into(), "dscp".into(), ops)),
+      Fragment(ops) => todo!("need to seperate ORs into different statement lists"),
+      FlowLabel(ops) => buf.push(range_stmt_field("ip6".into(), "flowlabel".into(), ops)),
     }
   }
 
@@ -642,6 +681,31 @@ impl Ops<Numeric> {
     buf.extend(cur);
     buf
   }
+
+  pub fn offset(&mut self, offset: i64) {
+    self.0.iter_mut().for_each(|x| *x = x.offset(offset));
+  }
+}
+
+impl Ops<Bitmask> {
+  pub fn to_truth_table(&self) -> TruthTable {
+    let mut buf = TruthTable::always_false();
+    let mut cur = self.0[0].to_truth_table();
+
+    for op in &self.0[1..] {
+      if op.is_and() {
+        if cur.is_always_false() {
+          continue;
+        }
+        cur = cur.and(&op.to_truth_table());
+      } else {
+        buf = buf.or(&cur);
+        cur = op.to_truth_table();
+      }
+    }
+    buf = buf.or(&cur);
+    buf
+  }
 }
 
 impl<K: OpKind> From<Op<K>> for Ops<K> {
@@ -813,6 +877,8 @@ impl Op<Numeric> {
     use NumericFlags::*;
     match NumericFlags::from_repr(self.flags & 0b111).unwrap() {
       False => None,
+      Lt if self.value == 0 => None,
+      Gt if self.value == u64::MAX => None,
       Lt => Some((0..=self.value - 1, None)),
       Gt => Some((self.value + 1..=u64::MAX, None)),
       Eq => Some((self.value..=self.value, None)),
@@ -829,6 +895,27 @@ impl Op<Numeric> {
       .map(|(a, b)| [Some(a), b].into_iter().flatten())
       .into_iter()
       .flatten()
+  }
+
+  /// Offset the operator by adding n (no overflow) to every value compared.
+  pub fn offset(self, n: i64) -> Self {
+    use NumericFlags::*;
+    use Ordering::*;
+
+    let diff = n.unsigned_abs();
+    let f = NumericFlags::from_repr(self.flags & 0b111).unwrap();
+
+    let (flags, value) = match (f, n.cmp(&0)) {
+      (_, Equal) => return self,
+      (False | True, _) => (f, 0),
+      (Lt | Le | Eq | Ne, Less) => self.value.checked_sub(diff).map(|v| (f, v)).unwrap_or((False, 0)),
+      (Lt | Le, Greater) => self.value.checked_add(diff).map(|v| (f, v)).unwrap_or((True, 0)),
+      (Gt | Ge | Eq | Ne, Greater) => self.value.checked_add(diff).map(|v| (f, v)).unwrap_or((False, 0)),
+      (Gt | Ge, Less) => self.value.checked_sub(diff).map(|v| (f, v)).unwrap_or((True, 0)),
+    };
+
+    let flags = self.flags & Self::AND | flags as u8;
+    Self { flags, value, _k: PhantomData }
   }
 }
 
@@ -1018,6 +1105,7 @@ pub struct TruthTable {
   truth: BTreeSet<u64>,
 }
 
+// TODO: reduce clone
 impl TruthTable {
   pub fn always_true() -> Self {
     Self { mask: 0, inv: false, truth: BTreeSet::new() }
