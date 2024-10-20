@@ -1,4 +1,4 @@
-use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, FlowSpec, Numeric, NumericFlags, Op, Ops};
+use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, FlowSpec, Numeric, NumericFlags, Op, Ops};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::{expr, stmt};
@@ -14,13 +14,31 @@ use std::ops::{Add, RangeInclusive};
 
 impl FlowSpec {
   pub fn to_nft_stmts(&self) -> Option<Vec<Vec<stmt::Statement>>> {
-    let mut buf = vec![vec![]];
+    use ComponentKind as CK;
+
+    let set = self.component_set();
+    let transport = match (
+      set.contains(&CK::TcpFlags),
+      set.contains(&CK::IcmpType) || self.component_set().contains(&CK::IcmpCode),
+    ) {
+      (false, false) => Transport::Unknown,
+      (false, true) => Transport::Icmp,
+      (true, false) => Transport::Tcp,
+      _ => return None,
+    };
+
+    let mut buf = vec![vec![make_match(
+      stmt::Operator::EQ,
+      make_meta(expr::MetaKey::Nfproto),
+      expr::Expression::String(if self.afi() == Afi::Ipv4 { "ipv4" } else { "ipv6" }.into()),
+    )]];
     for c in self.components() {
       let mut new_stmts = Vec::new();
-      let Ok(divergent) = c.write_nft_stmts(self.afi(), &mut new_stmts) else {
+      let Ok(divergent) = c.write_nft_stmts(self.afi(), transport, &mut new_stmts) else {
         return None;
       };
       if let Some(d) = divergent {
+        println!("{c} divergent {d:?}");
         let diverged = buf
           .iter()
           .map(|r| d.iter().map(|a| r.clone().into_iter().chain(a.clone()).collect()))
@@ -45,27 +63,40 @@ impl Component {
   /// - `Ok(None)`: new statements appended, do not duplicate current statement list
   /// - `Ok(Some(_))`: new statements appended, statement list duplicated and serving as logical OR
   /// - `Err(())`: current component matches nothing
-  pub fn write_nft_stmts(
+  fn write_nft_stmts(
     &self,
     afi: Afi,
+    tp: Transport,
     buf: &mut Vec<stmt::Statement>,
   ) -> Result<Option<Vec<Vec<stmt::Statement>>>, ()> {
     // TODO: simple case optimization
     use Component::*;
+    use Transport::*;
+
     let ip_ver = if afi == Afi::Ipv4 { "ip" } else { "ip6" };
-    let icmp_ver = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
+    let icmp = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
+    let (th, tp_code) = match tp {
+      Tcp => (Ok("tcp"), Some(6)),
+      Icmp => (Err(()), Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58))),
+      Unknown => (Ok("th"), None),
+    };
     match self {
       DstPrefix(prefix, 0) => buf.extend(prefix_stmt("daddr", *prefix)),
       SrcPrefix(prefix, 0) => buf.extend(prefix_stmt("saddr", *prefix)),
       DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
       SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
-      Protocol(ops) => buf.extend(range_stmt(
-        expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::L4proto })),
-        ops,
-      )?),
+      Protocol(ops) => {
+        if let Some(code) = tp_code {
+          if !ops.op(code) {
+            return Err(());
+          }
+        } else {
+          buf.extend(range_stmt(make_meta(expr::MetaKey::L4proto), ops, 0xff)?)
+        }
+      }
       Port(ops) => {
-        if let Some(dport) = range_stmt(make_payload_field("th", "dport"), ops)? {
-          if let Some(sport) = range_stmt(make_payload_field("th", "sport"), ops)? {
+        if let Some(dport) = range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)? {
+          if let Some(sport) = range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)? {
             let mut dup = buf.clone();
             buf.push(dport);
             dup.push(sport);
@@ -75,10 +106,11 @@ impl Component {
           }
         }
       }
-      DstPort(ops) => buf.extend(range_stmt(make_payload_field("th", "dport"), ops)?),
-      SrcPort(ops) => buf.extend(range_stmt(make_payload_field("th", "sport"), ops)?),
-      IcmpType(ops) => buf.extend(range_stmt(make_payload_field(icmp_ver, "type"), ops)?),
-      IcmpCode(ops) => buf.extend(range_stmt(make_payload_field(icmp_ver, "code"), ops)?),
+      DstPort(ops) => buf.extend(range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)?),
+      SrcPort(ops) => buf.extend(range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)?),
+      IcmpType(ops) if tp == Icmp => buf.extend(range_stmt(make_payload_field(icmp, "type"), ops, 0xff)?),
+      IcmpCode(ops) if tp == Icmp => buf.extend(range_stmt(make_payload_field(icmp, "code"), ops, 0xff)?),
+      IcmpType(_) | IcmpCode(_) => return Err(()),
       TcpFlags(ops) => {
         // TODO: simple case: one single bit op
         let tt = ops.to_truth_table();
@@ -114,29 +146,41 @@ impl Component {
           ops.offset(-40);
           Cow::Owned(ops)
         };
-        buf.extend(range_stmt(make_payload_field(ip_ver, "length"), &ops)?)
+        buf.extend(range_stmt(make_payload_field(ip_ver, "length"), &ops, 0xffff)?)
       }
-      Dscp(ops) => buf.extend(range_stmt(make_payload_field(ip_ver, "dscp"), ops)?),
+      Dscp(ops) => buf.extend(range_stmt(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?),
       Fragment(ops) => {
         // TODO: reduce clone
         // int frag_op_value = [LF,FF,IsF,DF]
-        // possible: [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
+        // possible: [], [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
         let mask = if afi == Afi::Ipv4 { 0b1111 } else { 0b1110 };
         let tt = ops.to_truth_table();
         let tt = tt.shrink(mask);
         let valid_set = [0b0001, 0b0010, 0b1010, 0b0100, 0b1000].into_iter().collect();
-        let mut new_set: BTreeSet<_> = tt.possible_values_masked().intersection(&valid_set).copied().collect();
+        let mut new_set: BTreeSet<_> = dbg!(tt.possible_values_masked()).intersection(&valid_set).copied().collect();
         if new_set.remove(&0b1010) {
           new_set.insert(0b1000);
         }
         let mut iter = new_set.into_iter().peekable();
         let mut stmts = SmallVec::<[_; 4]>::new();
 
-        let frag_off = make_payload_field(if afi == Afi::Ipv4 { "ip" } else { "frag" }, "frag-off");
+        let frag_off = if afi == Afi::Ipv4 {
+          make_payload_field("ip", "frag-off")
+        } else {
+          expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
+            name: "frag".into(),
+            field: "frag-off".into(),
+            offset: 0,
+          }))
+        };
         let mf = if afi == Afi::Ipv4 {
           make_payload_raw(expr::PayloadBase::NH, 18, 1)
         } else {
-          make_payload_field("frag", "more-fragments")
+          expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
+            name: "frag".into(),
+            field: "more-fragments".into(),
+            offset: 0,
+          }))
         };
 
         // DF (IPv4)
@@ -191,10 +235,17 @@ impl Component {
           }
         }
       }
-      FlowLabel(ops) => buf.extend(range_stmt(make_payload_field("ip6", "flowlabel"), ops)?),
+      FlowLabel(ops) => buf.extend(range_stmt(make_payload_field("ip6", "flowlabel"), ops, 0x1fff)?),
     }
     Ok(None)
   }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+  Tcp,
+  Icmp,
+  Unknown,
 }
 
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
@@ -211,6 +262,10 @@ fn make_payload_field(protocol: impl ToString, field: impl ToString) -> expr::Ex
   expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
     expr::PayloadField { protocol: protocol.to_string(), field: field.to_string() },
   )))
+}
+
+fn make_meta(key: expr::MetaKey) -> expr::Expression {
+  expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key }))
 }
 
 fn prefix_stmt(field: impl ToString, prefix: IpPrefix) -> Option<stmt::Statement> {
@@ -235,7 +290,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
 
   buf.push(make_match(
     stmt::Operator::EQ,
-    expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key: expr::MetaKey::Nfproto })),
+    make_meta(expr::MetaKey::Nfproto),
     expr::Expression::String("ipv6".into()),
   ));
 
@@ -257,7 +312,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
   }
   debug_assert!(start_32bit <= end_32bit);
   for i in (start_32bit..end_32bit).step_by(32) {
-    let num = (ip.to_bits() >> (pattern.len() - 32 - i)) as u32;
+    let num = (ip.to_bits() >> (pattern.len() - 8 - i)) as u32;
     buf.push(make_match(
       stmt::Operator::EQ,
       make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
@@ -274,7 +329,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
   }
 }
 
-fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> Result<Option<stmt::Statement>, ()> {
+fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>, ()> {
   let ranges = ops.to_ranges();
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
@@ -283,6 +338,8 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>) -> Result<Option<stmt:
   }
   let allowed = ranges
     .into_iter()
+    .map(RangeInclusive::into_inner)
+    .filter_map(|(a, b)| (a <= max).then(|| (b <= max).then_some(a..=b).unwrap_or(a..=max)))
     .map(|x| {
       let (start, end) = x.into_inner();
       // HACK: does nftables itself support 64-bit integers? We shrink it for now.

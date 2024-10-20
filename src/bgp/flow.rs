@@ -60,7 +60,6 @@ impl FlowSpec {
   pub fn write(&self, buf: &mut Vec<u8>) {
     let mut buf2 = Vec::new();
     self.inner.iter().for_each(|ComponentStore(c)| {
-      assert!(c.is_valid(self.afi)); // TODO: relax this if we have flowspec builder
       c.write(&mut buf2);
     });
     let len: u16 = buf2.len().try_into().expect("flowspec length should fit in u16");
@@ -93,6 +92,9 @@ impl FlowSpec {
       if inner.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
         return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
       }
+      if !comp.is_valid(afi) {
+        return Err(FlowError::Invalid.into())
+      }
       let kind = comp.kind();
       if !inner.insert(ComponentStore(comp)) {
         return Err(FlowError::Duplicate(kind).into());
@@ -109,6 +111,10 @@ impl FlowSpec {
 
   pub fn components(&self) -> impl Iterator<Item = &Component> {
     self.inner.iter().map(|c| &c.0)
+  }
+
+  pub(crate) fn component_set(&self) -> &BTreeSet<ComponentStore> {
+    &self.inner
   }
 }
 
@@ -137,7 +143,7 @@ impl Display for FlowSpec {
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-struct ComponentStore(Component);
+pub(crate) struct ComponentStore(pub Component);
 
 impl PartialEq for ComponentStore {
   fn eq(&self, other: &Self) -> bool {
