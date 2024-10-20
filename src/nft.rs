@@ -65,11 +65,13 @@ impl Component {
       )?),
       Port(ops) => {
         if let Some(dport) = range_stmt(make_payload_field("th", "dport"), ops)? {
-          buf.push(dport);
           if let Some(sport) = range_stmt(make_payload_field("th", "sport"), ops)? {
             let mut dup = buf.clone();
+            buf.push(dport);
             dup.push(sport);
             return Ok(Some(vec![dup]));
+          } else {
+            buf.push(dport);
           }
         }
       }
@@ -178,12 +180,14 @@ impl Component {
           let len_gt_1 = stmts.len() > 1;
           let mut iter = stmts.into_iter();
           let (first1, first2) = iter.next().unwrap();
-          buf.extend([Some(first1), first2].into_iter().flatten());
           if len_gt_1 {
             let split = iter
               .map(|(s1, s2)| buf.iter().cloned().chain([Some(s1), s2].into_iter().flatten()).collect())
               .collect();
+            buf.extend([Some(first1), first2].into_iter().flatten());
             return Ok(Some(split));
+          } else {
+            buf.extend([Some(first1), first2].into_iter().flatten());
           }
         }
       }
@@ -449,7 +453,7 @@ fn is_sorted_ranges_always_true<'a>(ranges: impl IntoIterator<Item = &'a RangeIn
       return false;
     }
   }
-  true
+  buf == (0..=u64::MAX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
