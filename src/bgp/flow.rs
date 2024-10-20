@@ -1,5 +1,4 @@
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
-use crate::util::Intersect;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
@@ -11,7 +10,6 @@ use std::io;
 use std::io::ErrorKind::UnexpectedEof;
 use std::marker::PhantomData;
 use std::net::IpAddr;
-use std::ops::RangeInclusive;
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -107,6 +105,10 @@ impl FlowSpec {
   }
   pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
     Self::read(reader, Afi::Ipv6).await
+  }
+
+  pub fn components(&self) -> impl Iterator<Item = &Component> {
+    self.inner.iter().map(|c| &c.0)
   }
 }
 
@@ -857,27 +859,4 @@ mod tests {
     nay.iter().for_each(|&n| assert!(!ops.op(n), "ops.op({n})"));
     Ok(())
   }
-
-  #[test_case(&[0b00000011, 114, 0b01010100, 2, 2, 0b10000001, 1], &[114..=513, 1..=1])]
-  #[test_case(&[0b00000110, 114, 0b01010110, 2, 2, 0b11010110, 7, 127], &[0..=113, 115..=513, 515..=1918, 1920..=u64::MAX])]
-  #[tokio::test]
-  async fn test_ops_numeric(mut seq: &[u8], result: &[RangeInclusive<u64>]) -> anyhow::Result<()> {
-    let ops = Ops::<Numeric>::read(&mut seq).await?;
-    let ranges = ops.to_ranges();
-    println!("{ranges:?}");
-    assert_eq!(ranges, result);
-    Ok(())
-  }
-
-  // #[test]
-  // fn test_truth_table() {
-  //   let op1 = Op::bit(BitmaskFlags::All, 0b0000);
-  //   let op2 = Op::bit(BitmaskFlags::Any, 0b000010);
-  //   let tt = op1.to_truth_table().or(&op2.to_truth_table()).into_owned();
-  //   println!("{:04b} {}", tt.mask, tt.inv);
-  //   for i in tt.truth.iter() {
-  //     print!("{i:04b} ");
-  //   }
-  //   println!();
-  // }
 }
