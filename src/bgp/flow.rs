@@ -93,7 +93,7 @@ impl FlowSpec {
         return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
       }
       if !comp.is_valid(afi) {
-        return Err(FlowError::Invalid.into())
+        return Err(FlowError::Invalid.into());
       }
       let kind = comp.kind();
       if !inner.insert(ComponentStore(comp)) {

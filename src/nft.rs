@@ -12,15 +12,23 @@ use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::ops::{Add, RangeInclusive};
 
+/// Makes sure transport protocol is consistent across components inside a
+/// flowspec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transport {
+  Tcp,
+  Icmp,
+  Unknown,
+}
+
 impl FlowSpec {
   pub fn to_nft_stmts(&self) -> Option<Vec<Vec<stmt::Statement>>> {
     use ComponentKind as CK;
 
     let set = self.component_set();
-    let transport = match (
-      set.contains(&CK::TcpFlags),
-      set.contains(&CK::IcmpType) || self.component_set().contains(&CK::IcmpCode),
-    ) {
+    let tcp = set.contains(&CK::TcpFlags);
+    let icmp = set.contains(&CK::IcmpType) || set.contains(&CK::IcmpCode);
+    let transport = match (tcp, icmp) {
       (false, false) => Transport::Unknown,
       (false, true) => Transport::Icmp,
       (true, false) => Transport::Tcp,
@@ -30,28 +38,20 @@ impl FlowSpec {
     let mut buf = vec![vec![make_match(
       stmt::Operator::EQ,
       make_meta(expr::MetaKey::Nfproto),
-      expr::Expression::String(if self.afi() == Afi::Ipv4 { "ipv4" } else { "ipv6" }.into()),
+      expr::Expression::String((self.afi() == Afi::Ipv4).then_some("ipv4").unwrap_or("ipv6").into()),
     )]];
     for c in self.components() {
       let mut new_stmts = Vec::new();
-      let Ok(divergent) = c.write_nft_stmts(self.afi(), transport, &mut new_stmts) else {
-        return None;
-      };
+      let divergent = c.write_nft_stmts(self.afi(), transport, &mut new_stmts).ok()?;
       if let Some(d) = divergent {
-        println!("{c} divergent {d:?}");
-        let diverged = buf
-          .iter()
+        let diverged = (buf.iter())
           .map(|r| d.iter().map(|a| r.clone().into_iter().chain(a.clone()).collect()))
           .flatten()
           .collect::<Vec<_>>();
-        for rule in &mut buf {
-          rule.extend(new_stmts.clone());
-        }
+        buf.iter_mut().for_each(|rule| rule.extend(new_stmts.clone()));
         buf.extend(diverged);
       } else {
-        for rule in &mut buf {
-          rule.extend(new_stmts.clone());
-        }
+        buf.iter_mut().for_each(|rule| rule.extend(new_stmts.clone()));
       }
     }
     Some(buf)
@@ -60,8 +60,10 @@ impl FlowSpec {
 
 impl Component {
   /// Results:
-  /// - `Ok(None)`: new statements appended, do not duplicate current statement list
-  /// - `Ok(Some(_))`: new statements appended, statement list duplicated and serving as logical OR
+  /// - `Ok(None)`: new statements appended, do not duplicate current statement
+  ///   list
+  /// - `Ok(Some(_))`: new statements appended, statement list duplicated and
+  ///   serving as logical OR
   /// - `Err(())`: current component matches nothing
   fn write_nft_stmts(
     &self,
@@ -73,27 +75,24 @@ impl Component {
     use Component::*;
     use Transport::*;
 
-    let ip_ver = if afi == Afi::Ipv4 { "ip" } else { "ip6" };
-    let icmp = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
+    let ip_ver = (afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6");
+    let icmp = (afi == Afi::Ipv4).then_some("icmp").unwrap_or("icmpv6");
     let (th, tp_code) = match tp {
       Tcp => (Ok("tcp"), Some(6)),
       Icmp => (Err(()), Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58))),
       Unknown => (Ok("th"), None),
     };
     match self {
-      DstPrefix(prefix, 0) => buf.extend(prefix_stmt("daddr", *prefix)),
-      SrcPrefix(prefix, 0) => buf.extend(prefix_stmt("saddr", *prefix)),
-      DstPrefix(pattern, offset) => pattern_stmt(false, *pattern, *offset, buf),
-      SrcPrefix(pattern, offset) => pattern_stmt(true, *pattern, *offset, buf),
-      Protocol(ops) => {
-        if let Some(code) = tp_code {
-          if !ops.op(code) {
-            return Err(());
-          }
-        } else {
-          buf.extend(range_stmt(make_meta(expr::MetaKey::L4proto), ops, 0xff)?)
-        }
-      }
+      &DstPrefix(prefix, 0) => buf.extend(prefix_stmt("daddr", prefix)),
+      &SrcPrefix(prefix, 0) => buf.extend(prefix_stmt("saddr", prefix)),
+      &DstPrefix(pattern, offset) => pattern_stmt(false, pattern, offset, buf),
+      &SrcPrefix(pattern, offset) => pattern_stmt(true, pattern, offset, buf),
+
+      Protocol(ops) => match tp_code {
+        Some(code) => ops.op(code).then(|| ()).ok_or(())?,
+        None => buf.extend(range_stmt(make_meta(expr::MetaKey::L4proto), ops, 0xff)?),
+      },
+
       Port(ops) => {
         if let Some(dport) = range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)? {
           if let Some(sport) = range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)? {
@@ -120,13 +119,8 @@ impl Component {
         } else if tt.is_always_true() {
           return Ok(None);
         }
-        // HACK: does nftables itself support 64-bit integers? We shrink it for now.
         buf.push(make_match(
-          if tt.inv {
-            stmt::Operator::NEQ
-          } else {
-            stmt::Operator::EQ
-          },
+          tt.inv.then_some(stmt::Operator::NEQ).unwrap_or(stmt::Operator::EQ),
           expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
             Box::new(make_payload_field("tcp", "flags")),
             Box::new(expr::Expression::Number(tt.mask as u32)),
@@ -139,49 +133,32 @@ impl Component {
         ))
       }
       PacketLen(ops) => {
-        let ops = if afi == Afi::Ipv4 {
-          Cow::Borrowed(ops)
-        } else {
-          let mut ops = ops.clone();
-          ops.offset(-40);
-          Cow::Owned(ops)
-        };
+        let ops = (afi == Afi::Ipv4)
+          .then(|| Cow::Borrowed(ops))
+          .unwrap_or_else(|| Cow::Owned(ops.with_offset(-40)));
         buf.extend(range_stmt(make_payload_field(ip_ver, "length"), &ops, 0xffff)?)
       }
       Dscp(ops) => buf.extend(range_stmt(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?),
       Fragment(ops) => {
         // TODO: reduce clone
         // int frag_op_value = [LF,FF,IsF,DF]
-        // possible: [], [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
-        let mask = if afi == Afi::Ipv4 { 0b1111 } else { 0b1110 };
+        // possible: [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
+        let mask = (afi == Afi::Ipv4).then_some(0b1111).unwrap_or(0b1110);
         let tt = ops.to_truth_table();
         let tt = tt.shrink(mask);
         let valid_set = [0b0001, 0b0010, 0b1010, 0b0100, 0b1000].into_iter().collect();
         let mut new_set: BTreeSet<_> = dbg!(tt.possible_values_masked()).intersection(&valid_set).copied().collect();
-        if new_set.remove(&0b1010) {
-          new_set.insert(0b1000);
-        }
+        new_set.remove(&0b1010).then(|| new_set.insert(0b1000));
+
         let mut iter = new_set.into_iter().peekable();
         let mut stmts = SmallVec::<[_; 4]>::new();
 
-        let frag_off = if afi == Afi::Ipv4 {
-          make_payload_field("ip", "frag-off")
-        } else {
-          expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
-            name: "frag".into(),
-            field: "frag-off".into(),
-            offset: 0,
-          }))
-        };
-        let mf = if afi == Afi::Ipv4 {
-          make_payload_raw(expr::PayloadBase::NH, 18, 1)
-        } else {
-          expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
-            name: "frag".into(),
-            field: "more-fragments".into(),
-            offset: 0,
-          }))
-        };
+        let frag_off = (afi == Afi::Ipv4)
+          .then(|| make_payload_field("ip", "frag-off"))
+          .unwrap_or_else(|| make_exthdr("frag", "frag-off", 0));
+        let mf = (afi == Afi::Ipv4)
+          .then(|| make_payload_raw(expr::PayloadBase::NH, 18, 1))
+          .unwrap_or_else(|| make_exthdr("frag", "more-fragments", 0));
 
         // DF (IPv4)
         if let Some(0b0001) = iter.peek() {
@@ -241,13 +218,6 @@ impl Component {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Transport {
-  Tcp,
-  Icmp,
-  Unknown,
-}
-
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })
 }
@@ -268,6 +238,14 @@ fn make_meta(key: expr::MetaKey) -> expr::Expression {
   expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key }))
 }
 
+fn make_exthdr(name: impl ToString, field: impl ToString, offset: u32) -> expr::Expression {
+  expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
+    name: name.to_string(),
+    field: field.to_string(),
+    offset,
+  }))
+}
+
 fn prefix_stmt(field: impl ToString, prefix: IpPrefix) -> Option<stmt::Statement> {
   (prefix.len() != 0).then(|| {
     make_match(
@@ -286,14 +264,13 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
     return;
   }
 
-  let addr_offset = if src { 192 } else { 64 };
-
   buf.push(make_match(
     stmt::Operator::EQ,
     make_meta(expr::MetaKey::Nfproto),
     expr::Expression::String("ipv6".into()),
   ));
 
+  let addr_offset = src.then_some(192).unwrap_or(64);
   let start_32bit = offset.next_multiple_of(32);
   let pre_rem = start_32bit - offset;
   let end_32bit = pattern.len().prev_multiple_of(&32); // this uses num::Integer, not std
@@ -302,29 +279,41 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
   let IpAddr::V6(ip) = pattern.prefix() else {
     unreachable!();
   };
-  if pre_rem > 0 {
-    let num = ip.to_bits() >> (128 - start_32bit);
+  if start_32bit + 32 <= end_32bit {
+    if pre_rem > 0 {
+      let num = ip.to_bits() >> (128 - start_32bit);
+      buf.push(make_match(
+        stmt::Operator::EQ,
+        make_payload_raw(expr::PayloadBase::NH, addr_offset + offset as u32, pre_rem.into()),
+        expr::Expression::Number(num.try_into().unwrap()),
+      ));
+    }
+    for i in (start_32bit..end_32bit).step_by(32) {
+      let num = (ip.to_bits() >> (pattern.len() - 8 - i)) as u32;
+      buf.push(make_match(
+        stmt::Operator::EQ,
+        make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
+        expr::Expression::Number(num),
+      ));
+    }
+    if post_rem > 0 {
+      let num = ((ip.to_bits() >> (128 - pattern.len())) as u32) & (u32::MAX >> (32 - post_rem));
+      buf.push(make_match(
+        stmt::Operator::EQ,
+        make_payload_raw(expr::PayloadBase::NH, addr_offset + end_32bit as u32, post_rem.into()),
+        expr::Expression::Number(num),
+      ));
+    }
+  } else {
+    let num = ip.to_bits() >> (128 - offset);
     buf.push(make_match(
       stmt::Operator::EQ,
-      make_payload_raw(expr::PayloadBase::NH, addr_offset + offset as u32, pre_rem.into()),
+      make_payload_raw(
+        expr::PayloadBase::NH,
+        addr_offset + u32::from(offset),
+        u32::from(pattern.len() - offset),
+      ),
       expr::Expression::Number(num.try_into().unwrap()),
-    ));
-  }
-  debug_assert!(start_32bit <= end_32bit);
-  for i in (start_32bit..end_32bit).step_by(32) {
-    let num = (ip.to_bits() >> (pattern.len() - 8 - i)) as u32;
-    buf.push(make_match(
-      stmt::Operator::EQ,
-      make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
-      expr::Expression::Number(num),
-    ));
-  }
-  if post_rem > 0 {
-    let num = ((ip.to_bits() >> (128 - pattern.len())) as u32) & (u32::MAX >> (32 - post_rem));
-    buf.push(make_match(
-      stmt::Operator::EQ,
-      make_payload_raw(expr::PayloadBase::NH, addr_offset + end_32bit as u32, post_rem.into()),
-      expr::Expression::Number(num),
     ));
   }
 }
@@ -342,7 +331,8 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
     .filter_map(|(a, b)| (a <= max).then(|| (b <= max).then_some(a..=b).unwrap_or(a..=max)))
     .map(|x| {
       let (start, end) = x.into_inner();
-      // HACK: does nftables itself support 64-bit integers? We shrink it for now.
+      // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
+      // But most of the matching expressions is smaller than 32 bits anyway.
       let expr = if start == end {
         expr::Expression::Number(start as u32)
       } else {
@@ -408,6 +398,12 @@ impl Ops<Numeric> {
 
   pub fn offset(&mut self, offset: i64) {
     self.0.iter_mut().for_each(|x| *x = x.offset(offset));
+  }
+
+  pub fn with_offset(&self, offset: i64) -> Self {
+    let mut ops = self.clone();
+    ops.offset(offset);
+    ops
   }
 }
 
