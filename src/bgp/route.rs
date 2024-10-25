@@ -1,9 +1,11 @@
 use super::flow::FlowSpec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
-use crate::util::MaybeRc;
 use anstyle::{AnsiColor, Color, Reset, Style};
-use serde::{Deserialize, Serialize};
+use log::warn;
+use nftables::stmt;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
@@ -12,10 +14,10 @@ use std::rc::Rc;
 use strum::FromRepr;
 
 /// Route storage for a session.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 pub struct Routes {
-  pub unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
-  pub flow: BTreeMap<FlowSpec, MaybeRc<RouteInfo<'static>>>,
+  pub unicast: BTreeMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
+  pub flow: BTreeMap<FlowSpec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>,
 }
 
 impl Routes {
@@ -25,11 +27,19 @@ impl Routes {
 
   pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) {
     match nlri.content {
-      NlriContent::Unicast { prefixes, next_hop } => self
-        .unicast
-        .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
+      NlriContent::Unicast { prefixes, next_hop } => {
+        self.unicast.extend(prefixes.into_iter().map(|p| (p, (next_hop, info.clone()))))
+      }
       NlriContent::Flow { specs } => {
-        self.flow.extend(specs.into_iter().map(|s| (s, MaybeRc::Rc(info.clone()))));
+        let tuples = specs.into_iter().filter_map(|s| {
+          if let Some(n) = s.to_nft_stmts() {
+            Some((s, (n, info.clone())))
+          } else {
+            warn!("flowspec {s} rejected");
+            None
+          }
+        });
+        self.flow.extend(tuples);
       }
     }
   }
@@ -53,7 +63,39 @@ impl Routes {
     self.unicast.retain(|_, _| false);
     self.flow.retain(|_, _| false);
   }
+}
 
+impl Serialize for Routes {
+  fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+    struct UnicastMap<'a>(&'a BTreeMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>);
+    impl Serialize for UnicastMap<'_> {
+      fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.collect_map(self.0.iter().map(|(k, (u, v))| (k, (u, &**v))))
+      }
+    }
+
+    struct FlowMap<'a>(&'a BTreeMap<FlowSpec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>);
+    impl Serialize for FlowMap<'_> {
+      fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.collect_map(self.0.iter().map(|(k, (_, v))| (k, &**v)))
+      }
+    }
+
+    let mut s = ser.serialize_struct("Routes", 2)?;
+    s.serialize_field("unicast", &UnicastMap(&self.unicast))?;
+    s.serialize_field("flow", &FlowMap(&self.flow))?;
+    s.end()
+  }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "Routes")]
+pub struct RoutesDisplay {
+  pub unicast: BTreeMap<IpPrefix, (NextHop, RouteInfo<'static>)>,
+  pub flow: BTreeMap<FlowSpec, RouteInfo<'static>>,
+}
+
+impl RoutesDisplay {
   pub fn print(&self) {
     const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
     const BOLD: Style = Style::new().bold();

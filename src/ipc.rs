@@ -1,4 +1,4 @@
-use crate::bgp::route::Routes;
+use crate::bgp::route::{Routes, RoutesDisplay};
 use crate::sync::RwLock;
 use std::borrow::Cow;
 use std::path::Path;
@@ -32,7 +32,7 @@ impl Drop for IpcServer<'_> {
   }
 }
 
-pub async fn get_routes(path: impl AsRef<Path>) -> anyhow::Result<Routes> {
+pub async fn get_routes(path: impl AsRef<Path>) -> anyhow::Result<RoutesDisplay> {
   let mut stream = UnixStream::connect(path).await?;
   let mut buf = Vec::new();
   stream.read_to_end(&mut buf).await?;

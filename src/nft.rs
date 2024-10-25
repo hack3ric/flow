@@ -147,7 +147,7 @@ impl Component {
         let tt = ops.to_truth_table();
         let tt = tt.shrink(mask);
         let valid_set = [0b0001, 0b0010, 0b1010, 0b0100, 0b1000].into_iter().collect();
-        let mut new_set: BTreeSet<_> = dbg!(tt.possible_values_masked()).intersection(&valid_set).copied().collect();
+        let mut new_set: BTreeSet<_> = tt.possible_values_masked().intersection(&valid_set).copied().collect();
         new_set.remove(&0b1010).then(|| new_set.insert(0b1000));
 
         let mut iter = new_set.into_iter().peekable();
