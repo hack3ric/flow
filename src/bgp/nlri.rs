@@ -1,7 +1,7 @@
 //! Network Layer Reachability Information (NLRI).
 
 use super::extend_with_u16_len;
-use super::flow::FlowSpec;
+use super::flow::Flowspec;
 use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
 use crate::net::{Afi, IpPrefix};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,7 @@ pub struct Nlri {
 #[repr(u8)]
 pub enum NlriContent {
   Unicast { prefixes: HashSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LPM trie
-  Flow { specs: SmallVec<[FlowSpec; 4]> } = 133,
+  Flow { specs: SmallVec<[Flowspec; 4]> } = 133,
 }
 
 impl Nlri {
@@ -44,7 +44,7 @@ impl Nlri {
     Ok(Self { afi, content: NlriContent::Unicast { prefixes, next_hop } })
   }
 
-  pub fn new_flow(afi: Afi, specs: SmallVec<[FlowSpec; 4]>) -> Result<Self, NlriError> {
+  pub fn new_flow(afi: Afi, specs: SmallVec<[Flowspec; 4]>) -> Result<Self, NlriError> {
     for spec in &specs {
       if spec.afi() != afi {
         return Err(NlriError::MultipleAddrFamilies(afi));
@@ -123,7 +123,7 @@ impl Nlri {
       }
       (Some(afi), Some(NlriKind::Flow), None) => {
         let mut specs = SmallVec::new_const();
-        while let Some(spec) = FlowSpec::read(reader, afi).await? {
+        while let Some(spec) = Flowspec::read(reader, afi).await? {
           specs.push(spec);
         }
         Ok(Self::new_flow(afi, specs)?)

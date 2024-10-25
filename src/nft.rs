@@ -1,4 +1,4 @@
-use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, FlowSpec, Numeric, NumericFlags, Op, Ops};
+use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::{expr, stmt};
@@ -21,7 +21,7 @@ enum Transport {
   Unknown,
 }
 
-impl FlowSpec {
+impl Flowspec {
   pub fn to_nft_stmts(&self) -> Option<Vec<Vec<stmt::Statement>>> {
     use ComponentKind as CK;
 

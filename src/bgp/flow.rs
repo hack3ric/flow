@@ -15,12 +15,12 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct FlowSpec {
+pub struct Flowspec {
   afi: Afi,
   inner: BTreeSet<ComponentStore>,
 }
 
-impl FlowSpec {
+impl Flowspec {
   pub fn new(afi: Afi) -> Self {
     Self { afi, inner: Default::default() }
   }
@@ -118,13 +118,13 @@ impl FlowSpec {
   }
 }
 
-impl Debug for FlowSpec {
+impl Debug for Flowspec {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     Display::fmt(self, f)
   }
 }
 
-impl Display for FlowSpec {
+impl Display for Flowspec {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match self.afi {
       Afi::Ipv4 => f.write_str("flow4 { ")?,
@@ -826,7 +826,7 @@ mod tests {
     use Component::*;
     use ComponentKind as CK;
 
-    let mut f = FlowSpec::new_v6()
+    let mut f = Flowspec::new_v6()
       .with(DstPrefix("::1:1234:5678:9800:0/104".parse()?, 63))?
       .with(DstPort(Op::ge(80).and(Op::le(443))))?
       .with(TcpFlags(Op::all(Op::SYN | Op::ACK).into()))?;
@@ -848,7 +848,7 @@ mod tests {
     println!("{f}");
     println!("{buf:02x?}");
     assert_eq!(buf, buf_expected);
-    assert_eq!(f, FlowSpec::read_v6(&mut &buf[..]).await?.unwrap());
+    assert_eq!(f, Flowspec::read_v6(&mut &buf[..]).await?.unwrap());
 
     Ok(())
   }

@@ -1,4 +1,4 @@
-use super::flow::FlowSpec;
+use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use anstyle::{AnsiColor, Color, Reset, Style};
@@ -17,7 +17,7 @@ use strum::FromRepr;
 #[derive(Debug, Default)]
 pub struct Routes {
   pub unicast: BTreeMap<IpPrefix, (NextHop, Rc<RouteInfo<'static>>)>,
-  pub flow: BTreeMap<FlowSpec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>,
+  pub flow: BTreeMap<Flowspec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>,
 }
 
 impl Routes {
@@ -74,7 +74,7 @@ impl Serialize for Routes {
       }
     }
 
-    struct FlowMap<'a>(&'a BTreeMap<FlowSpec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>);
+    struct FlowMap<'a>(&'a BTreeMap<Flowspec, (Vec<Vec<stmt::Statement>>, Rc<RouteInfo<'static>>)>);
     impl Serialize for FlowMap<'_> {
       fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         ser.collect_map(self.0.iter().map(|(k, (_, v))| (k, &**v)))
@@ -92,7 +92,7 @@ impl Serialize for Routes {
 #[serde(rename = "Routes")]
 pub struct RoutesDisplay {
   pub unicast: BTreeMap<IpPrefix, (NextHop, RouteInfo<'static>)>,
-  pub flow: BTreeMap<FlowSpec, RouteInfo<'static>>,
+  pub flow: BTreeMap<Flowspec, RouteInfo<'static>>,
 }
 
 impl RoutesDisplay {
