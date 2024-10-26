@@ -6,7 +6,7 @@ use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunit
 use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -322,17 +322,17 @@ impl UpdateMessage<'static> {
       route_info: RouteInfo {
         origin: Origin::Incomplete,
         as_path: Cow::Borrowed(&[]),
-        comm: HashSet::new(),
-        ext_comm: HashSet::new(),
-        ipv6_ext_comm: HashSet::new(),
-        large_comm: HashSet::new(),
-        other_attrs: HashMap::new(),
+        comm: BTreeSet::new(),
+        ext_comm: BTreeSet::new(),
+        ipv6_ext_comm: BTreeSet::new(),
+        large_comm: BTreeSet::new(),
+        other_attrs: BTreeMap::new(),
       },
     };
 
     let withdrawn_len = reader.read_u16().await?;
     let mut withdrawn_reader = (&mut reader).take(withdrawn_len.into());
-    let mut withdrawn_prefixes = HashSet::new();
+    let mut withdrawn_prefixes = BTreeSet::new();
     while let Some(prefix) = IpPrefix::read_v4(&mut withdrawn_reader).await? {
       withdrawn_prefixes.insert(prefix);
     }
@@ -340,7 +340,7 @@ impl UpdateMessage<'static> {
       result.old_withdrawn = Some(Nlri::new_route(Afi::Ipv4, withdrawn_prefixes, None)?);
     }
 
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     let mut old_next_hop = None::<NextHop>;
     let pattrs_len = reader.read_u16().await?;
     let mut pattrs_reader = (&mut reader).take(pattrs_len.into());
@@ -534,7 +534,7 @@ impl UpdateMessage<'static> {
       visited.insert(kind);
     }
 
-    let mut old_prefixes = HashSet::new();
+    let mut old_prefixes = BTreeSet::new();
     let exec = async {
       while let Some(prefix) = IpPrefix::read_v4(reader).await? {
         old_prefixes.insert(prefix);

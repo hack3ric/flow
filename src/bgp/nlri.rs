@@ -6,7 +6,7 @@ use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
 use crate::net::{Afi, IpPrefix};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
@@ -25,12 +25,12 @@ pub struct Nlri {
 #[strum_discriminants(name(NlriKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum NlriContent {
-  Unicast { prefixes: HashSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LPM trie
+  Unicast { prefixes: BTreeSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LPM trie
   Flow { specs: SmallVec<[Flowspec; 4]> } = 133,
 }
 
 impl Nlri {
-  pub fn new_route(afi: Afi, prefixes: HashSet<IpPrefix>, next_hop: Option<NextHop>) -> Result<Self, NlriError> {
+  pub fn new_route(afi: Afi, prefixes: BTreeSet<IpPrefix>, next_hop: Option<NextHop>) -> Result<Self, NlriError> {
     for prefix in &prefixes {
       if prefix.afi() != afi {
         return Err(NlriError::MultipleAddrFamilies(afi));
@@ -115,7 +115,7 @@ impl Nlri {
     match (Afi::from_repr(afi), NlriKind::from_repr(safi), next_hop) {
       (Some(afi @ Afi::Ipv4), Some(NlriKind::Unicast), Some(next_hop))
       | (Some(afi @ Afi::Ipv6), Some(NlriKind::Unicast), Some(next_hop @ NextHop::V6(..))) => {
-        let mut prefixes = HashSet::new();
+        let mut prefixes = BTreeSet::new();
         while let Some(prefix) = IpPrefix::read(reader, afi).await? {
           prefixes.insert(prefix);
         }

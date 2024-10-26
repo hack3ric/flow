@@ -7,7 +7,7 @@ use nftables::stmt;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
@@ -160,13 +160,13 @@ pub struct RouteInfo<'a> {
   /// AS path, stored in reverse for easy prepending.
   pub(super) as_path: Cow<'a, [u32]>,
 
-  pub(super) comm: HashSet<Community>,
-  pub(super) ext_comm: HashSet<ExtCommunity>,
-  pub(super) ipv6_ext_comm: HashSet<Ipv6ExtCommunity>,
-  pub(super) large_comm: HashSet<LargeCommunity>,
+  pub(super) comm: BTreeSet<Community>,
+  pub(super) ext_comm: BTreeSet<ExtCommunity>,
+  pub(super) ipv6_ext_comm: BTreeSet<Ipv6ExtCommunity>,
+  pub(super) large_comm: BTreeSet<LargeCommunity>,
 
   /// Transitive but unrecognized path attributes.
-  pub(super) other_attrs: HashMap<u8, Cow<'a, [u8]>>,
+  pub(super) other_attrs: BTreeMap<u8, Cow<'a, [u8]>>,
 }
 
 impl RouteInfo<'_> {
@@ -199,7 +199,7 @@ impl Display for Origin {
 }
 
 /// RFC 1997 communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Community([u16; 2]);
 
 impl Community {
@@ -224,7 +224,7 @@ impl Display for Community {
 }
 
 /// RFC 4360/5668 extended communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ExtCommunity([u8; 8]);
 
 impl ExtCommunity {
@@ -390,6 +390,10 @@ pub enum TrafficFilterAction {
   TrafficMarking { dscp: u8 },
 }
 
+impl TrafficFilterAction {
+  // pub fn to_nft_stmts()
+}
+
 impl Display for TrafficFilterAction {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     use TrafficFilterAction::*;
@@ -417,7 +421,7 @@ impl Display for TrafficFilterAction {
 }
 
 /// RFC 5701 IPv6 address-specific extended communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Ipv6ExtCommunity {
   pub kind: u8,
   pub sub_kind: u8,
@@ -473,7 +477,7 @@ impl Display for Ipv6ExtCommunity {
 }
 
 /// RFC 8092 large communities.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LargeCommunity([u32; 3]);
 
 impl LargeCommunity {
