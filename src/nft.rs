@@ -1,4 +1,5 @@
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
+use crate::bgp::route::{ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::{expr, stmt};
@@ -6,7 +7,7 @@ use num::Integer;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter, Write};
 use std::marker::PhantomData;
 use std::net::IpAddr;
@@ -123,11 +124,11 @@ impl Component {
           tt.inv.then_some(stmt::Operator::NEQ).unwrap_or(stmt::Operator::EQ),
           expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
             Box::new(make_payload_field("tcp", "flags")),
-            Box::new(expr::Expression::Number(tt.mask as u32)),
+            Box::new(NUM(tt.mask as u32)),
           )),
           expr::Expression::Named(expr::NamedExpression::Set(
             (tt.truth.iter().copied())
-              .map(|x| expr::SetItem::Element(expr::Expression::Number(x as u32)))
+              .map(|x| expr::SetItem::Element(NUM(x as u32)))
               .collect(),
           )),
         ))
@@ -167,7 +168,7 @@ impl Component {
             make_match(
               stmt::Operator::EQ,
               make_payload_raw(expr::PayloadBase::NH, 17, 1),
-              expr::Expression::Number(1),
+              NUM(1),
             ),
             None,
           ));
@@ -175,25 +176,22 @@ impl Component {
         // IsF: {ip,frag} frag-off != 0
         if let Some(0b0010) = iter.peek() {
           iter.next();
-          stmts.push((
-            make_match(stmt::Operator::NEQ, frag_off.clone(), expr::Expression::Number(0)),
-            None,
-          ));
+          stmts.push((make_match(stmt::Operator::NEQ, frag_off.clone(), NUM(0)), None));
         }
         // FF: {ip,frag} frag-off == 0 && MF == 1
         if let Some(0b0100) = iter.peek() {
           iter.next();
           stmts.push((
-            make_match(stmt::Operator::EQ, frag_off.clone(), expr::Expression::Number(0)),
-            Some(make_match(stmt::Operator::EQ, mf.clone(), expr::Expression::Number(1))),
+            make_match(stmt::Operator::EQ, frag_off.clone(), NUM(0)),
+            Some(make_match(stmt::Operator::EQ, mf.clone(), NUM(1))),
           ));
         }
         // LF: {ip,frag} frag-off != 0 && MF == 0
         if let Some(0b1000) = iter.peek() {
           iter.next();
           stmts.push((
-            make_match(stmt::Operator::NEQ, frag_off, expr::Expression::Number(0)),
-            Some(make_match(stmt::Operator::EQ, mf, expr::Expression::Number(0))),
+            make_match(stmt::Operator::NEQ, frag_off, NUM(0)),
+            Some(make_match(stmt::Operator::EQ, mf, NUM(0))),
           ));
         }
 
@@ -218,8 +216,85 @@ impl Component {
   }
 }
 
+impl RouteInfo<'_> {
+  pub fn to_nft_stmts(&self, afi: Afi) -> Vec<Vec<stmt::Statement>> {
+    // TODO: IPv6 ext comm
+    let set = (self.ext_comm.iter().copied())
+      .filter_map(ExtCommunity::traffic_filter_action)
+      .map(|x| (x.kind(), x))
+      .collect::<BTreeMap<_, _>>();
+    let terminal = set
+      .get(&TrafficFilterActionKind::TrafficAction)
+      .map(|x| {
+        let TrafficFilterAction::TrafficAction { terminal, .. } = x else {
+          unreachable!()
+        };
+        *terminal
+      })
+      .unwrap_or(true);
+    set
+      .values()
+      .map(|x| x.to_nft_stmts(afi, terminal))
+      .map(|(a, b)| Some(a).into_iter().chain(b.map(|x| vec![x])))
+      .flatten()
+      .collect()
+  }
+}
+
+impl TrafficFilterAction {
+  pub fn to_nft_stmts(self, afi: Afi, terminal: bool) -> (Vec<stmt::Statement>, Option<stmt::Statement>) {
+    use TrafficFilterAction::*;
+    match self {
+      TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
+        (vec![DROP], None)
+      }
+      TrafficRateBytes { rate, .. } => (
+        vec![make_limit(true, rate, "bytes", "second"), DROP],
+        terminal.then_some(ACCEPT),
+      ),
+      TrafficRatePackets { rate, .. } => (
+        vec![make_limit(true, rate, "packets", "second"), DROP],
+        terminal.then_some(ACCEPT),
+      ),
+      TrafficAction { sample: true, .. } => (
+        vec![
+          stmt::Statement::Log(Some(stmt::Log::new(None))),
+          terminal.then_some(ACCEPT).unwrap_or(CONTINUE),
+        ],
+        None,
+      ),
+      TrafficAction { .. } => (Vec::new(), None),
+      RtRedirect { .. } | RtRedirectIpv6 { .. } => todo!("redirect is not supported at the moment"),
+      TrafficMarking { dscp } => (
+        vec![stmt::Statement::Mangle(stmt::Mangle {
+          key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
+          value: NUM(dscp.into()),
+        })],
+        None,
+      ),
+    }
+  }
+}
+
+const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
+const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
+const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
+
+const NUM: fn(u32) -> expr::Expression = expr::Expression::Number;
+
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })
+}
+
+fn make_limit(over: bool, rate: f32, unit: impl ToString, per: impl ToString) -> stmt::Statement {
+  stmt::Statement::Limit(stmt::Limit {
+    rate: rate.round() as u32,
+    rate_unit: Some(unit.to_string()),
+    per: Some(per.to_string()),
+    burst: None,
+    burst_unit: None,
+    inv: Some(over),
+  })
 }
 
 fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression {
@@ -285,7 +360,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + offset as u32, pre_rem.into()),
-        expr::Expression::Number(num.try_into().unwrap()),
+        NUM(num.try_into().unwrap()),
       ));
     }
     for i in (start_32bit..end_32bit).step_by(32) {
@@ -293,7 +368,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
-        expr::Expression::Number(num),
+        NUM(num),
       ));
     }
     if post_rem > 0 {
@@ -301,7 +376,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + end_32bit as u32, post_rem.into()),
-        expr::Expression::Number(num),
+        NUM(num),
       ));
     }
   } else {
@@ -313,7 +388,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
         addr_offset + u32::from(offset),
         u32::from(pattern.len() - offset),
       ),
-      expr::Expression::Number(num.try_into().unwrap()),
+      NUM(num.try_into().unwrap()),
     ));
   }
 }
@@ -333,16 +408,9 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
       let (start, end) = x.into_inner();
       // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
       // But most of the matching expressions is smaller than 32 bits anyway.
-      let expr = if start == end {
-        expr::Expression::Number(start as u32)
-      } else {
-        expr::Expression::Range(expr::Range {
-          range: vec![
-            expr::Expression::Number(start as u32),
-            expr::Expression::Number(end as u32),
-          ],
-        })
-      };
+      let expr = (start == end)
+        .then_some(NUM(start as u32))
+        .unwrap_or_else(|| expr::Expression::Range(expr::Range { range: vec![NUM(start as u32), NUM(end as u32)] }));
       expr::SetItem::Element(expr)
     })
     .collect();

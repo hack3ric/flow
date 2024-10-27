@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
-use strum::FromRepr;
+use strum::{EnumDiscriminants, FromRepr};
 
 /// Route storage for a session.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -113,18 +113,18 @@ impl Routes {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteInfo<'a> {
-  pub(super) origin: Origin,
+  pub(crate) origin: Origin,
 
   /// AS path, stored in reverse for easy prepending.
-  pub(super) as_path: Cow<'a, [u32]>,
+  pub(crate) as_path: Cow<'a, [u32]>,
 
-  pub(super) comm: BTreeSet<Community>,
-  pub(super) ext_comm: BTreeSet<ExtCommunity>,
-  pub(super) ipv6_ext_comm: BTreeSet<Ipv6ExtCommunity>,
-  pub(super) large_comm: BTreeSet<LargeCommunity>,
+  pub(crate) comm: BTreeSet<Community>,
+  pub(crate) ext_comm: BTreeSet<ExtCommunity>,
+  pub(crate) ipv6_ext_comm: BTreeSet<Ipv6ExtCommunity>,
+  pub(crate) large_comm: BTreeSet<LargeCommunity>,
 
   /// Transitive but unrecognized path attributes.
-  pub(super) other_attrs: BTreeMap<u8, Cow<'a, [u8]>>,
+  pub(crate) other_attrs: BTreeMap<u8, Cow<'a, [u8]>>,
 }
 
 impl RouteInfo<'_> {
@@ -284,7 +284,7 @@ impl ExtCommunity {
     let result = match (g, self.sub_kind()) {
       (As(desc), 0x06) => TrafficRateBytes { desc: desc as u16, rate: f32::from_bits(l) },
       (As(desc), 0x0c) => TrafficRatePackets { desc: desc as u16, rate: f32::from_bits(l) },
-      (As(_), 0x07) => TrafficAction { terminal: l & 1 != 0, sample: l & (1 << 1) != 0 },
+      (As(_), 0x07) => TrafficAction { terminal: l & 1 == 0, sample: l & (1 << 1) != 0 },
       (_, 0x08) => RtRedirect { rt: g, value: l },
       (As(_), 0x09) => TrafficMarking { dscp: (l as u8) & 0b111111 },
       _ => return None,
@@ -338,7 +338,8 @@ impl Display for GlobalAdmin {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(name(TrafficFilterActionKind), derive(PartialOrd, Ord))]
 pub enum TrafficFilterAction {
   TrafficRateBytes { desc: u16, rate: f32 },
   TrafficRatePackets { desc: u16, rate: f32 },
@@ -349,7 +350,9 @@ pub enum TrafficFilterAction {
 }
 
 impl TrafficFilterAction {
-  // pub fn to_nft_stmts()
+  pub fn kind(self) -> TrafficFilterActionKind {
+    self.into()
+  }
 }
 
 impl Display for TrafficFilterAction {
