@@ -24,15 +24,16 @@ pub fn flow_to_nft_stmts(
     .chain(info.to_nft_stmts(spec.afi()).map(Ok))
     .map(|x| {
       x.map(|y| {
+        let old = total;
         total *= y.len();
-        (y, total)
+        (y, old)
       })
     })
     .collect::<Result<Vec<_>, _>>()?;
   let result = (0..total).map(move |i| {
     base
       .iter()
-      .map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i % v % x.len())].iter())
+      .map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i / v % x.len())].iter())
       .flatten()
       .cloned()
       .collect::<Vec<_>>()
