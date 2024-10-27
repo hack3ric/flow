@@ -2,6 +2,7 @@ use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
+use nftables::expr::Expression::{Number as NUM, String as STRING};
 use nftables::{expr, stmt};
 use num::Integer;
 use smallvec::{smallvec, smallvec_inline, SmallVec};
@@ -265,9 +266,6 @@ impl TrafficFilterAction {
 const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
 const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
 const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
-
-use expr::Expression::Number as NUM;
-use expr::Expression::String as STRING;
 
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })

@@ -1,12 +1,17 @@
 use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
+use crate::nft::flow_to_nft_stmts;
 use crate::util::MaybeRc;
 use anstyle::{AnsiColor, Color, Reset, Style};
+use log::warn;
+use nftables::{schema, types};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter};
+use std::mem::swap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
 use strum::{EnumDiscriminants, FromRepr};
@@ -29,29 +34,110 @@ impl Routes {
         .unicast
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
-        self.flow.extend(specs.into_iter().map(|s| (s, MaybeRc::Rc(info.clone()))));
+        for spec in specs {
+          let nft = match flow_to_nft_stmts(&spec, &info) {
+            Ok(nft) => nft,
+            Err(error) => {
+              warn!("flowspec {spec} rejected: {error}");
+              // self.withdraw_spec(spec);
+              continue;
+            }
+          };
+
+          let mut batch = nftables::batch::Batch::new();
+          batch.add(schema::NfListObject::Table(schema::Table::new(
+            types::NfFamily::INet,
+            "flowspecs".into(),
+          )));
+          batch.add(schema::NfListObject::Chain(schema::Chain::new(
+            types::NfFamily::INet,
+            "flowspecs".into(),
+            "flowspecs".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+          )));
+          for stmts in nft {
+            batch.add(schema::NfListObject::Rule(schema::Rule {
+              family: types::NfFamily::INet,
+              table: "flowspecs".into(),
+              chain: "flowspecs".into(),
+              expr: stmts,
+              handle: None,
+              index: None,
+              comment: None, // TODO: use comment to specify port
+            }));
+          }
+          nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
+
+          match self.flow.entry(spec) {
+            Entry::Vacant(e) => {
+              e.insert(MaybeRc::Rc(info.clone()));
+            }
+            Entry::Occupied(mut e) => {
+              let old_info = e.insert(MaybeRc::Rc(info.clone()));
+              let mut batch = nftables::batch::Batch::new();
+              for stmts in flow_to_nft_stmts(e.key(), &old_info).unwrap() {
+                batch.delete(schema::NfListObject::Rule(schema::Rule::new(
+                  types::NfFamily::INet,
+                  "flowspecs".into(),
+                  "flowspecs".into(),
+                  stmts,
+                )));
+              }
+              nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
+            }
+          }
+        }
       }
     }
   }
 
   pub fn withdraw(&mut self, nlri: Nlri) {
     match nlri.content {
-      NlriContent::Unicast { prefixes, .. } => {
-        for prefix in prefixes {
-          self.unicast.remove(&prefix);
-        }
-      }
-      NlriContent::Flow { specs } => {
-        for spec in specs {
-          self.flow.remove(&spec);
-        }
-      }
+      NlriContent::Unicast { prefixes, .. } => prefixes
+        .into_iter()
+        .for_each(|p| self.unicast.remove(&p).map(|_| ()).unwrap_or(())),
+      NlriContent::Flow { specs } => specs.into_iter().for_each(|s| self.withdraw_spec(s)),
     }
   }
 
+  fn withdraw_spec(&mut self, spec: Flowspec) {
+    let Some(old_info) = self.flow.remove(&spec) else {
+      return;
+    };
+    let mut batch = nftables::batch::Batch::new();
+    for stmts in flow_to_nft_stmts(&spec, &old_info).unwrap() {
+      batch.delete(schema::NfListObject::Rule(schema::Rule::new(
+        types::NfFamily::INet,
+        "flowspecs".into(),
+        "flowspecs".into(),
+        stmts,
+      )));
+    }
+    nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
+  }
+
   pub fn withdraw_all(&mut self) {
-    self.unicast.retain(|_, _| false);
-    self.flow.retain(|_, _| false);
+    self.unicast.clear();
+
+    let mut flow = BTreeMap::new();
+    swap(&mut flow, &mut self.flow);
+
+    let mut batch = nftables::batch::Batch::new();
+    for (spec, info) in flow.into_iter() {
+      for stmts in flow_to_nft_stmts(&spec, &info).unwrap() {
+        batch.delete(schema::NfListObject::Rule(schema::Rule::new(
+          types::NfFamily::INet,
+          "flowspecs".into(),
+          "flowspecs".into(),
+          stmts,
+        )));
+      }
+    }
+    nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
   }
 
   pub fn print(&self) {

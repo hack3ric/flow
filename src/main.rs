@@ -70,7 +70,7 @@ async fn run(args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         result = ipc.process() => result.context("failed to process IPC")?,
         signal = select(sigint, sigterm) => {
           let (signal, _) = signal.factor_first();
-          info!("{signal} received, exiting");
+          warn!("{signal} received, exiting");
           return Ok(Some(ExitCode::SUCCESS))
         }
       }
