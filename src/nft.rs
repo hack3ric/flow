@@ -4,7 +4,7 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::{expr, stmt};
 use num::Integer;
-use smallvec::SmallVec;
+use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +12,33 @@ use std::fmt::{self, Display, Formatter, Write};
 use std::marker::PhantomData;
 use std::net::IpAddr;
 use std::ops::{Add, RangeInclusive};
+use thiserror::Error;
+
+pub fn flow_to_nft_stmts(
+  spec: &Flowspec,
+  info: &RouteInfo,
+) -> Result<impl Iterator<Item = Vec<stmt::Statement>>, ToNftStmtError> {
+  let mut total = 1usize;
+  let base = spec
+    .to_nft_stmts()?
+    .chain(info.to_nft_stmts(spec.afi()).map(Ok))
+    .map(|x| {
+      x.map(|y| {
+        total *= y.len();
+        (y, total)
+      })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  let result = (0..total).map(move |i| {
+    base
+      .iter()
+      .map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i % v % x.len())].iter())
+      .flatten()
+      .cloned()
+      .collect::<Vec<_>>()
+  });
+  Ok(result)
+}
 
 /// Makes sure transport protocol is consistent across components inside a
 /// flowspec.
@@ -22,8 +49,11 @@ enum Transport {
   Unknown,
 }
 
+type StatementBlock = SmallVec<[stmt::Statement; 1]>;
+type StatementBranch = SmallVec<[StatementBlock; 1]>;
+
 impl Flowspec {
-  pub fn to_nft_stmts(&self) -> Option<Vec<Vec<stmt::Statement>>> {
+  fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch, ToNftStmtError>> + '_, ToNftStmtError> {
     use ComponentKind as CK;
 
     let set = self.component_set();
@@ -33,45 +63,24 @@ impl Flowspec {
       (false, false) => Transport::Unknown,
       (false, true) => Transport::Icmp,
       (true, false) => Transport::Tcp,
-      _ => return None,
+      _ => return Err(ToNftStmtError(())),
     };
 
-    let mut buf = vec![vec![make_match(
+    let first = make_match(
       stmt::Operator::EQ,
       make_meta(expr::MetaKey::Nfproto),
-      expr::Expression::String((self.afi() == Afi::Ipv4).then_some("ipv4").unwrap_or("ipv6").into()),
-    )]];
-    for c in self.components() {
-      let mut new_stmts = Vec::new();
-      let divergent = c.write_nft_stmts(self.afi(), transport, &mut new_stmts).ok()?;
-      if let Some(d) = divergent {
-        let diverged = (buf.iter())
-          .map(|r| d.iter().map(|a| r.clone().into_iter().chain(a.clone()).collect()))
-          .flatten()
-          .collect::<Vec<_>>();
-        buf.iter_mut().for_each(|rule| rule.extend(new_stmts.clone()));
-        buf.extend(diverged);
-      } else {
-        buf.iter_mut().for_each(|rule| rule.extend(new_stmts.clone()));
-      }
-    }
-    Some(buf)
+      STRING((self.afi() == Afi::Ipv4).then_some("ipv4").unwrap_or("ipv6").into()),
+    );
+    let result = Some(Ok(smallvec_inline![smallvec_inline![first]]))
+      .into_iter()
+      .chain(self.components().map(move |x| x.to_nft_stmts(self.afi(), transport)))
+      .filter(|x| x.is_err() || x.as_ref().is_ok_and(|y| !y.is_empty()));
+    Ok(result)
   }
 }
 
 impl Component {
-  /// Results:
-  /// - `Ok(None)`: new statements appended, do not duplicate current statement
-  ///   list
-  /// - `Ok(Some(_))`: new statements appended, statement list duplicated and
-  ///   serving as logical OR
-  /// - `Err(())`: current component matches nothing
-  fn write_nft_stmts(
-    &self,
-    afi: Afi,
-    tp: Transport,
-    buf: &mut Vec<stmt::Statement>,
-  ) -> Result<Option<Vec<Vec<stmt::Statement>>>, ()> {
+  fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch, ToNftStmtError> {
     // TODO: simple case optimization
     use Component::*;
     use Transport::*;
@@ -80,47 +89,43 @@ impl Component {
     let icmp = (afi == Afi::Ipv4).then_some("icmp").unwrap_or("icmpv6");
     let (th, tp_code) = match tp {
       Tcp => (Ok("tcp"), Some(6)),
-      Icmp => (Err(()), Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58))),
+      Icmp => (
+        Err(ToNftStmtError(())),
+        Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58)),
+      ),
       Unknown => (Ok("th"), None),
     };
-    match self {
-      &DstPrefix(prefix, 0) => buf.extend(prefix_stmt("daddr", prefix)),
-      &SrcPrefix(prefix, 0) => buf.extend(prefix_stmt("saddr", prefix)),
-      &DstPrefix(pattern, offset) => pattern_stmt(false, pattern, offset, buf),
-      &SrcPrefix(pattern, offset) => pattern_stmt(true, pattern, offset, buf),
+    let result: StatementBranch = match self {
+      &DstPrefix(prefix, 0) => prefix_stmt("daddr", prefix).into_iter().map(|x| smallvec_inline![x]).collect(),
+      &SrcPrefix(prefix, 0) => prefix_stmt("saddr", prefix).into_iter().map(|x| smallvec_inline![x]).collect(),
+      &DstPrefix(pattern, offset) => pattern_stmt(false, pattern, offset).into_iter().collect(),
+      &SrcPrefix(pattern, offset) => pattern_stmt(true, pattern, offset).into_iter().collect(),
 
       Protocol(ops) => match tp_code {
-        Some(code) => ops.op(code).then(|| ()).ok_or(())?,
-        None => buf.extend(range_stmt(make_meta(expr::MetaKey::L4proto), ops, 0xff)?),
+        Some(code) => ops.op(code).then(SmallVec::new_const).ok_or(ToNftStmtError(()))?,
+        None => range_stmt_branch(make_meta(expr::MetaKey::L4proto), ops, 0xff)?,
       },
 
-      Port(ops) => {
-        if let Some(dport) = range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)? {
-          if let Some(sport) = range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)? {
-            let mut dup = buf.clone();
-            buf.push(dport);
-            dup.push(sport);
-            return Ok(Some(vec![dup]));
-          } else {
-            buf.push(dport);
-          }
-        }
-      }
-      DstPort(ops) => buf.extend(range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)?),
-      SrcPort(ops) => buf.extend(range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)?),
-      IcmpType(ops) if tp == Icmp => buf.extend(range_stmt(make_payload_field(icmp, "type"), ops, 0xff)?),
-      IcmpCode(ops) if tp == Icmp => buf.extend(range_stmt(make_payload_field(icmp, "code"), ops, 0xff)?),
-      IcmpType(_) | IcmpCode(_) => return Err(()),
+      Port(ops) => range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)?
+        .into_iter()
+        .chain(range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)?)
+        .map(|x| smallvec_inline![x])
+        .collect(),
+      DstPort(ops) => range_stmt_branch(make_payload_field(th?, "dport"), ops, 0xffff)?,
+      SrcPort(ops) => range_stmt_branch(make_payload_field(th?, "sport"), ops, 0xffff)?,
+      IcmpType(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "type"), ops, 0xff)?,
+      IcmpCode(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "code"), ops, 0xff)?,
+      IcmpType(_) | IcmpCode(_) => return Err(ToNftStmtError(())),
       TcpFlags(ops) => {
         // TODO: simple case: one single bit op
         let tt = ops.to_truth_table();
         let tt = tt.shrink(0b11111111);
         if tt.is_always_false() {
-          return Err(());
+          return Err(ToNftStmtError(()));
         } else if tt.is_always_true() {
-          return Ok(None);
+          return Ok(SmallVec::new_const());
         }
-        buf.push(make_match(
+        smallvec_inline![smallvec_inline![make_match(
           tt.inv.then_some(stmt::Operator::NEQ).unwrap_or(stmt::Operator::EQ),
           expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
             Box::new(make_payload_field("tcp", "flags")),
@@ -131,15 +136,15 @@ impl Component {
               .map(|x| expr::SetItem::Element(NUM(x as u32)))
               .collect(),
           )),
-        ))
+        )]]
       }
       PacketLen(ops) => {
         let ops = (afi == Afi::Ipv4)
           .then(|| Cow::Borrowed(ops))
           .unwrap_or_else(|| Cow::Owned(ops.with_offset(-40)));
-        buf.extend(range_stmt(make_payload_field(ip_ver, "length"), &ops, 0xffff)?)
+        range_stmt_branch(make_payload_field(ip_ver, "length"), &ops, 0xffff)?
       }
-      Dscp(ops) => buf.extend(range_stmt(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?),
+      Dscp(ops) => range_stmt_branch(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?,
       Fragment(ops) => {
         // TODO: reduce clone
         // int frag_op_value = [LF,FF,IsF,DF]
@@ -152,7 +157,7 @@ impl Component {
         new_set.remove(&0b1010).then(|| new_set.insert(0b1000));
 
         let mut iter = new_set.into_iter().peekable();
-        let mut stmts = SmallVec::<[_; 4]>::new();
+        let mut branch = StatementBranch::new();
 
         let frag_off = (afi == Afi::Ipv4)
           .then(|| make_payload_field("ip", "frag-off"))
@@ -164,118 +169,94 @@ impl Component {
         // DF (IPv4)
         if let Some(0b0001) = iter.peek() {
           iter.next();
-          stmts.push((
-            make_match(
-              stmt::Operator::EQ,
-              make_payload_raw(expr::PayloadBase::NH, 17, 1),
-              NUM(1),
-            ),
-            None,
-          ));
+          branch.push(smallvec_inline![make_match(
+            stmt::Operator::EQ,
+            make_payload_raw(expr::PayloadBase::NH, 17, 1),
+            NUM(1),
+          )]);
         }
         // IsF: {ip,frag} frag-off != 0
         if let Some(0b0010) = iter.peek() {
           iter.next();
-          stmts.push((make_match(stmt::Operator::NEQ, frag_off.clone(), NUM(0)), None));
+          branch.push(smallvec_inline![make_match(
+            stmt::Operator::NEQ,
+            frag_off.clone(),
+            NUM(0)
+          )]);
         }
         // FF: {ip,frag} frag-off == 0 && MF == 1
         if let Some(0b0100) = iter.peek() {
           iter.next();
-          stmts.push((
+          branch.push(smallvec![
             make_match(stmt::Operator::EQ, frag_off.clone(), NUM(0)),
-            Some(make_match(stmt::Operator::EQ, mf.clone(), NUM(1))),
-          ));
+            make_match(stmt::Operator::EQ, mf.clone(), NUM(1)),
+          ]);
         }
         // LF: {ip,frag} frag-off != 0 && MF == 0
         if let Some(0b1000) = iter.peek() {
           iter.next();
-          stmts.push((
+          branch.push(smallvec![
             make_match(stmt::Operator::NEQ, frag_off, NUM(0)),
-            Some(make_match(stmt::Operator::EQ, mf, NUM(0))),
-          ));
+            make_match(stmt::Operator::EQ, mf, NUM(0)),
+          ]);
         }
-
-        if !stmts.is_empty() {
-          let len_gt_1 = stmts.len() > 1;
-          let mut iter = stmts.into_iter();
-          let (first1, first2) = iter.next().unwrap();
-          if len_gt_1 {
-            let split = iter
-              .map(|(s1, s2)| buf.iter().cloned().chain([Some(s1), s2].into_iter().flatten()).collect())
-              .collect();
-            buf.extend([Some(first1), first2].into_iter().flatten());
-            return Ok(Some(split));
-          } else {
-            buf.extend([Some(first1), first2].into_iter().flatten());
-          }
-        }
+        branch
       }
-      FlowLabel(ops) => buf.extend(range_stmt(make_payload_field("ip6", "flowlabel"), ops, 0x1fff)?),
-    }
-    Ok(None)
+      FlowLabel(ops) => range_stmt_branch(make_payload_field("ip6", "flowlabel"), ops, 0x1fff)?,
+    };
+    Ok(result)
   }
 }
 
 impl RouteInfo<'_> {
-  pub fn to_nft_stmts(&self, afi: Afi) -> Vec<Vec<stmt::Statement>> {
+  fn to_nft_stmts(&self, afi: Afi) -> impl Iterator<Item = StatementBranch> {
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
       .map(|x| (x.kind(), x))
       .collect::<BTreeMap<_, _>>();
-
     let extract_terminal = |x| {
       let &TrafficFilterAction::TrafficAction { terminal, .. } = x else {
         unreachable!()
       };
       terminal
     };
-
     let terminal = set
       .get(&TrafficFilterActionKind::TrafficAction)
       .map(extract_terminal)
       .unwrap_or(true);
-
     set
-      .values()
-      .map(|x| x.to_nft_stmts(afi, terminal))
-      .map(|(a, b)| Some(a).into_iter().chain(b.map(|x| vec![x])))
-      .flatten()
-      .collect()
+      .into_values()
+      .map(move |x| x.to_nft_stmts(afi, terminal))
+      .filter(|x| !x.is_empty())
   }
 }
 
 impl TrafficFilterAction {
-  pub fn to_nft_stmts(self, afi: Afi, terminal: bool) -> (Vec<stmt::Statement>, Option<stmt::Statement>) {
+  fn to_nft_stmts(self, afi: Afi, terminal: bool) -> StatementBranch {
     use TrafficFilterAction::*;
     match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
-        (vec![DROP], None)
+        smallvec_inline![smallvec_inline![DROP]]
       }
-      TrafficRateBytes { rate, .. } => (
-        vec![make_limit(true, rate, "bytes", "second"), DROP],
-        terminal.then_some(ACCEPT),
-      ),
-      TrafficRatePackets { rate, .. } => (
-        vec![make_limit(true, rate, "packets", "second"), DROP],
-        terminal.then_some(ACCEPT),
-      ),
-      TrafficAction { sample: true, .. } => (
-        vec![
-          stmt::Statement::Log(Some(stmt::Log::new(None))),
-          terminal.then_some(ACCEPT).unwrap_or(CONTINUE),
-        ],
-        None,
-      ),
-      TrafficAction { .. } => (Vec::new(), None),
+      TrafficRateBytes { rate, .. } => Some(smallvec![make_limit(true, rate, "bytes", "second"), DROP])
+        .into_iter()
+        .chain(terminal.then(|| smallvec_inline![ACCEPT]))
+        .collect(),
+      TrafficRatePackets { rate, .. } => Some(smallvec![make_limit(true, rate, "packets", "second"), DROP])
+        .into_iter()
+        .chain(terminal.then(|| smallvec_inline![ACCEPT]))
+        .collect(),
+      TrafficAction { sample: true, .. } => smallvec_inline![smallvec![
+        stmt::Statement::Log(Some(stmt::Log::new(None))),
+        terminal.then_some(ACCEPT).unwrap_or(CONTINUE),
+      ]],
+      TrafficAction { .. } => SmallVec::new_const(),
       RtRedirect { .. } | RtRedirectIpv6 { .. } => todo!("redirect is not supported at the moment"),
-      TrafficMarking { dscp } => (
-        vec![stmt::Statement::Mangle(stmt::Mangle {
-          key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
-          value: NUM(dscp.into()),
-        })],
-        None,
-      ),
+      TrafficMarking { dscp } => smallvec_inline![smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
+        key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
+        value: NUM(dscp.into()),
+      })]],
     }
   }
 }
@@ -284,7 +265,8 @@ const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
 const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
 const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
 
-const NUM: fn(u32) -> expr::Expression = expr::Expression::Number;
+use expr::Expression::Number as NUM;
+use expr::Expression::String as STRING;
 
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })
@@ -331,22 +313,24 @@ fn prefix_stmt(field: impl ToString, prefix: IpPrefix) -> Option<stmt::Statement
       stmt::Operator::EQ,
       make_payload_field(if prefix.afi() == Afi::Ipv4 { "ip" } else { "ip6" }, field),
       expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
-        addr: Box::new(expr::Expression::String(format!("{}", prefix.prefix()))),
+        addr: Box::new(STRING(format!("{}", prefix.prefix()))),
         len: prefix.len().into(),
       })),
     )
   })
 }
 
-fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::Statement>) {
+fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlock> {
   if pattern.len() == 0 {
-    return;
+    return None;
   }
+
+  let mut buf = SmallVec::new_const();
 
   buf.push(make_match(
     stmt::Operator::EQ,
     make_meta(expr::MetaKey::Nfproto),
-    expr::Expression::String("ipv6".into()),
+    STRING("ipv6".into()),
   ));
 
   let addr_offset = src.then_some(192).unwrap_or(64);
@@ -395,14 +379,16 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8, buf: &mut Vec<stmt::St
       NUM(num.try_into().unwrap()),
     ));
   }
+
+  Some(buf)
 }
 
-fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>, ()> {
+fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>, ToNftStmtError> {
   let ranges = ops.to_ranges();
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
   } else if ranges.is_empty() {
-    return Err(());
+    return Err(ToNftStmtError(()));
   }
   let allowed = ranges
     .into_iter()
@@ -424,6 +410,14 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
     expr::Expression::Named(expr::NamedExpression::Set(allowed)),
   )))
 }
+
+fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch, ToNftStmtError> {
+  range_stmt(left, ops, max).map(|x| x.into_iter().map(|x| smallvec_inline![x]).collect())
+}
+
+#[derive(Debug, Clone, Copy, Error)]
+#[error("flowspec matches nothing")]
+pub struct ToNftStmtError(());
 
 impl Ops<Numeric> {
   fn to_ranges(&self) -> Vec<RangeInclusive<u64>> {
