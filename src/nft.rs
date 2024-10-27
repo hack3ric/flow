@@ -1,5 +1,5 @@
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
-use crate::bgp::route::{ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
+use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::{expr, stmt};
@@ -218,20 +218,24 @@ impl Component {
 
 impl RouteInfo<'_> {
   pub fn to_nft_stmts(&self, afi: Afi) -> Vec<Vec<stmt::Statement>> {
-    // TODO: IPv6 ext comm
     let set = (self.ext_comm.iter().copied())
-      .filter_map(ExtCommunity::traffic_filter_action)
+      .filter_map(ExtCommunity::action)
+      .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
       .map(|x| (x.kind(), x))
       .collect::<BTreeMap<_, _>>();
+
+    let extract_terminal = |x| {
+      let &TrafficFilterAction::TrafficAction { terminal, .. } = x else {
+        unreachable!()
+      };
+      terminal
+    };
+
     let terminal = set
       .get(&TrafficFilterActionKind::TrafficAction)
-      .map(|x| {
-        let TrafficFilterAction::TrafficAction { terminal, .. } = x else {
-          unreachable!()
-        };
-        *terminal
-      })
+      .map(extract_terminal)
       .unwrap_or(true);
+
     set
       .values()
       .map(|x| x.to_nft_stmts(afi, terminal))

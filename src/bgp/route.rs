@@ -272,7 +272,7 @@ impl ExtCommunity {
     })
   }
 
-  pub fn traffic_filter_action(self) -> Option<TrafficFilterAction> {
+  pub fn action(self) -> Option<TrafficFilterAction> {
     use GlobalAdmin::*;
     use TrafficFilterAction::*;
     if !self.iana_authority() || !self.is_transitive() {
@@ -301,7 +301,7 @@ impl Debug for ExtCommunity {
 
 impl Display for ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    if let Some(act) = self.traffic_filter_action() {
+    if let Some(act) = self.action() {
       Display::fmt(&act, f)
     } else if let Some((g, l)) = self.admins() {
       match [self.kind(), self.sub_kind()] {
@@ -320,6 +320,67 @@ impl Display for ExtCommunity {
     } else {
       write!(f, "({:#018x})", u64::from_be_bytes(self.0))
     }
+  }
+}
+
+/// RFC 5701 IPv6 address-specific extended communities.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Ipv6ExtCommunity {
+  pub kind: u8,
+  pub sub_kind: u8,
+  pub global_admin: Ipv6Addr,
+  pub local_admin: u16,
+}
+
+impl Ipv6ExtCommunity {
+  pub fn new(transitive: bool, sub_kind: u8, global_admin: Ipv6Addr, local_admin: u16) -> Self {
+    Self { kind: if transitive { 0 } else { 1 << 6 }, sub_kind, global_admin, local_admin }
+  }
+
+  pub fn from_bytes(bytes: [u8; 20]) -> Option<Self> {
+    if bytes[0] == 0x00 || bytes[0] == 0x40 {
+      Some(Self {
+        kind: bytes[0],
+        sub_kind: bytes[1],
+        global_admin: Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[2..18]).unwrap()),
+        local_admin: u16::from_be_bytes(bytes[18..20].try_into().unwrap()),
+      })
+    } else {
+      None
+    }
+  }
+
+  pub fn iana_authority(self) -> bool {
+    self.kind & (1 << 7) != 0
+  }
+  pub fn is_transitive(self) -> bool {
+    self.kind & (1 << 6) == 0
+  }
+  pub fn kind_struct(self) -> u8 {
+    self.kind & 0b111111
+  }
+
+  pub fn action(self) -> Option<TrafficFilterAction> {
+    ([self.kind, self.sub_kind] == [0x00, 0x0d])
+      .then(|| TrafficFilterAction::RtRedirectIpv6 { rt: self.global_admin, value: self.local_admin })
+  }
+}
+
+impl Debug for Ipv6ExtCommunity {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "Ipv6ExtCommunity{self}")
+  }
+}
+
+impl Display for Ipv6ExtCommunity {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match [self.kind, self.sub_kind] {
+      [0x00, 0x02] => f.write_str("(rt, ")?,
+      [0x00, 0x03] => f.write_str("(ro, ")?,
+      [0x00, 0x0d] => f.write_str("(rt-redirect-ipv6, ")?,
+      bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
+    }
+    write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
   }
 }
 
@@ -378,62 +439,6 @@ impl Display for TrafficFilterAction {
       RtRedirectIpv6 { rt, value } => write!(f, "(rt-redirect-ipv6, {rt}, {value:#06x})"),
       TrafficMarking { dscp } => write!(f, "(traffic-marking, {dscp})"),
     }
-  }
-}
-
-/// RFC 5701 IPv6 address-specific extended communities.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Ipv6ExtCommunity {
-  pub kind: u8,
-  pub sub_kind: u8,
-  pub global_admin: Ipv6Addr,
-  pub local_admin: u16,
-}
-
-impl Ipv6ExtCommunity {
-  pub fn new(transitive: bool, sub_kind: u8, global_admin: Ipv6Addr, local_admin: u16) -> Self {
-    Self { kind: if transitive { 0 } else { 1 << 6 }, sub_kind, global_admin, local_admin }
-  }
-
-  pub fn from_bytes(bytes: [u8; 20]) -> Option<Self> {
-    if bytes[0] == 0x00 || bytes[0] == 0x40 {
-      Some(Self {
-        kind: bytes[0],
-        sub_kind: bytes[1],
-        global_admin: Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[2..18]).unwrap()),
-        local_admin: u16::from_be_bytes(bytes[18..20].try_into().unwrap()),
-      })
-    } else {
-      None
-    }
-  }
-
-  pub fn iana_authority(self) -> bool {
-    self.kind & (1 << 7) != 0
-  }
-  pub fn is_transitive(self) -> bool {
-    self.kind & (1 << 6) == 0
-  }
-  pub fn kind_struct(self) -> u8 {
-    self.kind & 0b111111
-  }
-}
-
-impl Debug for Ipv6ExtCommunity {
-  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    write!(f, "Ipv6ExtCommunity{self}")
-  }
-}
-
-impl Display for Ipv6ExtCommunity {
-  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    match [self.kind, self.sub_kind] {
-      [0x00, 0x02] => f.write_str("(rt, ")?,
-      [0x00, 0x03] => f.write_str("(ro, ")?,
-      [0x00, 0x0d] => f.write_str("(rt-redirect-ipv6, ")?,
-      bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
-    }
-    write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
   }
 }
 
