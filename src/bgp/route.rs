@@ -5,8 +5,11 @@ use crate::nft::flow_to_nft_stmts;
 use crate::util::MaybeRc;
 use anstyle::{AnsiColor, Color, Reset, Style};
 use log::warn;
+use nftables::batch::Batch;
+use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
 use nftables::{schema, types};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +23,8 @@ use strum::{EnumDiscriminants, FromRepr};
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Routes {
   pub unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
-  pub flow: BTreeMap<Flowspec, MaybeRc<RouteInfo<'static>>>,
+  pub flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
+  pub counter: u64,
 }
 
 impl Routes {
@@ -28,7 +32,7 @@ impl Routes {
     Default::default()
   }
 
-  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) {
+  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> Result<(), NftablesError> {
     match nlri.content {
       NlriContent::Unicast { prefixes, next_hop } => self
         .unicast
@@ -44,100 +48,105 @@ impl Routes {
             }
           };
 
-          let mut batch = nftables::batch::Batch::new();
-          batch.add(schema::NfListObject::Table(schema::Table::new(
-            types::NfFamily::INet,
-            "flowspecs".into(),
-          )));
-          batch.add(schema::NfListObject::Chain(schema::Chain::new(
-            types::NfFamily::INet,
-            "flowspecs".into(),
-            "flowspecs".into(),
-            None,
-            None,
-            None,
-            None,
-            None,
-          )));
+          let id = self.counter;
+          self.counter += 1;
+
+          let mut add_batch = Batch::new();
+          add_batch.add(schema::NfListObject::Table(schema::Table {
+            family: types::NfFamily::INet,
+            name: "flowspecs".into(),
+            ..Default::default()
+          }));
+          add_batch.add(schema::NfListObject::Chain(schema::Chain {
+            family: types::NfFamily::INet,
+            table: "flowspecs".into(),
+            name: "flowspecs".into(),
+            ..Default::default()
+          }));
           for stmts in nft {
-            batch.add(schema::NfListObject::Rule(schema::Rule {
+            add_batch.add(schema::NfListObject::Rule(schema::Rule {
               family: types::NfFamily::INet,
               table: "flowspecs".into(),
               chain: "flowspecs".into(),
               expr: stmts,
-              handle: None,
-              index: None,
-              comment: None, // TODO: use comment to specify port
+              comment: Some(id.to_string()),
+              ..Default::default()
             }));
           }
-          nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
 
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
-              e.insert(MaybeRc::Rc(info.clone()));
+              e.insert((id, MaybeRc::Rc(info.clone())));
             }
             Entry::Occupied(mut e) => {
-              let old_info = e.insert(MaybeRc::Rc(info.clone()));
-              let mut batch = nftables::batch::Batch::new();
-              for stmts in flow_to_nft_stmts(e.key(), &old_info).unwrap() {
-                batch.delete(schema::NfListObject::Rule(schema::Rule::new(
-                  types::NfFamily::INet,
-                  "flowspecs".into(),
-                  "flowspecs".into(),
-                  stmts,
-                )));
-              }
-              nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
+              let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
+              Self::remove_nft_entry(id)?
             }
           }
+          apply_ruleset(&add_batch.to_nftables(), None, None).unwrap();
         }
       }
     }
+    Ok(())
   }
 
-  pub fn withdraw(&mut self, nlri: Nlri) {
+  pub fn withdraw(&mut self, nlri: Nlri) -> Result<(), NftablesError> {
     match nlri.content {
       NlriContent::Unicast { prefixes, .. } => prefixes
         .into_iter()
         .for_each(|p| self.unicast.remove(&p).map(|_| ()).unwrap_or(())),
-      NlriContent::Flow { specs } => specs.into_iter().for_each(|s| self.withdraw_spec(s)),
+      NlriContent::Flow { specs } => specs.into_iter().map(|s| self.withdraw_spec(s)).collect::<Result<(), _>>()?,
     }
+    Ok(())
   }
 
-  fn withdraw_spec(&mut self, spec: Flowspec) {
-    let Some(old_info) = self.flow.remove(&spec) else {
-      return;
-    };
-    let mut batch = nftables::batch::Batch::new();
-    for stmts in flow_to_nft_stmts(&spec, &old_info).unwrap() {
-      batch.delete(schema::NfListObject::Rule(schema::Rule::new(
-        types::NfFamily::INet,
-        "flowspecs".into(),
-        "flowspecs".into(),
-        stmts,
-      )));
-    }
-    nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
-  }
-
-  pub fn withdraw_all(&mut self) {
+  pub fn withdraw_all(&mut self) -> Result<(), NftablesError> {
     self.unicast.clear();
 
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
-
-    let mut batch = nftables::batch::Batch::new();
-    for (spec, info) in flow.into_iter() {
-      for stmts in flow_to_nft_stmts(&spec, &info).unwrap() {
-        batch.delete(schema::NfListObject::Rule(schema::Rule::new(
-          types::NfFamily::INet,
-          "flowspecs".into(),
-          "flowspecs".into(),
-          stmts,
-        )));
-      }
+    for (_, (id, _)) in flow {
+      Self::remove_nft_entry(id)?;
     }
-    nftables::helper::apply_ruleset(&batch.to_nftables(), None, None).unwrap();
+
+    Ok(())
+  }
+
+  fn withdraw_spec(&mut self, spec: Flowspec) -> Result<(), NftablesError> {
+    let Some((id, _)) = self.flow.remove(&spec) else {
+      return Ok(());
+    };
+    Self::remove_nft_entry(id)
+  }
+
+  fn remove_nft_entry(id: u64) -> Result<(), NftablesError> {
+    let args = vec!["-n", "-s", "list", "chain", "inet", "flowspecs", "flowspecs"];
+    let mut batch = Batch::new();
+    // TODO: use customized type that silently drops unknown fields and only pick up
+    // comment and handle in a rule
+    let s = get_current_ruleset_raw(None, Some(args)).unwrap();
+    let v: Value = serde_json::from_str(&s).unwrap();
+    v.as_object()
+      .unwrap()
+      .get("nftables")
+      .unwrap()
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|x| x.as_object().unwrap().get("rule"))
+      .map(|x| x.as_object().unwrap())
+      .filter(|x| x.get("comment").is_some_and(|y| y == &id.to_string()))
+      .map(|x| x.get("handle").unwrap().as_u64().unwrap())
+      .for_each(|h| {
+        batch.delete(schema::NfListObject::Rule(schema::Rule {
+          family: types::NfFamily::INet,
+          table: "flowspecs".into(),
+          chain: "flowspecs".into(),
+          handle: Some(h as u32),
+          ..Default::default()
+        }));
+      });
+    apply_ruleset(&batch.to_nftables(), None, None)
   }
 
   pub fn print(&self) {
@@ -189,7 +198,7 @@ impl Routes {
       print_info(info);
       println!();
     }
-    for (spec, info) in &self.flow {
+    for (spec, (_, info)) in &self.flow {
       println!("{FG_GREEN_BOLD}Flowspec{RESET} {spec}");
       print_info(info);
       println!();

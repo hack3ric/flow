@@ -12,11 +12,12 @@ clap-verbosity = "2.1.0"
 env_logger = { version = "0.11.5", default-features = false }
 futures = "0.3.30"
 log = "0.4.21"
-nftables = "0.4.1"
+nftables = "0.5.0"
 num = { version = "0.4.3", features = ["num-bigint"] }
 pin-project = "1.1.5"
 replace_with = "0.1.7"
 serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.132"
 smallvec = { version = "1.13.2", features = ["union", "const_generics", "const_new", "serde"]}
 strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0.61"

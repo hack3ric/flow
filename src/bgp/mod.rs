@@ -129,7 +129,7 @@ impl Session {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
-      self.routes.write().await.withdraw_all();
+      self.routes.write().await.withdraw_all().unwrap();
     }
     result
   }
@@ -196,13 +196,13 @@ impl Session {
                 (msg.nlri)
                   .into_iter()
                   .chain(msg.old_nlri)
-                  .for_each(|n| routes.commit(n, route_info.clone()));
+                  .for_each(|n| routes.commit(n, route_info.clone()).unwrap());
               }
               if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
                 (msg.withdrawn)
                   .into_iter()
                   .chain(msg.old_withdrawn)
-                  .for_each(|n| routes.withdraw(n));
+                  .for_each(|n| routes.withdraw(n).unwrap());
               }
             },
             Message::Keepalive => if let Some((dur, next)) = hold_timer {
