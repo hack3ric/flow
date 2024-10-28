@@ -121,8 +121,8 @@ impl Routes {
     }
     let args = vec!["-n", "-s", "list", "chain", "inet", "flowspecs", "flowspecs"];
     let mut batch = Batch::new();
-    let s = get_current_ruleset_raw(None, Some(args)).unwrap();
-    let MyNftables { nftables } = serde_json::from_str(&s).unwrap();
+    let s = get_current_ruleset_raw(None, Some(args))?;
+    let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
     nftables
       .into_iter()
       .filter_map(|x| x.rule)
