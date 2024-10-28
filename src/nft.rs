@@ -11,8 +11,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter, Write};
 use std::marker::PhantomData;
+use std::mem::replace;
 use std::net::IpAddr;
-use std::ops::{Add, RangeInclusive};
+use std::ops::{Add, Not, RangeInclusive};
 use thiserror::Error;
 
 pub fn flow_to_nft_stmts(
@@ -23,17 +24,16 @@ pub fn flow_to_nft_stmts(
   let base = spec
     .to_nft_stmts()?
     .chain(info.to_nft_stmts(spec.afi()).map(Ok))
-    .map(|x| {
-      x.map(|y| {
-        let old = total;
-        total *= y.len();
-        (y, old)
+    .map(|result| {
+      result.map(|branch| {
+        let count = total;
+        total *= branch.len();
+        (branch, count)
       })
     })
     .collect::<Result<Vec<_>, _>>()?;
   let result = (0..total).map(move |i| {
-    base
-      .iter()
+    (base.iter())
       .map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i / v % x.len())].iter())
       .flatten()
       .cloned()
@@ -211,7 +211,7 @@ impl Component {
 }
 
 impl RouteInfo<'_> {
-  fn to_nft_stmts(&self, afi: Afi) -> impl Iterator<Item = StatementBranch> {
+  fn to_nft_stmts(&self, afi: Afi) -> Option<StatementBranch> {
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
@@ -223,49 +223,54 @@ impl RouteInfo<'_> {
       };
       terminal
     };
-    let terminal = set
+    let mut terminal = set
       .get(&TrafficFilterActionKind::TrafficAction)
       .map(extract_terminal)
       .unwrap_or(true);
-    set
+    let mut last_term = false;
+    let mut result = set
       .into_values()
-      .map(move |x| x.to_nft_stmts(afi, terminal))
+      .map(move |x| x.to_nft_stmts(afi))
+      .map(|(x, term)| (x, replace(&mut last_term, term.then(|| terminal = false).is_some())))
+      .map_while(|(x, term)| term.not().then_some(x))
       .filter(|x| !x.is_empty())
+      .collect::<StatementBranch>();
+    if terminal {
+      let ll = result.last().and_then(|x| x.last());
+      if ll.is_some_and(|x| *x == ACCEPT || *x == DROP) || ll.is_none() {
+        result.push(smallvec_inline![ACCEPT]);
+      } else {
+        result.last_mut().unwrap().push(ACCEPT);
+      }
+    }
+    result.is_empty().not().then_some(result)
   }
 }
 
 impl TrafficFilterAction {
-  fn to_nft_stmts(self, afi: Afi, terminal: bool) -> StatementBranch {
+  fn to_nft_stmts(self, afi: Afi) -> (StatementBlock, bool) {
     use TrafficFilterAction::*;
-    match self {
+    let action = match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
-        smallvec_inline![smallvec_inline![DROP]]
+        return (smallvec_inline![DROP], true)
       }
-      TrafficRateBytes { rate, .. } => Some(smallvec![make_limit(true, rate, "bytes", "second"), DROP])
-        .into_iter()
-        .chain(terminal.then(|| smallvec_inline![ACCEPT]))
-        .collect(),
-      TrafficRatePackets { rate, .. } => Some(smallvec![make_limit(true, rate, "packets", "second"), DROP])
-        .into_iter()
-        .chain(terminal.then(|| smallvec_inline![ACCEPT]))
-        .collect(),
-      TrafficAction { sample: true, .. } => smallvec_inline![smallvec![
-        stmt::Statement::Log(Some(stmt::Log::new(None))),
-        terminal.then_some(ACCEPT).unwrap_or(CONTINUE),
-      ]],
+      TrafficRateBytes { rate, .. } => smallvec![make_limit(true, rate, "bytes", "second"), DROP],
+      TrafficRatePackets { rate, .. } => smallvec![make_limit(true, rate, "packets", "second"), DROP],
+      TrafficAction { sample: true, .. } => smallvec_inline![stmt::Statement::Log(Some(stmt::Log::new(None))),],
       TrafficAction { .. } => SmallVec::new_const(),
       RtRedirect { .. } | RtRedirectIpv6 { .. } => todo!("redirect is not supported at the moment"),
-      TrafficMarking { dscp } => smallvec_inline![smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
+      TrafficMarking { dscp } => smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
         key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
         value: NUM(dscp.into()),
-      })]],
-    }
+      })],
+    };
+    (action, false)
   }
 }
 
 const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
 const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
-const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
+// const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
 
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })

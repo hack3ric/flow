@@ -43,7 +43,7 @@ impl Routes {
             Ok(nft) => nft,
             Err(error) => {
               warn!("flowspec {spec} rejected: {error}");
-              // self.withdraw_spec(spec);
+              self.withdraw_spec(spec)?;
               continue;
             }
           };
