@@ -35,16 +35,13 @@ async fn run(args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   let listener = TcpListener::bind(args.bind)
     .await
     .with_context(|| format!("failed to bind to {}", args.bind))?;
-  let mut bgp = Session::new(
-    routes.clone(),
-    Config {
-      router_id: args.router_id,
-      local_as: args.local_as,
-      remote_as: args.remote_as,
-      remote_ip: args.allowed_ips,
-      hold_timer: 240,
-    },
-  );
+  let mut bgp = Session::new(routes.clone(), Config {
+    router_id: args.router_id,
+    local_as: args.local_as,
+    remote_as: args.remote_as,
+    remote_ip: args.allowed_ips,
+    hold_timer: 240,
+  });
 
   let mut ipc = IpcServer::new(sock_path, routes).with_context(|| format!("failed to create socket at {sock_path}"))?;
 

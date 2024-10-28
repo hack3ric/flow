@@ -9,7 +9,6 @@ use nftables::batch::Batch;
 use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
 use nftables::{schema, types};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,29 +106,34 @@ impl Routes {
   }
 
   fn remove_nft_entry(id: u64) -> Result<(), NftablesError> {
+    #[derive(Debug, Deserialize)]
+    struct MyNftables {
+      nftables: Vec<MyNftObject>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct MyNftObject {
+      rule: Option<MyNftRule>,
+    }
+    #[derive(Debug, Deserialize)]
+    struct MyNftRule {
+      comment: Option<String>,
+      handle: u32,
+    }
     let args = vec!["-n", "-s", "list", "chain", "inet", "flowspecs", "flowspecs"];
     let mut batch = Batch::new();
-    // TODO: use customized type that silently drops unknown fields and only pick up
-    // comment and handle in a rule
     let s = get_current_ruleset_raw(None, Some(args)).unwrap();
-    let v: Value = serde_json::from_str(&s).unwrap();
-    v.as_object()
-      .unwrap()
-      .get("nftables")
-      .unwrap()
-      .as_array()
-      .unwrap()
-      .iter()
-      .filter_map(|x| x.as_object().unwrap().get("rule"))
-      .map(|x| x.as_object().unwrap())
-      .filter(|x| x.get("comment").is_some_and(|y| y == &id.to_string()))
-      .map(|x| x.get("handle").unwrap().as_u64().unwrap())
+    let MyNftables { nftables } = serde_json::from_str(&s).unwrap();
+    nftables
+      .into_iter()
+      .filter_map(|x| x.rule)
+      .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
+      .map(|x| x.handle)
       .for_each(|h| {
         batch.delete(schema::NfListObject::Rule(schema::Rule {
           family: types::NfFamily::INet,
           table: "flowspecs".into(),
           chain: "flowspecs".into(),
-          handle: Some(h as u32),
+          handle: Some(h),
           ..Default::default()
         }));
       });

@@ -309,7 +309,6 @@ impl TrafficFilterAction {
 
 const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
 const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
-// const CONTINUE: stmt::Statement = stmt::Statement::Continue(Some(stmt::Continue {}));
 
 fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })
