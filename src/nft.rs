@@ -2,8 +2,10 @@ use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
+use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::{expr, stmt};
+use nftables::helper::{apply_ruleset, NftablesError};
+use nftables::{expr, schema, stmt, types};
 use num::Integer;
 use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
@@ -15,6 +17,43 @@ use std::mem::replace;
 use std::net::IpAddr;
 use std::ops::{Add, Not, RangeInclusive};
 use thiserror::Error;
+
+pub struct Nft(());
+
+impl Nft {
+  pub fn new() -> Result<Self, NftablesError> {
+    let mut batch = Batch::new();
+    batch.add(schema::NfListObject::Table(schema::Table {
+      family: types::NfFamily::INet,
+      name: "flowspecs".into(),
+      ..Default::default()
+    }));
+    batch.add(schema::NfListObject::Chain(schema::Chain {
+      family: types::NfFamily::INet,
+      table: "flowspecs".into(),
+      name: "flowspecs".into(),
+      ..Default::default()
+    }));
+    apply_ruleset(&batch.to_nftables(), None, None)?;
+    Ok(Self(()))
+  }
+
+  fn exit() -> Result<(), NftablesError> {
+    let mut batch = Batch::new();
+    batch.delete(schema::NfListObject::Table(schema::Table {
+      family: types::NfFamily::INet,
+      name: "flowspecs".into(),
+      ..Default::default()
+    }));
+    apply_ruleset(&batch.to_nftables(), None, None)
+  }
+}
+
+impl Drop for Nft {
+  fn drop(&mut self) {
+    let _ = Self::exit();
+  }
+}
 
 pub fn flow_to_nft_stmts(
   spec: &Flowspec,

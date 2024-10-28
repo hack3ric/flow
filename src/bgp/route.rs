@@ -50,19 +50,7 @@ impl Routes {
 
           let id = self.counter;
           self.counter += 1;
-
           let mut add_batch = Batch::new();
-          add_batch.add(schema::NfListObject::Table(schema::Table {
-            family: types::NfFamily::INet,
-            name: "flowspecs".into(),
-            ..Default::default()
-          }));
-          add_batch.add(schema::NfListObject::Chain(schema::Chain {
-            family: types::NfFamily::INet,
-            table: "flowspecs".into(),
-            name: "flowspecs".into(),
-            ..Default::default()
-          }));
           for stmts in nft {
             add_batch.add(schema::NfListObject::Rule(schema::Rule {
               family: types::NfFamily::INet,
@@ -73,7 +61,6 @@ impl Routes {
               ..Default::default()
             }));
           }
-
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
