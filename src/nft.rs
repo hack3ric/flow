@@ -804,7 +804,7 @@ mod tests {
   use super::*;
   use test_case::test_case;
 
-  #[test_case(&[0x03, 114, 0x54, 2, 2, 0x81, 1], &[114..=513, 1..=1])]
+  #[test_case(&[0x03, 114, 0x54, 2, 2, 0x81, 1], &[1..=1, 114..=513])]
   #[test_case(&[0x06, 114, 0x56, 2, 2, 0xd6, 7, 127], &[0..=113, 115..=513, 515..=1918, 1920..=u64::MAX])]
   #[tokio::test]
   async fn test_ops_to_range(mut seq: &[u8], result: &[RangeInclusive<u64>]) -> anyhow::Result<()> {
