@@ -21,7 +21,7 @@ impl<'a> IpcServer<'a> {
   pub async fn process(&mut self) -> anyhow::Result<()> {
     let (mut stream, _addr) = self.listener.accept().await?;
     let routes = self.routes.read().await;
-    stream.write_all(&serde_json::to_vec(&*routes)?).await?;
+    stream.write_all(&bincode::serialize(&*routes)?).await?;
     Ok(())
   }
 }
@@ -36,5 +36,5 @@ pub async fn get_routes(path: impl AsRef<Path>) -> anyhow::Result<Routes> {
   let mut stream = UnixStream::connect(path).await?;
   let mut buf = Vec::new();
   stream.read_to_end(&mut buf).await?;
-  Ok(serde_json::from_slice(&buf)?)
+  Ok(bincode::deserialize(&buf)?)
 }
