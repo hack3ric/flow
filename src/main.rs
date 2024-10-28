@@ -19,8 +19,9 @@ use futures::FutureExt;
 use ipc::IpcServer;
 use log::{error, info, warn, Record};
 use nft::Nft;
+use std::fs::File;
 use std::io::ErrorKind::UnexpectedEof;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
 use std::rc::Rc;
 use sync::RwLock;
@@ -118,13 +119,22 @@ async fn main() -> ExitCode {
     .format(format_log)
     .init();
   match cli.command {
-    Command::Run(args) => match run(args, sock_path).await {
-      Ok(x) => x,
-      Err(error) => {
-        error!("fatal error: {error:?}");
-        ExitCode::FAILURE
+    Command::Run(mut args) => {
+      if let Some(file) = args.file {
+        args = RunArgs::parse_from(
+          Some("flow".to_string())
+            .into_iter()
+            .chain(BufReader::new(File::open(file).unwrap()).lines().map(|x| x.unwrap())),
+        );
       }
-    },
+      match run(args, sock_path).await {
+        Ok(x) => x,
+        Err(error) => {
+          error!("fatal error: {error:?}");
+          ExitCode::FAILURE
+        }
+      }
+    }
     Command::Show => {
       let result = async {
         let routes = ipc::get_routes(sock_path)

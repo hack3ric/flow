@@ -260,6 +260,10 @@ pub enum PathAttr {
   Origin = 1,
   AsPath = 2,
   NextHop = 3,
+  MultiExitDesc = 4,
+  LocalPref = 5,
+  AtomicAggregate = 6,
+  Aggregator = 7,
   Communities = 8,
   MpReachNlri = 14,
   MpUnreachNlri = 15,
@@ -370,9 +374,15 @@ impl UpdateMessage<'static> {
 
       match PathAttr::from_repr(kind) {
         // Well-known attributes
-        Some(PathAttr::Origin | PathAttr::AsPath | PathAttr::NextHop)
-          if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 =>
-        {
+        Some(
+          PathAttr::Origin
+          | PathAttr::AsPath
+          | PathAttr::NextHop
+          | PathAttr::MultiExitDesc
+          | PathAttr::LocalPref
+          | PathAttr::AtomicAggregate
+          | PathAttr::Aggregator,
+        ) if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
           return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
         }
         Some(PathAttr::Origin) => {
@@ -389,6 +399,7 @@ impl UpdateMessage<'static> {
             }
           };
         }
+        Some(PathAttr::AsPath) if len == 0 => {}
         Some(PathAttr::AsPath) => {
           if len % 4 != 2 {
             return Err(Notification::Update(MalformedAsPath).into());
@@ -420,7 +431,34 @@ impl UpdateMessage<'static> {
           }
           old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
         }
-        // TODO: MED, local pref, atomic aggregate, aggregator
+        Some(PathAttr::MultiExitDesc) => {
+          if len != 4 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
+          }
+          pattrs_reader.read_u32().await?; // TODO: use this value
+        }
+        Some(PathAttr::LocalPref) => {
+          if len != 4 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
+          }
+          pattrs_reader.read_u32().await?; // TODO: use this value
+        }
+        Some(PathAttr::AtomicAggregate) => {
+          if len != 0 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
+          }
+        }
+        Some(PathAttr::Aggregator) => {
+          if len != 6 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
+          }
+          pattrs_reader.read_u16().await?; // TODO: use this value
+          pattrs_reader.read_u32().await?; // TODO: use this value
+        }
 
         // Known, optional, transitive attributes
         Some(
