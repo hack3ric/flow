@@ -49,3 +49,16 @@ Show information of currently running Flow instance:
 ```console
 # flow show
 ```
+
+## Future Work
+
+- Programmatic handling
+  - Custom traffic filter actions and route handling (not limited to flowspecs)
+- [Validation procedure](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure)
+  - Currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here.
+- VPN routes and VRF redirection
+  - Does not have many knowledge right now, but certainly doable
+
+## License
+
+Flow is licensed under the BSD 2-Clause License. See LICENSE file for detail.

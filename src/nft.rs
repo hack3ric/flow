@@ -4,9 +4,10 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::helper::{apply_ruleset, NftablesError};
+use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
+use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -18,40 +19,87 @@ use std::net::IpAddr;
 use std::ops::{Add, Not, RangeInclusive};
 use thiserror::Error;
 
-pub struct Nft(());
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Nft {
+  table: Cow<'static, str>,
+  chain: Cow<'static, str>,
+  #[serde(skip)]
+  armed: bool,
+}
 
 impl Nft {
   pub fn new() -> Result<Self, NftablesError> {
+    Self::with_names("flowspecs", "flowspecs")
+  }
+
+  pub fn with_names(
+    table: impl Into<Cow<'static, str>>,
+    chain: impl Into<Cow<'static, str>>,
+  ) -> Result<Self, NftablesError> {
+    let table = table.into();
+    let chain = chain.into();
     let mut batch = Batch::new();
     batch.add(schema::NfListObject::Table(schema::Table {
       family: types::NfFamily::INet,
-      name: "flowspecs".into(),
+      name: table.to_string(),
       ..Default::default()
     }));
     batch.add(schema::NfListObject::Chain(schema::Chain {
       family: types::NfFamily::INet,
-      table: "flowspecs".into(),
-      name: "flowspecs".into(),
+      table: table.to_string(),
+      name: chain.to_string(),
       ..Default::default()
     }));
     apply_ruleset(&batch.to_nftables(), None, None)?;
-    Ok(Self(()))
+    Ok(Self { table, chain, armed: true })
   }
 
-  fn exit() -> Result<(), NftablesError> {
+  fn exit(&self) -> Result<(), NftablesError> {
     let mut batch = Batch::new();
     batch.delete(schema::NfListObject::Table(schema::Table {
       family: types::NfFamily::INet,
-      name: "flowspecs".into(),
+      name: self.table.to_string(),
       ..Default::default()
     }));
+    apply_ruleset(&batch.to_nftables(), None, None)
+  }
+
+  pub fn make_new_rule(&self, stmts: Vec<stmt::Statement>, comment: Option<impl ToString>) -> schema::NfListObject {
+    schema::NfListObject::Rule(schema::Rule {
+      family: types::NfFamily::INet,
+      table: self.table.to_string(),
+      chain: self.chain.to_string(),
+      expr: stmts,
+      comment: comment.map(|x| x.to_string()),
+      ..Default::default()
+    })
+  }
+
+  pub fn make_rule_handle(&self, handle: u32) -> schema::NfListObject {
+    schema::NfListObject::Rule(schema::Rule {
+      family: types::NfFamily::INet,
+      table: self.table.to_string(),
+      chain: self.chain.to_string(),
+      handle: Some(handle),
+      ..Default::default()
+    })
+  }
+
+  pub fn get_current_ruleset_raw(&self) -> Result<String, NftablesError> {
+    let args = vec!["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
+    get_current_ruleset_raw(None, Some(args))
+  }
+
+  pub fn apply_ruleset(&self, batch: Batch) -> Result<(), NftablesError> {
     apply_ruleset(&batch.to_nftables(), None, None)
   }
 }
 
 impl Drop for Nft {
   fn drop(&mut self) {
-    let _ = Self::exit();
+    if self.armed {
+      let _ = self.exit();
+    }
   }
 }
 

@@ -69,8 +69,8 @@ pub struct RawRwLock(RefCell<Inner>);
 #[derive(Debug)]
 struct Inner {
   state: State,
-  read_wakers: SmallVec<[Waker; 4]>,
-  write_wakers: SmallVec<[Waker; 4]>,
+  read_wakers: SmallVec<[Waker; 1]>,
+  write_wakers: SmallVec<[Waker; 1]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

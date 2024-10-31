@@ -11,7 +11,7 @@ use anstyle::{Reset, Style};
 use anyhow::Context;
 use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::route::Routes;
-use bgp::{Config, Session};
+use bgp::Session;
 use clap::Parser;
 use env_logger::fmt::Formatter;
 use futures::future::select;
@@ -19,6 +19,7 @@ use futures::FutureExt;
 use ipc::IpcServer;
 use log::{error, info, warn, LevelFilter, Record};
 use nft::Nft;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, BufReader, Write};
@@ -40,31 +41,35 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         .map(|x| x.map(|x| "--".to_string() + &x))
         .collect::<Result<Vec<_>, _>>()?,
     );
+    if args.file.is_some() {
+      warn!("`file` option in configuration file ignored");
+    }
   }
 
-  let _nft = Nft::new()?;
-  let routes = Rc::new(RwLock::new(Routes::new()));
+  let config = Rc::new(args);
+  let nft = Rc::new(Nft::new()?);
+  let routes = Rc::new(RwLock::new(Routes::new(nft)));
 
-  let listener = TcpListener::bind(args.bind)
+  let listener = TcpListener::bind(&*config.bind)
     .await
-    .with_context(|| format!("failed to bind to {}", args.bind))?;
-  let mut bgp = Session::new(routes.clone(), Config {
-    router_id: args.router_id,
-    local_as: args.local_as,
-    remote_as: args.remote_as,
-    remote_ip: args.allowed_ips,
-    hold_timer: 240,
-  });
+    .with_context(|| format!("failed to bind to {:?}", config.bind))?;
+  let mut bgp = Session::new(routes.clone(), config.clone());
 
-  let mut ipc = IpcServer::new(sock_path, routes).with_context(|| format!("failed to create socket at {sock_path}"))?;
+  let bind = (config.bind.len() == 1)
+    .then(|| &config.bind[0] as &dyn Debug)
+    .unwrap_or(&config.bind);
+
+  info!(
+    "Flow listening to {bind:?} as AS{}, router ID {}",
+    config.local_as, config.router_id,
+  );
+
+  let mut ipc = IpcServer::new(sock_path, config, bgp.state_kind(), routes)
+    .with_context(|| format!("failed to create socket at {sock_path}"))?;
 
   let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
   let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
 
-  info!(
-    "Flow listening to {} as AS{}, router ID {}",
-    args.bind, args.local_as, args.router_id,
-  );
   loop {
     let select = async {
       pin! {
@@ -72,7 +77,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         let sigterm = sigterm.recv().map(|_| "SIGTERM");
       }
       select! {
-        result = listener.accept(), if matches!(bgp.state, bgp::State::Active) => {
+        result = listener.accept(), if matches!(bgp.state(), bgp::State::Active) => {
           let (stream, mut addr) = result.context("failed to accept TCP connection")?;
           addr.set_ip(addr.ip().to_canonical());
           bgp.accept(stream, addr).await.context("failed to accept BGP connection")?;
@@ -100,9 +105,10 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
 }
 
 async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyhow::Result<()> {
-  let routes = ipc::get_routes(sock_path)
+  let (_config, _state, routes) = ipc::get_state(sock_path)
     .await
     .with_context(|| format!("failed to connect to {sock_path}"))?;
+  // TODO: print config and state
   routes.print(verbosity);
   Ok(())
 }

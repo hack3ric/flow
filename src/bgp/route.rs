@@ -1,13 +1,12 @@
 use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
-use crate::nft::flow_to_nft_stmts;
+use crate::nft::{flow_to_nft_stmts, Nft};
 use crate::util::MaybeRc;
 use anstyle::{AnsiColor, Color, Reset, Style};
 use log::{warn, Level, LevelFilter};
 use nftables::batch::Batch;
-use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
-use nftables::{schema, types};
+use nftables::helper::NftablesError;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
@@ -19,16 +18,22 @@ use std::rc::Rc;
 use strum::{EnumDiscriminants, FromRepr};
 
 /// Route storage for a session.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Routes {
-  pub unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
-  pub flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
-  pub counter: u64,
+  unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
+  flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
+  counter: u64,
+  nft: MaybeRc<Nft>,
 }
 
 impl Routes {
-  pub fn new() -> Self {
-    Default::default()
+  pub fn new(nft: Rc<Nft>) -> Self {
+    Self {
+      unicast: BTreeMap::new(),
+      flow: BTreeMap::new(),
+      counter: 0,
+      nft: MaybeRc::Rc(nft),
+    }
   }
 
   pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> Result<(), NftablesError> {
@@ -38,8 +43,8 @@ impl Routes {
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
         for spec in specs {
-          let nft = match flow_to_nft_stmts(&spec, &info) {
-            Ok(nft) => nft,
+          let rules = match flow_to_nft_stmts(&spec, &info) {
+            Ok(rules) => rules,
             Err(error) => {
               warn!("flowspec {spec} rejected: {error}");
               self.withdraw_spec(spec)?;
@@ -49,27 +54,18 @@ impl Routes {
 
           let id = self.counter;
           self.counter += 1;
-          let mut add_batch = Batch::new();
-          for stmts in nft {
-            add_batch.add(schema::NfListObject::Rule(schema::Rule {
-              family: types::NfFamily::INet,
-              table: "flowspecs".into(),
-              chain: "flowspecs".into(),
-              expr: stmts,
-              comment: Some(id.to_string()),
-              ..Default::default()
-            }));
-          }
+          let mut batch = Batch::new();
+          rules.into_iter().for_each(|s| batch.add(self.nft.make_new_rule(s, Some(id))));
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              Self::remove_nft_entry(id)?
+              self.remove_nft_entry(id)?
             }
           }
-          apply_ruleset(&add_batch.to_nftables(), None, None).unwrap();
+          self.nft.apply_ruleset(batch)?;
         }
       }
     }
@@ -92,7 +88,7 @@ impl Routes {
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
     for (_, (id, _)) in flow {
-      Self::remove_nft_entry(id)?;
+      self.remove_nft_entry(id)?;
     }
 
     Ok(())
@@ -102,10 +98,10 @@ impl Routes {
     let Some((id, _)) = self.flow.remove(&spec) else {
       return Ok(());
     };
-    Self::remove_nft_entry(id)
+    self.remove_nft_entry(id)
   }
 
-  fn remove_nft_entry(id: u64) -> Result<(), NftablesError> {
+  fn remove_nft_entry(&self, id: u64) -> Result<(), NftablesError> {
     #[derive(Debug, Deserialize)]
     struct MyNftables {
       nftables: Vec<MyNftObject>,
@@ -119,25 +115,15 @@ impl Routes {
       comment: Option<String>,
       handle: u32,
     }
-    let args = vec!["-n", "-s", "list", "chain", "inet", "flowspecs", "flowspecs"];
     let mut batch = Batch::new();
-    let s = get_current_ruleset_raw(None, Some(args))?;
+    let s = self.nft.get_current_ruleset_raw()?;
     let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
     nftables
       .into_iter()
       .filter_map(|x| x.rule)
       .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
-      .map(|x| x.handle)
-      .for_each(|h| {
-        batch.delete(schema::NfListObject::Rule(schema::Rule {
-          family: types::NfFamily::INet,
-          table: "flowspecs".into(),
-          chain: "flowspecs".into(),
-          handle: Some(h),
-          ..Default::default()
-        }));
-      });
-    apply_ruleset(&batch.to_nftables(), None, None)
+      .for_each(|x| batch.delete(self.nft.make_rule_handle(x.handle)));
+    self.nft.apply_ruleset(batch)
   }
 
   pub fn print(&self, verbosity: LevelFilter) {

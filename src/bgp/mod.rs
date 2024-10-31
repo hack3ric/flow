@@ -3,7 +3,8 @@ pub mod msg;
 pub mod nlri;
 pub mod route;
 
-use crate::net::{IpPrefix, IpPrefixError, IpPrefixErrorKind};
+use crate::args::RunArgs;
+use crate::net::{IpPrefixError, IpPrefixErrorKind};
 use crate::sync::RwLock;
 use flow::FlowError;
 use futures::future::pending;
@@ -15,12 +16,15 @@ use nlri::NlriError;
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
+use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::cmp::min;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+use strum::EnumDiscriminants;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::TcpStream;
@@ -28,16 +32,8 @@ use tokio::select;
 use tokio::time::{interval, Interval};
 use State::*;
 
-#[derive(Debug)]
-pub struct Config {
-  pub router_id: Ipv4Addr,
-  pub local_as: u32,
-  pub remote_as: Option<u32>,
-  pub remote_ip: Vec<IpPrefix>,
-  pub hold_timer: u16,
-}
-
-#[derive(Debug)]
+#[derive(Debug, EnumDiscriminants)]
+#[strum_discriminants(name(StateKind), derive(Serialize, Deserialize))]
 pub enum State {
   Idle,
   #[allow(dead_code)]
@@ -81,18 +77,19 @@ pub enum State {
 /// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 #[derive(Debug)]
 pub struct Session {
-  config: Config,
-  pub(crate) state: State,
-  pub(crate) routes: Rc<RwLock<Routes>>,
+  config: Rc<RunArgs>,
+  state: State,
+  state_kind: Rc<Cell<StateKind>>,
+  routes: Rc<RwLock<Routes>>,
 }
 
 impl Session {
-  pub const fn new(routes: Rc<RwLock<Routes>>, config: Config) -> Self {
-    Self { routes, config, state: Active }
+  pub fn new(routes: Rc<RwLock<Routes>>, config: Rc<RunArgs>) -> Self {
+    Self { routes, config, state: Active, state_kind: Rc::new(Cell::new(StateKind::Active)) }
   }
 
   pub fn start(&mut self) {
-    self.state = Active;
+    self.change_state(|_| Active);
   }
 
   pub async fn stop(&mut self) -> Result<()> {
@@ -102,25 +99,42 @@ impl Session {
         Notification::Cease.send(stream).await?;
       }
     }
-    self.state = Idle;
+    self.change_state(|_| Idle);
     Ok(())
+  }
+
+  pub fn state(&self) -> &State {
+    &self.state
+  }
+
+  pub fn state_kind(&self) -> Rc<Cell<StateKind>> {
+    self.state_kind.clone()
+  }
+
+  fn change_state(&mut self, f: impl FnOnce(State) -> State) {
+    Self::change_state2(&mut self.state, &self.state_kind, f);
+  }
+
+  fn change_state2(state: &mut State, kind: &Cell<StateKind>, f: impl FnOnce(State) -> State) {
+    replace_with_or_abort(state, f);
+    kind.set((&*state).into());
   }
 
   pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
     let ip = addr.ip();
-    if !self.config.remote_ip.iter().any(|x| x.contains(ip)) {
+    if !self.config.allowed_ips.iter().any(|x| x.contains(ip)) {
       return Err(Error::UnacceptableAddr(ip));
     } else if !matches!(self.state, Active) {
       return Err(Error::AlreadyRunning);
     }
     let open = OpenMessage {
       my_as: self.config.local_as,
-      hold_time: self.config.hold_timer,
+      hold_time: self.config.hold_time,
       bgp_id: self.config.router_id.to_bits(),
       ..Default::default()
     };
     open.send(&mut stream).await?;
-    self.state = OpenSent { stream: BufReader::new(stream) };
+    self.change_state(|_| OpenSent { stream: BufReader::new(stream) });
     info!("accepting BGP connection from {addr}");
     Ok(())
   }
@@ -128,7 +142,7 @@ impl Session {
   pub async fn process(&mut self) -> Result<()> {
     let result = self.process_inner().await;
     if result.is_err() {
-      self.state = Active;
+      self.change_state(|_| Active);
       self.routes.write().await.withdraw_all().unwrap();
     }
     result
@@ -149,7 +163,7 @@ impl Session {
             UnacceptableHoldTime.send_and_return(stream).await?;
           } else {
             Message::Keepalive.send(stream).await?;
-            replace_with_or_abort(&mut self.state, |this| {
+            self.change_state(|this| {
               let OpenSent { stream } = this else { unreachable!() };
               OpenConfirm { stream, remote_open: msg }
             });
@@ -159,11 +173,11 @@ impl Session {
       },
       OpenConfirm { stream, .. } => match Message::read(stream).await? {
         Message::Keepalive => {
-          replace_with_or_abort(&mut self.state, |this| {
+          Self::change_state2(&mut self.state, &self.state_kind, |this| {
             let OpenConfirm { stream, remote_open } = this else {
               unreachable!()
             };
-            let hold_time = min(self.config.hold_timer, remote_open.hold_time);
+            let hold_time = min(self.config.hold_time, remote_open.hold_time);
             let keepalive_time = hold_time / 3;
             let hold_timer = (hold_time != 0)
               .then(|| Duration::from_secs(hold_time.into()))
