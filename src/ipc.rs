@@ -4,6 +4,9 @@ use crate::bgp::StateKind;
 use crate::sync::RwLock;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::ffi::CStr;
+use std::io;
+use std::mem::MaybeUninit;
 use std::path::Path;
 use std::rc::Rc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -53,4 +56,23 @@ pub async fn get_state(path: impl AsRef<Path>) -> anyhow::Result<(RunArgs, State
   let (state, buf_ptr) = postcard::take_from_bytes_cobs(buf_ptr)?;
   let (routes, _) = postcard::take_from_bytes_cobs(buf_ptr)?;
   Ok((config, state, routes))
+}
+
+/// Network namespace-aware socket path.
+#[cfg(target_os = "linux")]
+pub fn get_sock_path(dir: &str) -> io::Result<String> {
+  let stat = unsafe {
+    let netns_path = CStr::from_bytes_with_nul_unchecked(b"/proc/self/ns/net\0");
+    let mut buf = MaybeUninit::uninit();
+    if libc::stat(netns_path.as_ptr(), buf.as_mut_ptr()) < 0 {
+      return Err(io::Error::last_os_error());
+    }
+    buf.assume_init()
+  };
+  Ok(format!("{dir}/{:x}.sock", stat.st_ino))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn get_sock_path(dir: &str) -> io::Result<String> {
+  Ok(format!("{dir}/flow.sock"))
 }

@@ -36,8 +36,10 @@ The configuration options can be stored in a file and passed directly to Flow us
 
 ```
 # flow.conf
+
 # Each line is exactly one argument without `--`, and spaces are preserved as-is.
 # Empty lines and lines starting with '#' are ignored.
+
 bind=[::1]:1179
 local-as=65001
 remote-as=65001
@@ -52,12 +54,10 @@ Show information of currently running Flow instance:
 
 ## Future Work
 
-- Programmatic handling
-  - Custom traffic filter actions and route handling (not limited to flowspecs)
-- [Validation procedure](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure)
-  - Currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here.
-- VPN routes and VRF redirection
-  - Does not have many knowledge right now, but certainly doable
+- **Programmatic handling**: custom traffic filter actions and route handling (not limited to flowspecs)
+- [**Validation procedure**](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure): currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here
+- **VPN routes and VRF redirection**: does not have many knowledge right now, but certainly doable
+- **OpenBSD `pf` backend**: provide an alternative to Linux
 
 ## License
 

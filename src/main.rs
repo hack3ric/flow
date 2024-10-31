@@ -16,7 +16,7 @@ use clap::Parser;
 use env_logger::fmt::Formatter;
 use futures::future::select;
 use futures::FutureExt;
-use ipc::IpcServer;
+use ipc::{get_sock_path, IpcServer};
 use log::{error, info, warn, LevelFilter, Record};
 use nft::Nft;
 use std::fmt::Debug;
@@ -139,20 +139,20 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();
-  let sock_path = "/run/flow/flow.sock";
+  let sock_path = get_sock_path("/run/flow").unwrap();
   env_logger::builder()
     .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)
     .init();
   match cli.command {
-    Command::Run(args) => match run(args, sock_path).await {
+    Command::Run(args) => match run(args, &sock_path).await {
       Ok(x) => x,
       Err(error) => {
         error!("fatal error: {error:?}");
         ExitCode::FAILURE
       }
     },
-    Command::Show(args) => match show(args, cli.verbosity.log_level_filter(), sock_path).await {
+    Command::Show(args) => match show(args, cli.verbosity.log_level_filter(), &sock_path).await {
       Ok(()) => ExitCode::SUCCESS,
       Err(error) => {
         error!("{error:?}");
