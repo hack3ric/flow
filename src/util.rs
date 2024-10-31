@@ -1,9 +1,15 @@
+use anstyle::{AnsiColor, Color, Reset, Style};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, RangeInclusive};
 use std::rc::Rc;
+
+pub const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
+pub const FG_BLUE_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue))).bold();
+pub const BOLD: Style = Style::new().bold();
+pub const RESET: Reset = Reset;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MaybeRc<T> {

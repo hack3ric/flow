@@ -1,9 +1,7 @@
 use crate::args::RunArgs;
 use crate::bgp::route::Routes;
-use crate::bgp::StateKind;
 use crate::sync::RwLock;
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
@@ -17,7 +15,6 @@ pub struct IpcServer<'a> {
   listener: UnixListener,
 
   config: Rc<RunArgs>,
-  state: Rc<Cell<StateKind>>,
   routes: Rc<RwLock<Routes>>,
 }
 
@@ -25,19 +22,16 @@ impl<'a> IpcServer<'a> {
   pub fn new(
     path: &'a (impl AsRef<Path> + ?Sized + 'a),
     config: Rc<RunArgs>,
-    state: Rc<Cell<StateKind>>,
     routes: Rc<RwLock<Routes>>,
   ) -> anyhow::Result<Self> {
     let path = Cow::Borrowed(path.as_ref());
-    Ok(Self { listener: UnixListener::bind(&path)?, path, config, state, routes })
+    Ok(Self { listener: UnixListener::bind(&path)?, path, config, routes })
   }
 
   pub async fn process(&mut self) -> anyhow::Result<()> {
     let (mut stream, _addr) = self.listener.accept().await?;
-    let routes = self.routes.read().await;
     stream.write_all(&postcard::to_stdvec_cobs(&*self.config)?).await?;
-    stream.write_all(&postcard::to_stdvec_cobs(&self.state.get())?).await?;
-    stream.write_all(&postcard::to_stdvec_cobs(&*routes)?).await?;
+    stream.write_all(&postcard::to_stdvec_cobs(&*self.routes.read().await)?).await?;
     Ok(())
   }
 }
@@ -48,14 +42,13 @@ impl Drop for IpcServer<'_> {
   }
 }
 
-pub async fn get_state(path: impl AsRef<Path>) -> anyhow::Result<(RunArgs, StateKind, Routes)> {
+pub async fn get_states(path: impl AsRef<Path>) -> anyhow::Result<(RunArgs, Routes)> {
   let mut stream = UnixStream::connect(path).await?;
   let mut buf = Vec::new();
   stream.read_to_end(&mut buf).await?;
   let (config, buf_ptr) = postcard::take_from_bytes_cobs(&mut buf)?;
-  let (state, buf_ptr) = postcard::take_from_bytes_cobs(buf_ptr)?;
   let (routes, _) = postcard::take_from_bytes_cobs(buf_ptr)?;
-  Ok((config, state, routes))
+  Ok((config, routes))
 }
 
 /// Network namespace-aware socket path.

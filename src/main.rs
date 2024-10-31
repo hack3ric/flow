@@ -29,6 +29,7 @@ use sync::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{pin, select};
+use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   if let Some(file) = args.file {
@@ -64,8 +65,8 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     config.local_as, config.router_id,
   );
 
-  let mut ipc = IpcServer::new(sock_path, config, bgp.state_kind(), routes)
-    .with_context(|| format!("failed to create socket at {sock_path}"))?;
+  let mut ipc =
+    IpcServer::new(sock_path, config, routes).with_context(|| format!("failed to create socket at {sock_path}"))?;
 
   let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
   let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
@@ -105,10 +106,18 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
 }
 
 async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyhow::Result<()> {
-  let (_config, _state, routes) = ipc::get_state(sock_path)
+  let (config, routes) = ipc::get_states(sock_path)
     .await
     .with_context(|| format!("failed to connect to {sock_path}"))?;
-  // TODO: print config and state
+  let bind = (config.bind.len() == 1)
+    .then(|| &config.bind[0] as &dyn Debug)
+    .unwrap_or(&config.bind);
+
+  println!("{FG_GREEN_BOLD}Flow{RESET} listening to {bind:?}");
+  println!("    {BOLD}Local AS:{RESET} {}", config.local_as);
+  // println!("    {Bold}State: {:?}", )
+  println!();
+
   routes.print(verbosity);
   Ok(())
 }

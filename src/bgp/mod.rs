@@ -16,8 +16,6 @@ use nlri::NlriError;
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
-use serde::{Deserialize, Serialize};
-use std::cell::Cell;
 use std::cmp::min;
 use std::future::Future;
 use std::io;
@@ -31,31 +29,6 @@ use tokio::net::TcpStream;
 use tokio::select;
 use tokio::time::{interval, Interval};
 use State::*;
-
-#[derive(Debug, EnumDiscriminants)]
-#[strum_discriminants(name(StateKind), derive(Serialize, Deserialize))]
-pub enum State {
-  Idle,
-  #[allow(dead_code)]
-  Connect, // never used in passive mode
-  Active,
-  OpenSent {
-    stream: BufReader<TcpStream>,
-  },
-  OpenConfirm {
-    stream: BufReader<TcpStream>,
-    remote_open: OpenMessage<'static>,
-    // TODO: timer here
-  },
-  Established {
-    stream: BufReader<TcpStream>,
-    #[allow(unused)]
-    remote_open: OpenMessage<'static>,
-    clock: Interval,
-    hold_timer: Option<(Duration, Instant)>,
-    keepalive_timer: Option<(Duration, Instant)>,
-  },
-}
 
 /// A (currently passive only) BGP session.
 ///
@@ -79,17 +52,16 @@ pub enum State {
 pub struct Session {
   config: Rc<RunArgs>,
   state: State,
-  state_kind: Rc<Cell<StateKind>>,
   routes: Rc<RwLock<Routes>>,
 }
 
 impl Session {
   pub fn new(routes: Rc<RwLock<Routes>>, config: Rc<RunArgs>) -> Self {
-    Self { routes, config, state: Active, state_kind: Rc::new(Cell::new(StateKind::Active)) }
+    Self { config, state: Active, routes }
   }
 
   pub fn start(&mut self) {
-    self.change_state(|_| Active);
+    self.state = Active;
   }
 
   pub async fn stop(&mut self) -> Result<()> {
@@ -99,25 +71,12 @@ impl Session {
         Notification::Cease.send(stream).await?;
       }
     }
-    self.change_state(|_| Idle);
+    self.state = Idle;
     Ok(())
   }
 
   pub fn state(&self) -> &State {
     &self.state
-  }
-
-  pub fn state_kind(&self) -> Rc<Cell<StateKind>> {
-    self.state_kind.clone()
-  }
-
-  fn change_state(&mut self, f: impl FnOnce(State) -> State) {
-    Self::change_state2(&mut self.state, &self.state_kind, f);
-  }
-
-  fn change_state2(state: &mut State, kind: &Cell<StateKind>, f: impl FnOnce(State) -> State) {
-    replace_with_or_abort(state, f);
-    kind.set((&*state).into());
   }
 
   pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
@@ -134,7 +93,7 @@ impl Session {
       ..Default::default()
     };
     open.send(&mut stream).await?;
-    self.change_state(|_| OpenSent { stream: BufReader::new(stream) });
+    replace_with_or_abort(&mut self.state, |_| OpenSent { stream: BufReader::new(stream) });
     info!("accepting BGP connection from {addr}");
     Ok(())
   }
@@ -142,7 +101,7 @@ impl Session {
   pub async fn process(&mut self) -> Result<()> {
     let result = self.process_inner().await;
     if result.is_err() {
-      self.change_state(|_| Active);
+      self.state = Active;
       self.routes.write().await.withdraw_all().unwrap();
     }
     result
@@ -156,16 +115,16 @@ impl Session {
     match &mut self.state {
       Idle | Connect | Active => pending().await,
       OpenSent { stream } => match Message::read(stream).await? {
-        Message::Open(msg) => {
-          if self.config.remote_as.map_or(false, |x| msg.my_as != x) {
+        Message::Open(remote_open) => {
+          if self.config.remote_as.map_or(false, |x| remote_open.my_as != x) {
             BadPeerAs.send_and_return(stream).await?;
-          } else if msg.hold_time == 1 || msg.hold_time == 2 {
+          } else if remote_open.hold_time == 1 || remote_open.hold_time == 2 {
             UnacceptableHoldTime.send_and_return(stream).await?;
           } else {
             Message::Keepalive.send(stream).await?;
-            self.change_state(|this| {
+            replace_with_or_abort(&mut self.state, |this| {
               let OpenSent { stream } = this else { unreachable!() };
-              OpenConfirm { stream, remote_open: msg }
+              OpenConfirm { stream, remote_open }
             });
           }
         }
@@ -173,7 +132,7 @@ impl Session {
       },
       OpenConfirm { stream, .. } => match Message::read(stream).await? {
         Message::Keepalive => {
-          Self::change_state2(&mut self.state, &self.state_kind, |this| {
+          replace_with_or_abort(&mut self.state, |this| {
             let OpenConfirm { stream, remote_open } = this else {
               unreachable!()
             };
@@ -241,6 +200,30 @@ impl Session {
     }
     Ok(())
   }
+}
+
+#[derive(Debug, EnumDiscriminants)]
+pub enum State {
+  Idle,
+  #[allow(dead_code)]
+  Connect, // never used in passive mode
+  Active,
+  OpenSent {
+    stream: BufReader<TcpStream>,
+  },
+  OpenConfirm {
+    stream: BufReader<TcpStream>,
+    remote_open: OpenMessage<'static>,
+    // TODO: timer here
+  },
+  Established {
+    stream: BufReader<TcpStream>,
+    #[allow(unused)]
+    remote_open: OpenMessage<'static>,
+    clock: Interval,
+    hold_timer: Option<(Duration, Instant)>,
+    keepalive_timer: Option<(Duration, Instant)>,
+  },
 }
 
 // Utilities

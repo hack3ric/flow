@@ -2,8 +2,7 @@ use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use crate::nft::{flow_to_nft_stmts, Nft};
-use crate::util::MaybeRc;
-use anstyle::{AnsiColor, Color, Reset, Style};
+use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use log::{warn, Level, LevelFilter};
 use nftables::batch::Batch;
 use nftables::helper::NftablesError;
@@ -127,11 +126,6 @@ impl Routes {
   }
 
   pub fn print(&self, verbosity: LevelFilter) {
-    const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
-    const FG_BLUE_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue))).bold();
-    const BOLD: Style = Style::new().bold();
-    const RESET: Reset = Reset;
-
     fn print_series<'a, I: Iterator<Item = &'a D>, D: Display + 'a>(mut iter: I) {
       let Some(first) = iter.next() else {
         print!("<empty>");

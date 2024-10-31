@@ -5,6 +5,7 @@ use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -131,7 +132,7 @@ pub const CAP_4B_ASN: u8 = 65;
 pub const CAP_BGP_MP: u8 = 1;
 pub const CAP_EXT_NEXTHOP: u8 = 5;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenMessage<'a> {
   pub my_as: u32,
   pub hold_time: u16,
