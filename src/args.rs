@@ -1,5 +1,5 @@
 use crate::net::IpPrefix;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use clap_verbosity::{InfoLevel, Verbosity};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -16,14 +16,15 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
   Run(RunArgs),
-  Show,
+  Show(ShowArgs),
 }
 
 #[derive(Debug, Parser)]
 pub struct RunArgs {
   /// Address to bind.
   #[arg(
-    short, long, value_name = "ADDR:PORT",
+    short, long,
+    value_name = "ADDR:PORT",
     value_parser = parse_bgp_bind,
     default_value_t = (Ipv6Addr::UNSPECIFIED, 179).into(),
   )]
@@ -63,3 +64,6 @@ fn parse_bgp_bind(bind: &str) -> anyhow::Result<SocketAddr> {
   let result = bind.parse().or_else(|_| bind.parse::<IpAddr>().map(|ip| (ip, 179).into()))?;
   Ok(result)
 }
+
+#[derive(Debug, Args)]
+pub struct ShowArgs {}

@@ -4,7 +4,7 @@ use crate::net::IpPrefix;
 use crate::nft::flow_to_nft_stmts;
 use crate::util::MaybeRc;
 use anstyle::{AnsiColor, Color, Reset, Style};
-use log::warn;
+use log::{warn, Level, LevelFilter};
 use nftables::batch::Batch;
 use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
 use nftables::{schema, types};
@@ -140,8 +140,9 @@ impl Routes {
     apply_ruleset(&batch.to_nftables(), None, None)
   }
 
-  pub fn print(&self) {
+  pub fn print(&self, verbosity: LevelFilter) {
     const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
+    const FG_BLUE_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue))).bold();
     const BOLD: Style = Style::new().bold();
     const RESET: Reset = Reset;
 
@@ -183,14 +184,27 @@ impl Routes {
       }
     }
 
-    for (prefix, (next_hop, info)) in &self.unicast {
-      println!("{FG_GREEN_BOLD}Unicast{RESET} {prefix}");
-      println!("    {BOLD}Next Hop:{RESET} {next_hop}");
-      print_info(info);
-      println!();
+    if verbosity >= Level::Debug {
+      for (prefix, (next_hop, info)) in &self.unicast {
+        println!("{FG_BLUE_BOLD}Unicast{RESET} {prefix}");
+        println!("    {BOLD}Next Hop:{RESET} {next_hop}");
+        print_info(info);
+        println!();
+      }
     }
-    for (spec, (_, info)) in &self.flow {
+
+    for (spec, (index, info)) in &self.flow {
       println!("{FG_GREEN_BOLD}Flowspec{RESET} {spec}");
+      if verbosity >= Level::Debug {
+        println!("    {BOLD}Kernel Rule ID:{RESET} {index}");
+        print!("    {BOLD}Binary Representation:{RESET} ");
+        let mut buf = Vec::new();
+        spec.write(&mut buf);
+        for c in buf {
+          print!("{c:02x}");
+        }
+        println!();
+      }
       print_info(info);
       println!();
     }

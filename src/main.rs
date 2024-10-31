@@ -9,7 +9,7 @@ mod args;
 
 use anstyle::{Reset, Style};
 use anyhow::Context;
-use args::{Cli, Command, RunArgs};
+use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::route::Routes;
 use bgp::{Config, Session};
 use clap::Parser;
@@ -17,7 +17,7 @@ use env_logger::fmt::Formatter;
 use futures::future::select;
 use futures::FutureExt;
 use ipc::IpcServer;
-use log::{error, info, warn, Record};
+use log::{error, info, warn, LevelFilter, Record};
 use nft::Nft;
 use std::fs::File;
 use std::io::ErrorKind::UnexpectedEof;
@@ -29,7 +29,19 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{pin, select};
 
-async fn run(args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
+async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
+  if let Some(file) = args.file {
+    let cmd = std::env::args().next().unwrap();
+    args = RunArgs::parse_from(
+      Some(Ok(format!("{cmd} run")))
+        .into_iter()
+        .chain(BufReader::new(File::open(file)?).lines())
+        .filter(|x| !x.as_ref().is_ok_and(|x| x.is_empty() || x.chars().next().unwrap() == '#'))
+        .map(|x| x.map(|x| "--".to_string() + &x))
+        .collect::<Result<Vec<_>, _>>()?,
+    );
+  }
+
   let _nft = Nft::new()?;
   let routes = Rc::new(RwLock::new(Routes::new()));
 
@@ -87,6 +99,14 @@ async fn run(args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   }
 }
 
+async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyhow::Result<()> {
+  let routes = ipc::get_routes(sock_path)
+    .await
+    .with_context(|| format!("failed to connect to {sock_path}"))?;
+  routes.print(verbosity);
+  Ok(())
+}
+
 fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   use anstyle::AnsiColor::*;
   use log::Level::*;
@@ -119,37 +139,19 @@ async fn main() -> ExitCode {
     .format(format_log)
     .init();
   match cli.command {
-    Command::Run(mut args) => {
-      if let Some(file) = args.file {
-        args = RunArgs::parse_from(
-          Some("flow".to_string())
-            .into_iter()
-            .chain(BufReader::new(File::open(file).unwrap()).lines().map(|x| x.unwrap())),
-        );
+    Command::Run(args) => match run(args, sock_path).await {
+      Ok(x) => x,
+      Err(error) => {
+        error!("fatal error: {error:?}");
+        ExitCode::FAILURE
       }
-      match run(args, sock_path).await {
-        Ok(x) => x,
-        Err(error) => {
-          error!("fatal error: {error:?}");
-          ExitCode::FAILURE
-        }
+    },
+    Command::Show(args) => match show(args, cli.verbosity.log_level_filter(), sock_path).await {
+      Ok(()) => ExitCode::SUCCESS,
+      Err(error) => {
+        error!("{error:?}");
+        ExitCode::FAILURE
       }
-    }
-    Command::Show => {
-      let result = async {
-        let routes = ipc::get_routes(sock_path)
-          .await
-          .with_context(|| format!("failed to connect to {sock_path}"))?;
-        routes.print();
-        anyhow::Ok(())
-      };
-      match result.await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-          error!("{error:?}");
-          ExitCode::FAILURE
-        }
-      }
-    }
+    },
   }
 }
