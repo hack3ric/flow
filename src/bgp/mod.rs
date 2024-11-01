@@ -4,15 +4,15 @@ pub mod nlri;
 pub mod route;
 
 use crate::args::RunArgs;
-use crate::net::{IpPrefixError, IpPrefixErrorKind};
+use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
 use flow::FlowError;
 use futures::future::pending;
-use log::{debug, info};
+use log::{debug, error, info, warn};
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
 use nftables::helper::NftablesError;
-use nlri::NlriError;
+use nlri::{NlriError, NlriKind};
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
@@ -93,12 +93,11 @@ impl Session {
     } else if !matches!(self.state, Active) {
       return Err(Error::AlreadyRunning);
     }
-    let open = OpenMessage {
-      my_as: self.config.local_as,
-      hold_time: self.config.hold_time,
-      bgp_id: self.config.router_id.to_bits(),
-      ..Default::default()
-    };
+    let open = OpenMessage::with_caps(
+      self.config.local_as,
+      self.config.hold_time,
+      self.config.router_id.to_bits(),
+    );
     open.send(&mut stream).await?;
     replace_with_or_abort(&mut self.state, |_| OpenSent { stream: BufReader::new(stream) });
     info!("accepting BGP connection from {addr}");
@@ -109,7 +108,7 @@ impl Session {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
-      self.routes.withdraw_all()?;
+      self.routes.withdraw_all()?; // TODO: print this error only
     }
     result
   }
@@ -123,7 +122,15 @@ impl Session {
       Idle | Connect | Active => pending().await,
       OpenSent { stream } => match Message::read(stream).await? {
         Message::Open(remote_open) => {
-          if self.config.remote_as.map_or(false, |x| remote_open.my_as != x) {
+          if !remote_open.bgp_mp.contains(&(Afi::Ipv4 as _, NlriKind::Flow as _))
+            && !remote_open.bgp_mp.contains(&(Afi::Ipv6 as _, NlriKind::Flow as _))
+          {
+            warn!("remote does not seem to support flowspec, is it enabled?");
+          }
+          if !remote_open.supports_4b_asn {
+            error!("remote does not support 4-octet AS number");
+            Unspecific.send_and_return(stream).await?;
+          } else if self.config.remote_as.map_or(false, |x| remote_open.my_as != x) {
             BadPeerAs.send_and_return(stream).await?;
           } else if remote_open.hold_time == 1 || remote_open.hold_time == 2 {
             UnacceptableHoldTime.send_and_return(stream).await?;

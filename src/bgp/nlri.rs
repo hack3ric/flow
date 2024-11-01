@@ -22,7 +22,7 @@ pub struct Nlri {
 
 /// NLRI contents, defined by (AFI, SAFI) tuple.
 #[derive(Debug, Clone, PartialEq, Eq, EnumDiscriminants)]
-#[strum_discriminants(name(NlriKind), derive(FromRepr))]
+#[strum_discriminants(name(NlriKind), derive(PartialOrd, Ord, FromRepr, Serialize, Deserialize))]
 #[repr(u8)]
 pub enum NlriContent {
   // We can probably use LPM trie, but B-tree is fine for now

@@ -129,7 +129,7 @@ pub const OPT_PARAM_CAP: u8 = 2;
 
 pub const CAP_4B_ASN: u8 = 65;
 pub const CAP_BGP_MP: u8 = 1;
-pub const CAP_EXT_NEXTHOP: u8 = 5;
+pub const CAP_EXT_NEXT_HOP: u8 = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenMessage<'a> {
@@ -137,11 +137,38 @@ pub struct OpenMessage<'a> {
   pub hold_time: u16,
   pub bgp_id: u32,
 
+  pub supports_4b_asn: bool,
+  pub bgp_mp: BTreeSet<(u16, u16)>,
+  pub ext_next_hop: BTreeSet<(u16, u16, u16)>,
+
   pub other_caps: Vec<(u8, Cow<'a, [u8]>)>,
   pub other_opt_params: Vec<(u8, Cow<'a, [u8]>)>,
 }
 
 impl OpenMessage<'static> {
+  pub fn empty() -> Self {
+    Self::default()
+  }
+
+  pub fn with_caps(my_as: u32, hold_time: u16, bgp_id: u32) -> Self {
+    let mp = [
+      (Afi::Ipv4, NlriKind::Unicast),
+      (Afi::Ipv6, NlriKind::Unicast),
+      (Afi::Ipv4, NlriKind::Flow),
+      (Afi::Ipv6, NlriKind::Flow),
+    ];
+    let enh = [(Afi::Ipv4, NlriKind::Unicast, Afi::Ipv6)];
+    Self {
+      my_as,
+      hold_time,
+      bgp_id,
+      supports_4b_asn: true,
+      bgp_mp: mp.into_iter().map(|(a, b)| (a as _, b as _)).collect(),
+      ext_next_hop: enh.into_iter().map(|(a, b, c)| (a as _, b as _, c as _)).collect(),
+      ..Default::default()
+    }
+  }
+
   async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> super::Result<Self> {
     match Self::read_inner(ptr).await {
       Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -155,11 +182,10 @@ impl OpenMessage<'static> {
     if reader.read_u8().await? != 4 {
       return Err(Notification::Open(UnsupportedVersion(4)).into());
     }
-    let mut msg = OpenMessage::default();
+    let mut msg = OpenMessage::empty();
     msg.my_as = reader.read_u16().await?.into();
     msg.hold_time = reader.read_u16().await?;
     msg.bgp_id = reader.read_u32().await?;
-    let mut supports_4b_asn = false;
 
     let params_len = reader.read_u8().await?;
     let mut reader = reader.take(params_len.into());
@@ -178,8 +204,25 @@ impl OpenMessage<'static> {
                 if cap_len != 4 {
                   return Err(Notification::Open(Unspecific).into());
                 }
-                supports_4b_asn = true;
+                msg.supports_4b_asn = true;
                 msg.my_as = cap_reader.read_u32().await?;
+              }
+              CAP_BGP_MP => {
+                if cap_len != 4 {
+                  return Err(Notification::Open(Unspecific).into());
+                }
+                let afi = cap_reader.read_u16().await?;
+                let safi = cap_reader.read_u16().await?;
+                msg.bgp_mp.insert((afi, safi));
+              }
+              CAP_EXT_NEXT_HOP => {
+                if cap_len % 6 != 0 {
+                  return Err(Notification::Open(Unspecific).into());
+                }
+                let afi = cap_reader.read_u16().await?;
+                let safi = cap_reader.read_u16().await?;
+                let next_hop_afi = cap_reader.read_u16().await?;
+                msg.ext_next_hop.insert((afi, safi, next_hop_afi));
               }
               _ => {
                 let mut cap_buf = vec![0; cap_len.into()];
@@ -196,9 +239,7 @@ impl OpenMessage<'static> {
         }
       }
     }
-    supports_4b_asn
-      .then_some(msg)
-      .ok_or_else(|| Notification::Open(Unspecific).into())
+    Ok(msg)
   }
 }
 
@@ -216,29 +257,32 @@ impl MessageSend for OpenMessage<'_> {
       // Capabilities
       buf.push(OPT_PARAM_CAP);
       extend_with_u8_len(buf, |buf| {
-        [
-          (Afi::Ipv4, NlriKind::Unicast),
-          (Afi::Ipv6, NlriKind::Unicast),
-          (Afi::Ipv4, NlriKind::Flow),
-          (Afi::Ipv6, NlriKind::Flow),
-        ]
-        .into_iter()
-        .for_each(|(afi, safi)| {
+        self.bgp_mp.iter().for_each(|(afi, safi)| {
           buf.extend([CAP_BGP_MP, 4]);
-          buf.extend(u16::to_be_bytes(afi as _));
-          buf.extend([0, safi as u8]);
+          buf.extend(u16::to_be_bytes(*afi as _));
+          buf.extend([0, *safi as u8]);
         });
-        buf.extend([CAP_4B_ASN, 4]);
-        buf.extend(u32::to_be_bytes(self.my_as));
+        if self.supports_4b_asn {
+          buf.extend([CAP_4B_ASN, 4]);
+          buf.extend(u32::to_be_bytes(self.my_as));
+        }
+        if !self.ext_next_hop.is_empty() {
+          buf.extend([
+            CAP_EXT_NEXT_HOP,
+            u8::try_from(self.ext_next_hop.len() * 6)
+              .expect("extended next hop capability length should fit in u8"),
+          ]);
+          self.ext_next_hop.iter().for_each(|&(a, b, c)| {
+            buf.extend(u16::to_be_bytes(a as _));
+            buf.extend([0, b as _]);
+            buf.extend(u16::to_be_bytes(c as _));
+          });
+        }
         self.other_caps.iter().for_each(|(kind, value)| {
           let len = u8::try_from(value.len()).expect("opt_param_len should fit in u8");
           buf.extend([*kind, len]);
           buf.extend(&value[..]);
         });
-        buf.extend([CAP_EXT_NEXTHOP, 6]);
-        buf.extend(u16::to_be_bytes(Afi::Ipv4 as _));
-        buf.extend([0, NlriKind::Unicast as _]);
-        buf.extend(u16::to_be_bytes(Afi::Ipv6 as _));
       });
 
       self.other_opt_params.iter().for_each(|(kind, value)| {

@@ -43,11 +43,11 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     }
   }
 
+  let bind = args.bind.iter().format(", ");
   let listener = TcpListener::bind(&args.bind[..])
     .await
-    .with_context(|| format!("failed to bind to {:?}", args.bind))?;
+    .with_context(|| format!("failed to bind to {bind:?}"))?;
 
-  let bind = args.bind.iter().format(", ");
   let local_as = args.local_as;
   let router_id = args.router_id;
   info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
@@ -73,6 +73,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         result = bgp.process() => match result {
           Ok(()) => {}
           Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
+          Err(e @ (bgp::Error::Notification(_) | bgp::Error::Remote(_))) => error!("BGP error: {e}"),
           Err(_) => result.context("failed to process BGP")?,
         },
         result = ipc.accept() => {
