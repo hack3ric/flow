@@ -2,7 +2,6 @@ pub mod bgp;
 pub mod ipc;
 pub mod net;
 pub mod nft;
-pub mod sync;
 pub mod util;
 
 mod args;
@@ -10,22 +9,19 @@ mod args;
 use anstyle::{Reset, Style};
 use anyhow::Context;
 use args::{Cli, Command, RunArgs, ShowArgs};
-use bgp::route::Routes;
-use bgp::Session;
+use bgp::{Session, StateView};
 use clap::Parser;
 use env_logger::fmt::Formatter;
 use futures::future::select;
 use futures::FutureExt;
 use ipc::{get_sock_path, IpcServer};
-use log::{error, info, warn, LevelFilter, Record};
-use nft::Nft;
-use std::fmt::Debug;
+use itertools::Itertools;
+use log::{error, info, warn, Level, LevelFilter, Record};
 use std::fs::File;
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, BufReader, Write};
+use std::net::Ipv4Addr;
 use std::process::ExitCode;
-use std::rc::Rc;
-use sync::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{pin, select};
@@ -39,7 +35,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         .into_iter()
         .chain(BufReader::new(File::open(file)?).lines())
         .filter(|x| !x.as_ref().is_ok_and(|x| x.is_empty() || x.chars().next().unwrap() == '#'))
-        .map(|x| x.map(|x| "--".to_string() + &x))
+        .map_ok(|x| "--".to_string() + &x)
         .collect::<Result<Vec<_>, _>>()?,
     );
     if args.file.is_some() {
@@ -47,26 +43,17 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     }
   }
 
-  let config = Rc::new(args);
-  let nft = Rc::new(Nft::new()?);
-  let routes = Rc::new(RwLock::new(Routes::new(nft)));
-
-  let listener = TcpListener::bind(&*config.bind)
+  let listener = TcpListener::bind(&args.bind[..])
     .await
-    .with_context(|| format!("failed to bind to {:?}", config.bind))?;
-  let mut bgp = Session::new(routes.clone(), config.clone());
+    .with_context(|| format!("failed to bind to {:?}", args.bind))?;
 
-  let bind = (config.bind.len() == 1)
-    .then(|| &config.bind[0] as &dyn Debug)
-    .unwrap_or(&config.bind);
+  let bind = args.bind.iter().format(", ");
+  let local_as = args.local_as;
+  let router_id = args.router_id;
+  info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
-  info!(
-    "Flow listening to {bind:?} as AS{}, router ID {}",
-    config.local_as, config.router_id,
-  );
-
-  let mut ipc =
-    IpcServer::new(sock_path, config, routes).with_context(|| format!("failed to create socket at {sock_path}"))?;
+  let mut bgp = Session::new(args)?;
+  let mut ipc = IpcServer::new(sock_path).with_context(|| format!("failed to create socket at {sock_path}"))?;
 
   let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
   let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
@@ -88,7 +75,10 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
           Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
           Err(_) => result.context("failed to process BGP")?,
         },
-        result = ipc.process() => result.context("failed to process IPC")?,
+        result = ipc.accept() => {
+          let mut stream = result.context("failed to accept IPC connection")?;
+          bgp.write_states(&mut stream).await.context("failed to write to IPC channel")?;
+        },
         signal = select(sigint, sigterm) => {
           let (signal, _) = signal.factor_first();
           warn!("{signal} received, exiting");
@@ -106,16 +96,44 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
 }
 
 async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyhow::Result<()> {
-  let (config, routes) = ipc::get_states(sock_path)
+  use StateView::*;
+  let mut buf = Vec::new();
+  let (config, state, routes) = ipc::get_states(sock_path, &mut buf)
     .await
     .with_context(|| format!("failed to connect to {sock_path}"))?;
-  let bind = (config.bind.len() == 1)
-    .then(|| &config.bind[0] as &dyn Debug)
-    .unwrap_or(&config.bind);
+  let bind = config.bind.iter().format(", ");
 
   println!("{FG_GREEN_BOLD}Flow{RESET} listening to {bind:?}");
-  println!("    {BOLD}Local AS:{RESET} {}", config.local_as);
-  // println!("    {Bold}State: {:?}", )
+  println!("  {BOLD}State:{RESET} {:?}", state.kind());
+  println!("  {BOLD}Local AS:{RESET} {}", config.local_as);
+  println!("  {BOLD}Local Router ID:{RESET} {}", config.router_id);
+  match state {
+    Idle | Connect | Active | OpenSent => {
+      if let Some(remote_as) = config.remote_as {
+        println!("  {BOLD}Remote AS:{RESET} {remote_as}");
+      }
+      println!("  {BOLD}Allowed IPs:{RESET} {}", config.allowed_ips.iter().format(", "));
+    }
+    OpenConfirm { remote_open, local_addr, remote_addr } | Established { remote_open, local_addr, remote_addr } => {
+      if let Some(local_addr) = local_addr {
+        println!("  {BOLD}Local Address:{RESET} {local_addr}");
+      }
+      println!("  {BOLD}Remote AS:{RESET} {}", remote_open.my_as);
+      println!(
+        "  {BOLD}Remote Router ID:{RESET} {}",
+        Ipv4Addr::from_bits(remote_open.bgp_id),
+      );
+      if let Some(remote_addr) = remote_addr {
+        println!("  {BOLD}Remote Address:{RESET} {remote_addr}");
+      }
+      if verbosity >= Level::Debug {
+        println!(
+          "  {BOLD}Hold Time:{RESET} {}",
+          config.hold_time.min(remote_open.hold_time),
+        )
+      }
+    }
+  }
   println!();
 
   routes.print(verbosity);

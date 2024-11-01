@@ -66,8 +66,10 @@ impl Flowspec {
     assert!(len < 0xf000);
     if len < 240 {
       buf.push(len.try_into().unwrap());
-    } else {
+    } else if len < 4096 {
       buf.extend((len | 0xf000).to_be_bytes());
+    } else {
+      panic!("flowspec length exceeds 0xfff");
     }
     buf.extend(buf2);
   }

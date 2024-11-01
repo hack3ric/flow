@@ -2,6 +2,7 @@ use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::net::{Afi, IpPrefix};
 use crate::util::Intersect;
+use itertools::Itertools;
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
 use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
@@ -111,12 +112,10 @@ pub fn flow_to_nft_stmts(
   let base = spec
     .to_nft_stmts()?
     .chain(info.to_nft_stmts(spec.afi()).map(Ok))
-    .map(|result| {
-      result.map(|branch| {
-        let count = total;
-        total *= branch.len();
-        (branch, count)
-      })
+    .map_ok(|branch| {
+      let count = total;
+      total *= branch.len();
+      (branch, count)
     })
     .collect::<Result<Vec<_>, _>>()?;
   let result = (0..total).map(move |i| {
@@ -345,7 +344,7 @@ impl TrafficFilterAction {
       TrafficRatePackets { rate, .. } => smallvec![make_limit(true, rate, "packets", "second"), DROP],
       TrafficAction { sample: true, .. } => smallvec_inline![stmt::Statement::Log(Some(stmt::Log::new(None))),],
       TrafficAction { .. } => SmallVec::new_const(),
-      RtRedirect { .. } | RtRedirectIpv6 { .. } => todo!("redirect is not supported at the moment"),
+      RtRedirect { .. } | RtRedirectIpv6 { .. } => SmallVec::new_const(), // redirect is not supported at the moment
       TrafficMarking { dscp } => smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
         key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
         value: NUM(dscp.into()),

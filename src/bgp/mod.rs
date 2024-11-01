@@ -5,17 +5,19 @@ pub mod route;
 
 use crate::args::RunArgs;
 use crate::net::{IpPrefixError, IpPrefixErrorKind};
-use crate::sync::RwLock;
 use flow::FlowError;
 use futures::future::pending;
 use log::{debug, info};
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
+use nftables::helper::NftablesError;
 use nlri::NlriError;
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cmp::min;
 use std::future::Future;
 use std::io;
@@ -50,14 +52,14 @@ use State::*;
 /// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 #[derive(Debug)]
 pub struct Session {
-  config: Rc<RunArgs>,
+  config: RunArgs,
   state: State,
-  routes: Rc<RwLock<Routes>>,
+  routes: Routes,
 }
 
 impl Session {
-  pub fn new(routes: Rc<RwLock<Routes>>, config: Rc<RunArgs>) -> Self {
-    Self { config, state: Active, routes }
+  pub fn new(config: RunArgs) -> Result<Self> {
+    Ok(Self { config, state: Active, routes: Routes::new()? })
   }
 
   pub fn start(&mut self) {
@@ -75,8 +77,14 @@ impl Session {
     Ok(())
   }
 
+  pub fn config(&self) -> &RunArgs {
+    &self.config
+  }
   pub fn state(&self) -> &State {
     &self.state
+  }
+  pub fn routes(&self) -> &Routes {
+    &self.routes
   }
 
   pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
@@ -102,7 +110,7 @@ impl Session {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
-      self.routes.write().await.withdraw_all().unwrap();
+      self.routes.withdraw_all()?;
     }
     result
   }
@@ -163,19 +171,20 @@ impl Session {
               debug!("received End-of-RIB of ({afi}, {safi:?})");
             } else {
               debug!("received update: {msg:?}");
-              let mut routes = self.routes.write().await;
               if msg.nlri.is_some() || msg.old_nlri.is_some() {
                 let route_info = Rc::new(msg.route_info);
                 (msg.nlri)
                   .into_iter()
                   .chain(msg.old_nlri)
-                  .for_each(|n| routes.commit(n, route_info.clone()).unwrap());
+                  .map(|n| self.routes.commit(n, route_info.clone()))
+                  .collect::<Result<(), _>>()?;
               }
               if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
                 (msg.withdrawn)
                   .into_iter()
                   .chain(msg.old_withdrawn)
-                  .for_each(|n| routes.withdraw(n).unwrap());
+                  .map(|n| self.routes.withdraw(n))
+                  .collect::<Result<(), _>>()?;
               }
             },
             Message::Keepalive => if let Some((dur, next)) = hold_timer {
@@ -202,10 +211,9 @@ impl Session {
   }
 }
 
-#[derive(Debug, EnumDiscriminants)]
+#[derive(Debug)]
 pub enum State {
   Idle,
-  #[allow(dead_code)]
   Connect, // never used in passive mode
   Active,
   OpenSent {
@@ -218,12 +226,61 @@ pub enum State {
   },
   Established {
     stream: BufReader<TcpStream>,
-    #[allow(unused)]
     remote_open: OpenMessage<'static>,
     clock: Interval,
     hold_timer: Option<(Duration, Instant)>,
     keepalive_timer: Option<(Duration, Instant)>,
   },
+}
+
+impl State {
+  pub fn kind(&self) -> StateKind {
+    self.view().into()
+  }
+
+  pub fn view(&self) -> StateView {
+    match self {
+      Idle => StateView::Idle,
+      Connect => StateView::Connect,
+      Active => StateView::Active,
+      OpenSent { .. } => StateView::OpenSent,
+      OpenConfirm { stream, remote_open, .. } => StateView::OpenConfirm {
+        remote_open: Cow::Borrowed(remote_open),
+        local_addr: stream.get_ref().local_addr().ok(),
+        remote_addr: stream.get_ref().peer_addr().ok(),
+      },
+      Established { stream, remote_open, .. } => StateView::Established {
+        remote_open: Cow::Borrowed(remote_open),
+        local_addr: stream.get_ref().local_addr().ok(),
+        remote_addr: stream.get_ref().peer_addr().ok(),
+      },
+    }
+  }
+}
+
+#[derive(Debug, Clone, EnumDiscriminants, Serialize, Deserialize)]
+#[strum_discriminants(name(StateKind))]
+pub enum StateView<'a> {
+  Idle,
+  Connect,
+  Active,
+  OpenSent,
+  OpenConfirm {
+    remote_open: Cow<'a, OpenMessage<'a>>,
+    local_addr: Option<SocketAddr>,
+    remote_addr: Option<SocketAddr>,
+  },
+  Established {
+    remote_open: Cow<'a, OpenMessage<'a>>,
+    local_addr: Option<SocketAddr>,
+    remote_addr: Option<SocketAddr>,
+  },
+}
+
+impl StateView<'_> {
+  pub fn kind(&self) -> StateKind {
+    self.into()
+  }
 }
 
 // Utilities
@@ -266,6 +323,9 @@ pub enum Error {
   Flow(#[from] FlowError),
   #[error(transparent)]
   Nlri(#[from] NlriError),
+
+  #[error(transparent)]
+  Nftables(#[from] NftablesError),
 }
 
 impl From<IpPrefixError> for Error {
@@ -277,4 +337,4 @@ impl From<IpPrefixError> for Error {
   }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;

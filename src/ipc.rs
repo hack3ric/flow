@@ -1,54 +1,52 @@
 use crate::args::RunArgs;
 use crate::bgp::route::Routes;
-use crate::sync::RwLock;
-use std::borrow::Cow;
+use crate::bgp::{Session, StateView};
 use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
-use std::path::Path;
-use std::rc::Rc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::path::{Path, PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-pub struct IpcServer<'a> {
-  path: Cow<'a, Path>,
+pub struct IpcServer {
+  path: PathBuf,
   listener: UnixListener,
-
-  config: Rc<RunArgs>,
-  routes: Rc<RwLock<Routes>>,
 }
 
-impl<'a> IpcServer<'a> {
-  pub fn new(
-    path: &'a (impl AsRef<Path> + ?Sized + 'a),
-    config: Rc<RunArgs>,
-    routes: Rc<RwLock<Routes>>,
-  ) -> anyhow::Result<Self> {
-    let path = Cow::Borrowed(path.as_ref());
-    Ok(Self { listener: UnixListener::bind(&path)?, path, config, routes })
+impl IpcServer {
+  pub fn new(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
+    let path = path.into();
+    Ok(Self { listener: UnixListener::bind(&path)?, path })
   }
 
-  pub async fn process(&mut self) -> anyhow::Result<()> {
-    let (mut stream, _addr) = self.listener.accept().await?;
-    stream.write_all(&postcard::to_stdvec_cobs(&*self.config)?).await?;
-    stream.write_all(&postcard::to_stdvec_cobs(&*self.routes.read().await)?).await?;
-    Ok(())
+  pub async fn accept(&mut self) -> anyhow::Result<UnixStream> {
+    let (stream, _addr) = self.listener.accept().await?;
+    Ok(stream)
   }
 }
 
-impl Drop for IpcServer<'_> {
+impl Drop for IpcServer {
   fn drop(&mut self) {
     let _ = std::fs::remove_file(&self.path);
   }
 }
 
-pub async fn get_states(path: impl AsRef<Path>) -> anyhow::Result<(RunArgs, Routes)> {
+impl Session {
+  pub async fn write_states(&self, writer: &mut (impl AsyncWrite + Unpin)) -> anyhow::Result<()> {
+    writer.write_all(&postcard::to_allocvec_cobs(self.config())?).await?;
+    writer.write_all(&postcard::to_allocvec_cobs(&self.state().view())?).await?;
+    writer.write_all(&postcard::to_allocvec_cobs(self.routes())?).await?;
+    Ok(())
+  }
+}
+
+pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Result<(RunArgs, StateView, Routes)> {
   let mut stream = UnixStream::connect(path).await?;
-  let mut buf = Vec::new();
-  stream.read_to_end(&mut buf).await?;
-  let (config, buf_ptr) = postcard::take_from_bytes_cobs(&mut buf)?;
-  let (routes, _) = postcard::take_from_bytes_cobs(buf_ptr)?;
-  Ok((config, routes))
+  stream.read_to_end(buf).await?;
+  let (config, buf) = postcard::take_from_bytes_cobs(buf)?;
+  let (view, buf) = postcard::take_from_bytes_cobs(buf)?;
+  let (routes, _) = postcard::take_from_bytes_cobs(buf)?;
+  Ok((config, view, routes))
 }
 
 /// Network namespace-aware socket path.

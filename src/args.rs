@@ -19,7 +19,7 @@ pub enum Command {
   Show(ShowArgs),
 }
 
-#[derive(Debug, Parser, Serialize, Deserialize)]
+#[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 pub struct RunArgs {
   /// Address to bind.
   ///

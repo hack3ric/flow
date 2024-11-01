@@ -3,6 +3,7 @@ use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use crate::nft::{flow_to_nft_stmts, Nft};
 use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
+use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
 use nftables::batch::Batch;
 use nftables::helper::NftablesError;
@@ -22,17 +23,12 @@ pub struct Routes {
   unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
   flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
   counter: u64,
-  nft: MaybeRc<Nft>,
+  nft: Nft,
 }
 
 impl Routes {
-  pub fn new(nft: Rc<Nft>) -> Self {
-    Self {
-      unicast: BTreeMap::new(),
-      flow: BTreeMap::new(),
-      counter: 0,
-      nft: MaybeRc::Rc(nft),
-    }
+  pub fn new() -> Result<Self, NftablesError> {
+    Ok(Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), counter: 0, nft: Nft::new()? })
   }
 
   pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> Result<(), NftablesError> {
@@ -83,13 +79,11 @@ impl Routes {
 
   pub fn withdraw_all(&mut self) -> Result<(), NftablesError> {
     self.unicast.clear();
-
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
     for (_, (id, _)) in flow {
       self.remove_nft_entry(id)?;
     }
-
     Ok(())
   }
 
@@ -126,48 +120,38 @@ impl Routes {
   }
 
   pub fn print(&self, verbosity: LevelFilter) {
-    fn print_series<'a, I: Iterator<Item = &'a D>, D: Display + 'a>(mut iter: I) {
-      let Some(first) = iter.next() else {
-        print!("<empty>");
-        return;
-      };
-      print!("{first}");
-      iter.for_each(|x| print!(", {x}"));
-    }
-
     fn print_info(info: &RouteInfo) {
-      println!("    {BOLD}Origin:{RESET} {}", info.origin);
+      println!("  {BOLD}Origin:{RESET} {}", info.origin);
       if !info.as_path.is_empty() {
-        print!("    {BOLD}AS Path:{RESET} ");
-        print_series(info.as_path.iter().rev());
-        println!();
+        println!("  {BOLD}AS Path:{RESET} {}", info.as_path.iter().rev().format(", "));
       }
       if !info.comm.is_empty() {
-        print!("    {BOLD}Communities:{RESET} ");
-        print_series(info.comm.iter());
-        println!();
+        println!("  {BOLD}Communities:{RESET} {}", info.comm.iter().format(", "));
       }
       if !info.ext_comm.is_empty() {
-        print!("    {BOLD}Extended Communities:{RESET} ");
-        print_series(info.ext_comm.iter());
-        println!();
+        println!(
+          "  {BOLD}Extended Communities:{RESET} {}",
+          info.ext_comm.iter().format(", "),
+        );
       }
       if !info.ipv6_ext_comm.is_empty() {
-        print!("    {BOLD}IPv6 Specific Extended Communities:{RESET} ");
-        print_series(info.ipv6_ext_comm.iter());
-        println!();
+        println!(
+          "  {BOLD}IPv6 Specific Extended Communities:{RESET} {}",
+          info.ipv6_ext_comm.iter().format(", "),
+        );
       }
       if !info.large_comm.is_empty() {
-        print!("    {BOLD}Large Communities:{RESET} ");
-        print_series(info.large_comm.iter());
-        println!();
+        println!(
+          "  {BOLD}Large Communities:{RESET} {}",
+          info.large_comm.iter().format(", "),
+        );
       }
     }
 
     if verbosity >= Level::Debug {
       for (prefix, (next_hop, info)) in &self.unicast {
         println!("{FG_BLUE_BOLD}Unicast{RESET} {prefix}");
-        println!("    {BOLD}Next Hop:{RESET} {next_hop}");
+        println!("  {BOLD}Next Hop:{RESET} {next_hop}");
         print_info(info);
         println!();
       }
@@ -176,14 +160,11 @@ impl Routes {
     for (spec, (index, info)) in &self.flow {
       println!("{FG_GREEN_BOLD}Flowspec{RESET} {spec}");
       if verbosity >= Level::Debug {
-        println!("    {BOLD}Kernel Rule ID:{RESET} {index}");
-        print!("    {BOLD}Binary Representation:{RESET} ");
+        println!("  {BOLD}Kernel Rule ID:{RESET} {index}");
+        print!("  {BOLD}Binary Representation:{RESET} ");
         let mut buf = Vec::new();
         spec.write(&mut buf);
-        for c in buf {
-          print!("{c:02x}");
-        }
-        println!();
+        println!("{:02x}", buf.iter().format(""));
       }
       print_info(info);
       println!();
