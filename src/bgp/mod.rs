@@ -23,13 +23,12 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 use strum::EnumDiscriminants;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio::time::{interval, Interval};
+use tokio::time::{interval, Duration, Instant, Interval};
 use State::*;
 
 /// A (currently passive only) BGP session.
@@ -132,39 +131,33 @@ impl Session {
             Message::Keepalive.send(stream).await?;
             replace_with_or_abort(&mut self.state, |this| {
               let OpenSent { stream } = this else { unreachable!() };
-              OpenConfirm { stream, remote_open }
+              let hold_time = min(self.config.hold_time, remote_open.hold_time);
+              let timers = Timers::new(hold_time);
+              OpenConfirm { stream, remote_open, timers }
             });
           }
         }
         other => bad_type(other, stream).await?,
       },
-      OpenConfirm { stream, .. } => match Message::read(stream).await? {
-        Message::Keepalive => {
-          replace_with_or_abort(&mut self.state, |this| {
-            let OpenConfirm { stream, remote_open } = this else {
-              unreachable!()
-            };
-            let hold_time = min(self.config.hold_time, remote_open.hold_time);
-            let keepalive_time = hold_time / 3;
-            let hold_timer = (hold_time != 0)
-              .then(|| Duration::from_secs(hold_time.into()))
-              .map(|x| (x, Instant::now() + x));
-            let keepalive_timer = (keepalive_time != 0)
-              .then(|| Duration::from_secs(keepalive_time.into()))
-              .map(|x| (x, Instant::now() + x));
-            Established {
-              stream,
-              remote_open,
-              clock: interval(Duration::from_secs(gcd(hold_time, keepalive_time).into())),
-              hold_timer,
-              keepalive_timer,
-            }
-          });
-          info!("established");
+      OpenConfirm { stream, timers, .. } => select! {
+        msg = Message::read(stream) => match msg? {
+          Message::Keepalive => {
+            replace_with_or_abort(&mut self.state, |this| {
+              let OpenConfirm { stream, remote_open, mut timers } = this else {
+                unreachable!()
+              };
+              timers.as_mut().map(Timers::update_hold);
+              Established { stream, remote_open, timers }
+            });
+            info!("established");
+          }
+          other => bad_type(other, stream).await?,
+        },
+        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
+          timers.as_mut().unwrap().process_tick(inst, stream).await?;
         }
-        other => bad_type(other, stream).await?,
       },
-      Established { stream, clock, hold_timer, keepalive_timer, .. } => select! {
+      Established { stream, timers, .. } => select! {
         msg = Message::read(stream) => {
           match msg? {
             Message::Update(msg) => if let Some((afi, safi)) = msg.is_end_of_rib() {
@@ -187,23 +180,12 @@ impl Session {
                   .collect::<Result<(), _>>()?;
               }
             },
-            Message::Keepalive => if let Some((dur, next)) = hold_timer {
-              *next = Instant::now() + *dur;
-            },
+            Message::Keepalive => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
             other => bad_type(other, stream).await?,
           };
         }
-        _ = clock.tick() => {
-          if let &mut Some((_, next)) = hold_timer {
-            if next <= Instant::now() {
-              Notification::HoldTimerExpired.send_and_return(stream).await?;
-            }
-          }
-          if let &mut Some((_, next)) = keepalive_timer {
-            if next <= Instant::now() {
-              Message::Keepalive.send(stream).await?;
-            }
-          }
+        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
+          timers.as_mut().unwrap().process_tick(inst, stream).await?;
         }
       },
     }
@@ -222,14 +204,12 @@ pub enum State {
   OpenConfirm {
     stream: BufReader<TcpStream>,
     remote_open: OpenMessage<'static>,
-    // TODO: timer here
+    timers: Option<Timers>,
   },
   Established {
     stream: BufReader<TcpStream>,
     remote_open: OpenMessage<'static>,
-    clock: Interval,
-    hold_timer: Option<(Duration, Instant)>,
-    keepalive_timer: Option<(Duration, Instant)>,
+    timers: Option<Timers>,
   },
 }
 
@@ -255,6 +235,48 @@ impl State {
         remote_addr: stream.get_ref().peer_addr().ok(),
       },
     }
+  }
+}
+
+#[derive(Debug)]
+pub struct Timers {
+  clock: Interval,
+  hold_timer: (Duration, Instant),
+  keepalive_timer: (Duration, Instant),
+}
+
+impl Timers {
+  pub fn new(hold_time: u16) -> Option<Self> {
+    (hold_time != 0).then(|| {
+      let now = Instant::now();
+      let keepalive_time = hold_time / 3;
+      let hold = Duration::from_secs(hold_time.into());
+      let keepalive = Duration::from_secs(keepalive_time.into());
+      Self {
+        clock: interval(Duration::from_secs(u64::from(gcd(hold_time, keepalive_time) / 2))),
+        hold_timer: (hold, now + hold),
+        keepalive_timer: (keepalive, now + keepalive),
+      }
+    })
+  }
+
+  pub fn update_hold(&mut self) {
+    let (dur, next) = &mut self.hold_timer;
+    *next = Instant::now() + *dur;
+  }
+
+  pub async fn tick(&mut self) -> Instant {
+    self.clock.tick().await
+  }
+
+  pub async fn process_tick(&mut self, inst: Instant, stream: &mut (impl AsyncWrite + Unpin)) -> Result<()> {
+    if self.hold_timer.1 <= inst {
+      Notification::HoldTimerExpired.send_and_return(stream).await?;
+    }
+    if self.keepalive_timer.1 <= inst {
+      Message::Keepalive.send(stream).await?;
+    }
+    Ok(())
   }
 }
 

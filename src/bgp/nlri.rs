@@ -25,7 +25,8 @@ pub struct Nlri {
 #[strum_discriminants(name(NlriKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum NlriContent {
-  Unicast { prefixes: BTreeSet<IpPrefix>, next_hop: NextHop } = 1, // TODO: probably use LPM trie
+  // We can probably use LPM trie, but B-tree is fine for now
+  Unicast { prefixes: BTreeSet<IpPrefix>, next_hop: NextHop } = 1,
   Flow { specs: SmallVec<[Flowspec; 4]> } = 133,
 }
 

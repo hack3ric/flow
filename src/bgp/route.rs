@@ -172,20 +172,25 @@ impl Routes {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouteInfo<'a> {
-  pub(crate) origin: Origin,
+  pub origin: Origin,
 
   /// AS path, stored in reverse for easy prepending.
-  pub(crate) as_path: Cow<'a, [u32]>,
+  pub as_path: Cow<'a, [u32]>,
 
-  pub(crate) comm: BTreeSet<Community>,
-  pub(crate) ext_comm: BTreeSet<ExtCommunity>,
-  pub(crate) ipv6_ext_comm: BTreeSet<Ipv6ExtCommunity>,
-  pub(crate) large_comm: BTreeSet<LargeCommunity>,
+  pub comm: BTreeSet<Community>,
+  pub ext_comm: BTreeSet<ExtCommunity>,
+  pub ipv6_ext_comm: BTreeSet<Ipv6ExtCommunity>,
+  pub large_comm: BTreeSet<LargeCommunity>,
+
+  pub med: Option<u32>,
+  pub local_pref: Option<u32>,
+  pub atomic_aggregate: bool,
+  pub aggregator: Option<(u16, u32)>,
 
   /// Transitive but unrecognized path attributes.
-  pub(crate) other_attrs: BTreeMap<u8, Cow<'a, [u8]>>,
+  pub other_attrs: BTreeMap<u8, Cow<'a, [u8]>>,
 }
 
 impl RouteInfo<'_> {
@@ -214,6 +219,12 @@ impl Display for Origin {
       Self::Egp => f.write_str("EGP"),
       Self::Incomplete => f.write_str("incomplete"),
     }
+  }
+}
+
+impl Default for Origin {
+  fn default() -> Self {
+    Self::Incomplete
   }
 }
 

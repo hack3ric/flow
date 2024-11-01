@@ -7,7 +7,7 @@ use crate::net::{Afi, IpPrefix, IpPrefixError};
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -159,6 +159,7 @@ impl OpenMessage<'static> {
     msg.my_as = reader.read_u16().await?.into();
     msg.hold_time = reader.read_u16().await?;
     msg.bgp_id = reader.read_u32().await?;
+    let mut supports_4b_asn = false;
 
     let params_len = reader.read_u8().await?;
     let mut reader = reader.take(params_len.into());
@@ -177,8 +178,8 @@ impl OpenMessage<'static> {
                 if cap_len != 4 {
                   return Err(Notification::Open(Unspecific).into());
                 }
+                supports_4b_asn = true;
                 msg.my_as = cap_reader.read_u32().await?;
-                // TODO: require peer to support 4b ASN
               }
               _ => {
                 let mut cap_buf = vec![0; cap_len.into()];
@@ -195,7 +196,9 @@ impl OpenMessage<'static> {
         }
       }
     }
-    Ok(msg)
+    supports_4b_asn
+      .then_some(msg)
+      .ok_or_else(|| Notification::Open(Unspecific).into())
   }
 }
 
@@ -275,7 +278,7 @@ pub enum PathAttr {
 // Strictly, according to RFC 7606 Section 5.1, one UPDATE message MUST NOT
 // contain more than one kind of (un)reachability information. However we allow
 // it here for compatibility reasons stated in the same section.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UpdateMessage<'a> {
   pub withdrawn: Option<Nlri>,
   pub old_withdrawn: Option<Nlri>,
@@ -318,21 +321,7 @@ impl UpdateMessage<'static> {
   }
 
   async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> super::Result<Self> {
-    let mut result = Self {
-      withdrawn: None,
-      old_withdrawn: None,
-      nlri: None,
-      old_nlri: None,
-      route_info: RouteInfo {
-        origin: Origin::Incomplete,
-        as_path: Cow::Borrowed(&[]),
-        comm: BTreeSet::new(),
-        ext_comm: BTreeSet::new(),
-        ipv6_ext_comm: BTreeSet::new(),
-        large_comm: BTreeSet::new(),
-        other_attrs: BTreeMap::new(),
-      },
-    };
+    let mut result = Self::default();
 
     let withdrawn_len = reader.read_u16().await?;
     let mut withdrawn_reader = (&mut reader).take(withdrawn_len.into());
@@ -404,7 +393,7 @@ impl UpdateMessage<'static> {
           if len % 4 != 2 {
             return Err(Notification::Update(MalformedAsPath).into());
           }
-          let seg_type = pattrs_reader.read_u8().await?; // TODO: check seg_type
+          let seg_type = pattrs_reader.read_u8().await?;
           if seg_type != AS_SEQUENCE {
             error!("unknown AS_PATH segment type: {seg_type}");
             return Err(Notification::Update(MalformedAsPath).into());
@@ -436,28 +425,28 @@ impl UpdateMessage<'static> {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
           }
-          pattrs_reader.read_u32().await?; // TODO: use this value
+          result.route_info.med = Some(pattrs_reader.read_u32().await?);
         }
         Some(PathAttr::LocalPref) => {
           if len != 4 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
           }
-          pattrs_reader.read_u32().await?; // TODO: use this value
+          result.route_info.local_pref = Some(pattrs_reader.read_u32().await?);
         }
         Some(PathAttr::AtomicAggregate) => {
           if len != 0 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
           }
+          result.route_info.atomic_aggregate = true;
         }
         Some(PathAttr::Aggregator) => {
           if len != 6 {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
             return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
           }
-          pattrs_reader.read_u16().await?; // TODO: use this value
-          pattrs_reader.read_u32().await?; // TODO: use this value
+          result.route_info.aggregator = Some((pattrs_reader.read_u16().await?, pattrs_reader.read_u32().await?));
         }
 
         // Known, optional, transitive attributes
@@ -497,16 +486,15 @@ impl UpdateMessage<'static> {
           }
           let mut opt_buf = vec![0; len.into()];
           pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.route_info.ipv6_ext_comm = if let Some(comm) = opt_buf
+          let Some(comm) = opt_buf
             .chunks_exact(20)
             .map(|x| Ipv6ExtCommunity::from_bytes(x.try_into().unwrap()))
             .collect()
-          {
-            comm
-          } else {
+          else {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, opt_buf).await?;
             return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          }
+          };
+          result.route_info.ipv6_ext_comm = comm;
         }
         Some(PathAttr::LargeCommunities) => {
           if len % 12 != 0 {
