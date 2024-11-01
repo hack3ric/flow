@@ -25,7 +25,7 @@ Run Flow with default settings that listens to wildcard with port 179, local AS 
 Allow only local AS (IBGP) and IPv6 loopback incoming IP for peer, and change listening port to 1179:
 
 ```console
-# flow run -b [::1]:1179 -l 65001 -r 65001 -a ::1/128
+# flow run -b [::]:1179 -l 65001 -r 65001 -a ::1/128
 ```
 
 The configuration options can be stored in a file and passed directly to Flow using the `-f` option:
@@ -41,9 +41,29 @@ The configuration options can be stored in a file and passed directly to Flow us
 # Empty lines and lines starting with '#' are ignored.
 
 bind=[::1]:1179
+bind=127.0.0.1:1179
 local-as=65001
 remote-as=65001
-allowed-ips=::1/128
+
+# The prefix length can be ignored if it contains only one IP
+allowed-ips=::1
+allowed-ips=127.0.0.0/8
+```
+
+Configure the remote BGP speaker so it connects and sends flowspecs to Flow. You may need to enable multihop if they are connecting through loopback. For example in BIRD:
+
+```
+flow4 table myflow4;
+flow6 table myflow6;
+
+protocol bgp flow {
+  local port 1180 as 65001;
+  neighbor ::1 port 1179 as 65001;
+  multihop;
+
+  flow4 { table myflow4; import none; export all; };
+  flow6 { table myflow6; import none; export all; };
+}
 ```
 
 Show information of currently running Flow instance:
