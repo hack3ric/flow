@@ -92,7 +92,7 @@ impl Flowspec {
     let mut inner = BTreeSet::<ComponentStore>::new();
     while let Some(comp) = Component::read(&mut flow_reader, afi).await? {
       if inner.last().map(|x| x.0.kind() >= comp.kind()).unwrap_or(false) {
-        return Err(FlowError::Unsorted.into()); // TODO: also probably duplicate
+        return Err(FlowError::Unsorted.into()); // also probably duplicate
       }
       if !comp.is_valid(afi) {
         return Err(FlowError::Invalid.into());

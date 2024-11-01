@@ -219,7 +219,7 @@ impl Display for Origin {
 
 /// RFC 1997 communities.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Community([u16; 2]);
+pub struct Community(pub [u16; 2]);
 
 impl Community {
   pub fn from_bytes(bytes: [u8; 4]) -> Self {
@@ -244,7 +244,7 @@ impl Display for Community {
 
 /// RFC 4360/5668 extended communities.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ExtCommunity([u8; 8]);
+pub struct ExtCommunity(pub [u8; 8]);
 
 impl ExtCommunity {
   pub fn from_bytes(bytes: [u8; 8]) -> Self {
@@ -505,7 +505,7 @@ impl Display for TrafficFilterAction {
 
 /// RFC 8092 large communities.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct LargeCommunity([u32; 3]);
+pub struct LargeCommunity(pub [u32; 3]);
 
 impl LargeCommunity {
   pub fn from_bytes(bytes: [u8; 12]) -> Self {

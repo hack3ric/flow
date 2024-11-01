@@ -62,7 +62,6 @@ impl Message<'_> {
 impl Message<'static> {
   pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
     let mut header = [0; 19];
-    // TODO: conn closed if early eof when reading preamble
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
       return Err(Notification::Header(ConnNotSynced).into());
@@ -646,7 +645,68 @@ impl MessageSend for UpdateMessage<'_> {
         buf.extend(next_hop.octets());
       }
 
-      // TODO: communities
+      if !self.route_info.comm.is_empty() {
+        buf.extend([PF_OPTIONAL | PF_TRANSITIVE | PF_EXT_LEN, PathAttr::Communities as u8]);
+        buf.extend(
+          u16::try_from(self.route_info.comm.len() * 4)
+            .expect("communities length should fit in u16")
+            .to_be_bytes(),
+        );
+        buf.extend(
+          (self.route_info.comm.iter())
+            .map(|x| x.0)
+            .flatten()
+            .map(u16::to_be_bytes)
+            .flatten(),
+        );
+      }
+
+      if !self.route_info.ext_comm.is_empty() {
+        buf.extend([PF_OPTIONAL | PF_TRANSITIVE | PF_EXT_LEN, PathAttr::ExtCommunities as u8]);
+        buf.extend(
+          u16::try_from(self.route_info.ext_comm.len() * 8)
+            .expect("extended communities length should fit in u16")
+            .to_be_bytes(),
+        );
+        buf.extend(self.route_info.ext_comm.iter().filter(|x| x.is_transitive()).flat_map(|x| x.0));
+      }
+
+      if !self.route_info.ipv6_ext_comm.is_empty() {
+        buf.extend([
+          PF_OPTIONAL | PF_TRANSITIVE | PF_EXT_LEN,
+          PathAttr::Ipv6ExtCommunities as u8,
+        ]);
+        buf.extend(
+          u16::try_from(self.route_info.ipv6_ext_comm.len() * 20)
+            .expect("IPv6 extended communities length should fit in u16")
+            .to_be_bytes(),
+        );
+        buf.extend(
+          (self.route_info.ipv6_ext_comm.iter())
+            .filter(|x| x.is_transitive())
+            .flat_map(|x| {
+              [x.kind, x.sub_kind]
+                .into_iter()
+                .chain(x.global_admin.octets())
+                .chain(x.local_admin.to_be_bytes())
+            }),
+        );
+      }
+
+      if !self.route_info.large_comm.is_empty() {
+        buf.extend([
+          PF_OPTIONAL | PF_TRANSITIVE | PF_EXT_LEN,
+          PathAttr::LargeCommunities as u8,
+        ]);
+        buf.extend(
+          u16::try_from(self.route_info.large_comm.len() * 12)
+            .expect("large communities length should fit in u16")
+            .to_be_bytes(),
+        );
+        buf.extend(self.route_info.large_comm.iter().flat_map(|x| x.0).flat_map(u32::to_be_bytes));
+      }
+
+      self.route_info.other_attrs.values().for_each(|x| buf.extend(&x[..]));
     });
 
     // BGP-4 NLRI

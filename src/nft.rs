@@ -169,7 +169,6 @@ impl Flowspec {
 
 impl Component {
   fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch, ToNftStmtError> {
-    // TODO: simple case optimization
     use Component::*;
     use Transport::*;
 
@@ -205,7 +204,6 @@ impl Component {
       IcmpCode(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "code"), ops, 0xff)?,
       IcmpType(_) | IcmpCode(_) => return Err(ToNftStmtError(())),
       TcpFlags(ops) => {
-        // TODO: simple case: one single bit op
         let tt = ops.to_truth_table();
         let tt = tt.shrink(0b11111111);
         if tt.is_always_false() {
@@ -234,7 +232,6 @@ impl Component {
       }
       Dscp(ops) => range_stmt_branch(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?,
       Fragment(ops) => {
-        // TODO: reduce clone
         // int frag_op_value = [LF,FF,IsF,DF]
         // possible: [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
         let mask = (afi == Afi::Ipv4).then_some(0b1111).unwrap_or(0b1110);
@@ -567,19 +564,18 @@ impl Ops<Bitmask> {
     let mut buf = TruthTable::always_false();
     let mut cur = self.0[0].to_truth_table();
 
-    // TODO: reduce clones
     for op in &self.0[1..] {
       if op.is_and() {
         if cur.is_always_false() {
           continue;
         }
-        cur = cur.and(&op.to_truth_table()).into_owned();
+        cur = cur.and(op.to_truth_table());
       } else {
-        buf = buf.or(&cur).into_owned();
+        buf = buf.or(cur);
         cur = op.to_truth_table();
       }
     }
-    buf = buf.or(&cur).into_owned();
+    buf = buf.or(cur);
     buf
   }
 }
@@ -671,7 +667,6 @@ struct TruthTable {
   truth: BTreeSet<u64>,
 }
 
-// TODO: reduce clone
 impl TruthTable {
   pub fn always_true() -> Self {
     Self { mask: 0, inv: false, truth: BTreeSet::new() }
@@ -689,35 +684,35 @@ impl TruthTable {
     !self.inv && self.truth.is_empty() || self.inv && self.truth.len() == 1 << self.mask.count_ones()
   }
 
-  pub fn and<'a>(&'a self, other: &'a Self) -> Cow<'a, Self> {
+  pub fn and(self, other: Self) -> Self {
     if self.is_always_false() || other.is_always_false() {
-      Cow::Owned(Self::always_false())
+      Self::always_false()
     } else if self.is_always_true() {
-      Cow::Borrowed(other)
+      other
     } else if other.is_always_true() {
-      Cow::Borrowed(self)
+      self
     } else {
       match (self.inv, other.inv) {
-        (false, false) => Cow::Owned(self.truth_intersection(other, false)),
-        (true, true) => Cow::Owned(self.truth_union(other, true)),
-        (false, true) => Cow::Owned(self.truth_difference(other, false)),
+        (false, false) => self.truth_intersection(&other, false),
+        (true, true) => self.truth_union(&other, true),
+        (false, true) => self.truth_difference(&other, false),
         (true, false) => other.and(self),
       }
     }
   }
 
-  pub fn or<'a>(&'a self, other: &'a Self) -> Cow<'a, Self> {
+  pub fn or(self, other: Self) -> Self {
     if self.is_always_true() || other.is_always_true() {
-      Cow::Owned(Self::always_true())
+      Self::always_true()
     } else if self.is_always_false() {
-      Cow::Borrowed(other)
+      other
     } else if other.is_always_false() {
-      Cow::Borrowed(self)
+      self
     } else {
       match (self.inv, other.inv) {
-        (false, false) => Cow::Owned(self.truth_union(other, false)),
-        (true, true) => Cow::Owned(self.truth_intersection(other, true)),
-        (false, true) => Cow::Owned(other.truth_difference(self, true)),
+        (false, false) => self.truth_union(&other, false),
+        (true, true) => self.truth_intersection(&other, true),
+        (false, true) => other.truth_difference(&self, true),
         (true, false) => other.or(self),
       }
     }
@@ -866,7 +861,7 @@ mod tests {
   fn test_truth_table() {
     let op1 = Op::all(0b0100);
     let op2 = Op::not_all(0b1010);
-    let tt = op1.to_truth_table().or(&op2.to_truth_table()).into_owned();
+    let tt = op1.to_truth_table().or(op2.to_truth_table());
     println!("{}", tt);
   }
 }
