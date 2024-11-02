@@ -1,3 +1,2 @@
 [target.mipsel-unknown-linux-musl]
 build-std = true
-env = { passthrough = ["RUSTC_BOOTSTRAP=1"] }
