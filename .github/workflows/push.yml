@@ -6,7 +6,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_BOOTSTRAP: 1
 
 jobs:
   test:
@@ -18,10 +17,10 @@ jobs:
         target:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
           - armv7-unknown-linux-musleabihf
-          - mipsel-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - uses: cargo-bins/cargo-binstall@main
