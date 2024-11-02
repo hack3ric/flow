@@ -45,7 +45,7 @@ bind=127.0.0.1:1179
 local-as=65001
 remote-as=65001
 
-# The prefix length can be ignored if it contains only one IP
+# The prefix length can be omitted if it contains only one IP
 allowed-ips=::1
 allowed-ips=127.0.0.0/8
 ```
