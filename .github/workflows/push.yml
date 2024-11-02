@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install cross-rs
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross
       - name: Build on ${{ matrix.target }}
         run: cross build --release --target=${{ matrix.target }}
       - name: Upload
