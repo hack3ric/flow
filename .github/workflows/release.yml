@@ -1,0 +1,44 @@
+name: Release actions
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build release binary for ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - mipsel-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross-rs
+        run: cargo install cross
+      - name: Build on ${{ matrix.target }}
+        run: cross build --release --target=${{ matrix.target }} --verbose
+      - name: Upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          _version="$(sed 's|refs/tags/v||' <(echo ${{ github.ref }}))"
+          _archive="flow-${_version}-${{ matrix.target }}"
+          mkdir "$_archive"
+          cp target/${{ matrix.target }}/release/flow "$_archive"
+          cp README.md LICENSE "$_archive"
+          tar cJvf "$_archive.tar.xz" "$_archive"
+          sha256sum "$_archive.tar.xz" > "$_archive.tar.xz.sha256"
+          gh release upload "v$_version" "$_archive.tar.xz"{,.sha256}

@@ -9,33 +9,36 @@ env:
 
 jobs:
   test:
-    name: Run tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: cargo build --verbose
-      - name: Run tests
-        run: cargo test --verbose
-  build:
-    name: Build release binary for ${{ matrix.target }}
+    name: Run tests for ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - mipsel-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
       - name: Install cross-rs
         run: cargo install cross
-      - name: Build on ${{ matrix.target }}
-        run: cross build --release --target=${{ matrix.target }}
-      - name: Upload
+      - name: Build debug binary
+        run: cross build --target=${{ matrix.target }} --verbose
+      - name: Run tests
+        run: cross test --target=${{ matrix.target }} --verbose
+      - name: Build release binary
+        run: cross build --release --target=${{ matrix.target }} --verbose
+      - name: Upload debug binary
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flow-${{ matrix.target }}
+          name: flow-debug-${{ matrix.target }}
+          path: target/${{ matrix.target }}/debug/flow
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: flow-release-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/flow
