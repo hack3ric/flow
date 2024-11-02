@@ -23,8 +23,9 @@ jobs:
           - mipsel-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
+      - uses: cargo-bins/cargo-binstall@main
       - name: Install cross-rs
-        run: cargo install cross
+        run: cargo binstall cross
       - name: Build debug binary
         run: cross build --target=${{ matrix.target }} --verbose
       - name: Run tests
