@@ -17,10 +17,11 @@ use futures::FutureExt;
 use ipc::{get_sock_path, IpcServer};
 use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
-use std::fs::File;
+use std::fs::{create_dir_all, File};
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::process::ExitCode;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
@@ -43,17 +44,20 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     }
   }
 
-  let bind = args.bind.iter().format(", ");
+  let bind = args.bind.clone().into_iter().format(", ");
   let listener = TcpListener::bind(&args.bind[..])
     .await
     .with_context(|| format!("failed to bind to {bind:?}"))?;
 
   let local_as = args.local_as;
   let router_id = args.router_id;
-  info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
   let mut bgp = Session::new(args)?;
+
+  create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
   let mut ipc = IpcServer::new(sock_path).with_context(|| format!("failed to create socket at {sock_path}"))?;
+
+  info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
   let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
   let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
