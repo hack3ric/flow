@@ -41,13 +41,11 @@ The configuration options can be stored in a file and passed directly to Flow us
 # Empty lines and lines starting with '#' are ignored.
 
 bind=[::1]:1179
-bind=127.0.0.1:1179
 local-as=65001
 remote-as=65001
 
 # The prefix length can be omitted if it contains only one IP
 allowed-ips=::1
-allowed-ips=127.0.0.0/8
 ```
 
 Configure the remote BGP speaker so it connects and sends flowspecs to Flow. You may need to enable multihop if they are connecting through loopback. For example in BIRD:
