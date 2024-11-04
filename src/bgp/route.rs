@@ -23,12 +23,12 @@ pub struct Routes {
   unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
   flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
   counter: u64,
-  nft: Nft,
+  nft: Option<Nft>,
 }
 
 impl Routes {
-  pub fn new() -> Result<Self, NftablesError> {
-    Ok(Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), counter: 0, nft: Nft::new()? })
+  pub fn new(nft: Option<Nft>) -> Self {
+    Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), counter: 0, nft }
   }
 
   pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> Result<(), NftablesError> {
@@ -50,7 +50,9 @@ impl Routes {
           let id = self.counter;
           self.counter += 1;
           let mut batch = Batch::new();
-          rules.into_iter().for_each(|s| batch.add(self.nft.make_new_rule(s, Some(id))));
+          if let Some(nft) = &self.nft {
+            rules.into_iter().for_each(|s| batch.add(nft.make_new_rule(s, Some(id))));
+          }
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
@@ -60,7 +62,9 @@ impl Routes {
               self.remove_nft_entry(id)?
             }
           }
-          self.nft.apply_ruleset(batch)?;
+          if let Some(nft) = &self.nft {
+            nft.apply_ruleset(batch)?;
+          }
         }
       }
     }
@@ -108,15 +112,18 @@ impl Routes {
       comment: Option<String>,
       handle: u32,
     }
-    let mut batch = Batch::new();
-    let s = self.nft.get_current_ruleset_raw()?;
-    let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
-    nftables
-      .into_iter()
-      .filter_map(|x| x.rule)
-      .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
-      .for_each(|x| batch.delete(self.nft.make_rule_handle(x.handle)));
-    self.nft.apply_ruleset(batch)
+    if let Some(nft) = &self.nft {
+      let mut batch = Batch::new();
+      let s = nft.get_current_ruleset_raw()?;
+      let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
+      nftables
+        .into_iter()
+        .filter_map(|x| x.rule)
+        .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
+        .for_each(|x| batch.delete(nft.make_rule_handle(x.handle)));
+      nft.apply_ruleset(batch)?;
+    }
+    Ok(())
   }
 
   pub fn print(&self, verbosity: LevelFilter) {

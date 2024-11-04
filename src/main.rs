@@ -44,8 +44,8 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     }
   }
 
-  let bind = args.bind.clone().into_iter().format(", ");
-  let listener = TcpListener::bind(&args.bind[..])
+  let bind = args.bind;
+  let listener = TcpListener::bind(&bind)
     .await
     .with_context(|| format!("failed to bind to {bind:?}"))?;
 
@@ -106,9 +106,8 @@ async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyho
   let (config, state, routes) = ipc::get_states(sock_path, &mut buf)
     .await
     .with_context(|| format!("failed to connect to {sock_path}"))?;
-  let bind = config.bind.iter().format(", ");
 
-  println!("{FG_GREEN_BOLD}Flow{RESET} listening to {bind:?}");
+  println!("{FG_GREEN_BOLD}Flow{RESET} listening to {:?}", config.bind);
   println!("  {BOLD}State:{RESET} {:?}", state.kind());
   println!("  {BOLD}Local AS:{RESET} {}", config.local_as);
   println!("  {BOLD}Local Router ID:{RESET} {}", config.router_id);
@@ -171,7 +170,7 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();
-  let sock_path = get_sock_path("/run/flow").unwrap();
+  let sock_path = get_sock_path(&cli.run_dir).unwrap();
   env_logger::builder()
     .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)

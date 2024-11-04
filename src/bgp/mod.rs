@@ -5,6 +5,7 @@ pub mod route;
 
 use crate::args::RunArgs;
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
+use crate::nft::Nft;
 use flow::FlowError;
 use futures::future::pending;
 use log::{debug, error, info, warn};
@@ -57,8 +58,11 @@ pub struct Session {
 }
 
 impl Session {
-  pub fn new(config: RunArgs) -> Result<Self> {
-    Ok(Self { config, state: Active, routes: Routes::new()? })
+  pub fn new(c: RunArgs) -> Result<Self> {
+    let nft = (!c.dry_run)
+      .then(|| Nft::new(c.table.clone(), c.chain.clone(), c.hooked, c.priority))
+      .transpose()?;
+    Ok(Self { config: c, state: Active, routes: Routes::new(nft) })
   }
 
   pub fn start(&mut self) {

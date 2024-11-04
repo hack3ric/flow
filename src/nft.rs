@@ -29,13 +29,11 @@ pub struct Nft {
 }
 
 impl Nft {
-  pub fn new() -> Result<Self, NftablesError> {
-    Self::with_names("flowspecs", "flowspecs")
-  }
-
-  pub fn with_names(
+  pub fn new(
     table: impl Into<Cow<'static, str>>,
     chain: impl Into<Cow<'static, str>>,
+    hooked: bool,
+    priority: i32,
   ) -> Result<Self, NftablesError> {
     let table = table.into();
     let chain = chain.into();
@@ -49,6 +47,9 @@ impl Nft {
       family: types::NfFamily::INet,
       table: table.to_string(),
       name: chain.to_string(),
+      _type: hooked.then_some(types::NfChainType::Filter),
+      hook: hooked.then_some(types::NfHook::Input),
+      prio: hooked.then_some(priority),
       ..Default::default()
     }));
     apply_ruleset(&batch.to_nftables(), None, None)?;
@@ -57,9 +58,10 @@ impl Nft {
 
   fn exit(&self) -> Result<(), NftablesError> {
     let mut batch = Batch::new();
-    batch.delete(schema::NfListObject::Table(schema::Table {
+    batch.delete(schema::NfListObject::Chain(schema::Chain {
       family: types::NfFamily::INet,
-      name: self.table.to_string(),
+      table: self.table.to_string(),
+      name: self.chain.to_string(),
       ..Default::default()
     }));
     apply_ruleset(&batch.to_nftables(), None, None)

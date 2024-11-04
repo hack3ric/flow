@@ -269,8 +269,7 @@ impl MessageSend for OpenMessage<'_> {
         if !self.ext_next_hop.is_empty() {
           buf.extend([
             CAP_EXT_NEXT_HOP,
-            u8::try_from(self.ext_next_hop.len() * 6)
-              .expect("extended next hop capability length should fit in u8"),
+            u8::try_from(self.ext_next_hop.len() * 6).expect("extended next hop capability length should fit in u8"),
           ]);
           self.ext_next_hop.iter().for_each(|&(a, b, c)| {
             buf.extend(u16::to_be_bytes(a as _));

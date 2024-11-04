@@ -2,6 +2,7 @@ use crate::net::IpPrefix;
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity::{InfoLevel, Verbosity};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -11,6 +12,10 @@ pub struct Cli {
   pub command: Command,
   #[command(flatten)]
   pub verbosity: Verbosity<InfoLevel>,
+
+  /// Path of runtime directory.
+  #[arg(long, global = true, default_value_t = Cow::Borrowed("/run/flow"))]
+  pub run_dir: Cow<'static, str>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -22,15 +27,13 @@ pub enum Command {
 #[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 pub struct RunArgs {
   /// Address to bind.
-  ///
-  /// May be specified more than once.
   #[arg(
     short, long,
     value_name = "ADDR:PORT",
     value_parser = parse_bgp_bind,
-    default_values_t = [SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 179)],
+    default_value_t = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 179),
   )]
-  pub bind: Vec<SocketAddr>,
+  pub bind: SocketAddr,
 
   /// Local AS.
   #[arg(short, long, value_name = "ASN", default_value_t = 65000)]
@@ -56,8 +59,38 @@ pub struct RunArgs {
   pub allowed_ips: Vec<IpPrefix>,
 
   /// Time in seconds before shutdown since the last received keepalive.
+  ///
+  /// Keepalive time is set to 1/3 of hold time. Set 0 to disable keepalive
+  /// mechanism. Hold time of 1 or 2 are invalid and will be rejected.
   #[arg(short = 'H', long, default_value_t = 240)]
   pub hold_time: u16,
+
+  /// Do not apply flowspecs to kernel settings.
+  #[arg(short, long)]
+  pub dry_run: bool,
+
+  /// nftables table name.
+  ///
+  /// The table WILL NOT be automatically deleted when the program exits.
+  #[arg(long, default_value_t = Cow::Borrowed("flowspecs"))]
+  pub table: Cow<'static, str>,
+
+  /// nftables chain name.
+  ///
+  /// The chain WILL be automatically deleted when the program exits.
+  #[arg(long, default_value_t = Cow::Borrowed("flowspecs"))]
+  pub chain: Cow<'static, str>,
+
+  /// Attach flowspec rules to nftables input hook.
+  ///
+  /// If not set, the nftables rule must be `jump`ed or `goto`ed from a base
+  /// (hooked) chain in the same table to take effect.
+  #[arg(long)]
+  pub hooked: bool,
+
+  /// Hook priority.
+  #[arg(long, default_value_t = 0)]
+  pub priority: i32,
 
   /// File to read arguments from.
   ///
