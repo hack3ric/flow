@@ -4,6 +4,7 @@ use super::route::{Origin, RouteInfo};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
+use futures::TryFutureExt;
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -381,8 +382,7 @@ impl UpdateMessage<'static> {
     let pattrs_len = reader.read_u16().await?;
     let mut pattrs_reader = (&mut reader).take(pattrs_len.into());
 
-    while let Ok(x) = pattrs_reader.read_u16().await {
-      let [flags, kind] = x.to_be_bytes();
+    while let Ok([flags, kind]) = pattrs_reader.read_u16().map_ok(u16::to_be_bytes).await {
       let len: u16 = if flags & PF_EXT_LEN == 0 {
         pattrs_reader.read_u8().await?.into()
       } else {
@@ -433,25 +433,26 @@ impl UpdateMessage<'static> {
         }
         Some(PathAttr::AsPath) if len == 0 => {}
         Some(PathAttr::AsPath) => {
-          if len % 4 != 2 {
-            return Err(Notification::Update(MalformedAsPath).into());
-          }
-          let seg_type = pattrs_reader.read_u8().await?;
-          if seg_type != AS_SEQUENCE {
-            error!("unknown AS_PATH segment type: {seg_type}");
-            return Err(Notification::Update(MalformedAsPath).into());
-          }
-          let as_len = pattrs_reader.read_u8().await?;
-          if u16::from(as_len) != len / 4 {
-            return Err(Notification::Update(MalformedAsPath).into());
-          }
+          let mut seg_reader = (&mut pattrs_reader).take(len.into());
           let mut as_path = Vec::new();
-          let mut as_path_reader = (&mut pattrs_reader).take((as_len * 4).into());
-          while let Ok(asn) = as_path_reader.read_u32().await {
-            as_path.push(asn);
-          }
-          if as_path.len() != as_len as usize {
-            return Err(Notification::Update(MalformedAsPath).into());
+          while let Ok([seg_type, as_len]) = seg_reader.read_u16().map_ok(u16::to_be_bytes).await {
+            // TODO: confederations
+            if seg_type != AS_SEQUENCE {
+              error!("unknown AS_PATH segment type: {seg_type}");
+              return Err(Notification::Update(MalformedAsPath).into());
+            }
+            if u16::from(as_len) != len / 4 {
+              return Err(Notification::Update(MalformedAsPath).into());
+            }
+            let mut as_path_reader = (&mut seg_reader).take((as_len * 4).into());
+            let mut count = 0;
+            while let Ok(asn) = as_path_reader.read_u32().await {
+              as_path.push(asn);
+              count += 1;
+            }
+            if count != as_len {
+              return Err(Notification::Update(MalformedAsPath).into());
+            }
           }
           as_path.reverse();
           result.route_info.as_path = as_path.into();
@@ -666,9 +667,27 @@ impl MessageSend for UpdateMessage<'_> {
 
       // Path attributes
       buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.route_info.origin as u8]);
-      let as_path_len = u8::try_from(self.route_info.as_path.len() * 4).expect("AS path length should fit in u8");
-      buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, as_path_len]);
-      buf.extend(self.route_info.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
+
+      let as_count = self.route_info.as_path.len();
+      let one_seg_len = as_count * 4 + 2;
+      if let Ok(len) = one_seg_len.try_into() {
+        buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, len]);
+        buf.extend([AS_SEQUENCE, as_count.try_into().unwrap()]);
+        buf.extend(self.route_info.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
+      } else {
+        buf.extend([PF_WELL_KNOWN | PF_EXT_LEN, PathAttr::AsPath as u8]);
+        let mut iter = self.route_info.as_path.iter().rev();
+        extend_with_u16_len(buf, |buf| {
+          for _ in 0..as_count / 0xff {
+            buf.extend([AS_SEQUENCE, 0xff]);
+            buf.extend(iter.by_ref().take(0xff).map(|x| x.to_be_bytes()).flatten());
+          }
+          if as_count % 0xff != 0 {
+            buf.extend([AS_SEQUENCE, (as_count % 0xff).try_into().unwrap()]);
+            buf.extend(iter.by_ref().map(|x| x.to_be_bytes()).flatten());
+          }
+        });
+      }
 
       // BGP-4 next hop
       if let Some((_, next_hop)) = &old_nlri {
