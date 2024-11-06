@@ -223,7 +223,7 @@ impl From<[Ipv6Addr; 2]> for NextHop {
 
 #[derive(Debug, Clone, Error)]
 pub enum NlriError {
-  #[error("{0} NLRI contains {} information", if *.0 == Afi::Ipv6 { Afi::Ipv4 } else { Afi::Ipv6 })]
+  #[error("{0} NLRI contains {n} information", n = if *.0 == Afi::Ipv6 { Afi::Ipv4 } else { Afi::Ipv6 })]
   MultipleAddrFamilies(Afi),
 
   #[error("NLRI ({afi}, {kind:?}) contains invalid next hop: {next_hop:?}")]
