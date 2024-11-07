@@ -1,6 +1,6 @@
 use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
-use super::route::{Origin, RouteInfo};
+use super::route::{AsSegment, AsSegmentKind, Origin, RouteInfo};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
@@ -132,8 +132,7 @@ async fn get_pattr_buf(
 }
 
 async fn discard(mut reader: impl AsyncRead + Unpin) -> io::Result<()> {
-  let mut buf = Vec::new();
-  reader.read_to_end(&mut buf).await?;
+  tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
   Ok(())
 }
 
@@ -455,25 +454,25 @@ impl UpdateMessage<'static> {
           Some(PathAttr::AsPath) => {
             if len != 0 {
               let mut seg_reader = take(&mut pattrs_reader, len.into());
-              let mut as_path = Vec::new();
               while let Ok(seg_type) = seg_reader.read_u8().await {
                 // TODO: confederations
-                if seg_type != AS_SEQUENCE {
+                let Some(seg_type) = AsSegmentKind::from_repr(seg_type) else {
                   error!("unknown AS_PATH segment type: {seg_type}");
                   discard(seg_reader).await?;
                   treat_as_withdraw.get_or_insert(MalformedAsPath);
                   break;
-                }
+                };
                 let as_len = seg_reader.read_u8().await?;
                 if u16::from(as_len) != len / 4 {
                   discard(seg_reader).await?;
                   treat_as_withdraw.get_or_insert(MalformedAsPath);
                   break;
                 }
+                let mut seq = SmallVec::with_capacity(as_len.into());
                 let mut as_path_reader = take(&mut seg_reader, (as_len * 4).into());
                 let mut count = 0;
                 while let Ok(asn) = as_path_reader.read_u32().await {
-                  as_path.push(asn);
+                  seq.push(asn);
                   count += 1;
                 }
                 if count != as_len {
@@ -481,9 +480,14 @@ impl UpdateMessage<'static> {
                   treat_as_withdraw.get_or_insert(MalformedAsPath);
                   break;
                 }
+                let seg = match seg_type {
+                  AsSegmentKind::Set => AsSegment::Set(seq.into_iter().collect()),
+                  AsSegmentKind::Sequence => AsSegment::Sequence(seq),
+                  AsSegmentKind::ConfedSequence => AsSegment::ConfedSequence(seq),
+                  AsSegmentKind::ConfedSet => AsSegment::ConfedSet(seq.into_iter().collect()),
+                };
+                result.route_info.as_path.push(seg);
               }
-              as_path.reverse();
-              result.route_info.as_path = as_path.into();
             }
           }
 
@@ -713,6 +717,10 @@ impl UpdateMessage<'static> {
 }
 
 impl MessageSend for UpdateMessage<'_> {
+  /// Flow does not actually send UPDATE messages, but the serialization
+  /// implementation is still done for the sake of completeness. It also helps
+  /// test the correctness of the deserialization logic. With that said, it is
+  /// important to make this function correct as well.
   fn write_data(&self, buf: &mut Vec<u8>) {
     let old_nlri = match &self.old_nlri.as_ref().map(Nlri::kind) {
       Some(NlriContent::Unicast { prefixes, next_hop: NextHop::V4(next_hop), .. }) => Some((prefixes, next_hop)),
@@ -740,26 +748,17 @@ impl MessageSend for UpdateMessage<'_> {
       // Path attributes
       buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.route_info.origin as u8]);
 
-      let as_count = self.route_info.as_path.len();
-      let one_seg_len = as_count * 4 + 2;
-      if let Ok(len) = one_seg_len.try_into() {
+      let segs_len: u16 = (self.route_info.as_path.iter())
+        .fold(0u32, |a, x| a + u32::from(x.bytes_len()))
+        .try_into()
+        .expect("AS_PATH segment length should fit in u16");
+      if let Ok(len) = u8::try_from(segs_len) {
         buf.extend([PF_WELL_KNOWN, PathAttr::AsPath as u8, len]);
-        buf.extend([AS_SEQUENCE, as_count.try_into().unwrap()]);
-        buf.extend(self.route_info.as_path.iter().rev().map(|x| x.to_be_bytes()).flatten());
       } else {
         buf.extend([PF_WELL_KNOWN | PF_EXT_LEN, PathAttr::AsPath as u8]);
-        let mut iter = self.route_info.as_path.iter().rev();
-        extend_with_u16_len(buf, |buf| {
-          for _ in 0..as_count / 0xff {
-            buf.extend([AS_SEQUENCE, 0xff]);
-            buf.extend(iter.by_ref().take(0xff).map(|x| x.to_be_bytes()).flatten());
-          }
-          if as_count % 0xff != 0 {
-            buf.extend([AS_SEQUENCE, (as_count % 0xff).try_into().unwrap()]);
-            buf.extend(iter.by_ref().map(|x| x.to_be_bytes()).flatten());
-          }
-        });
+        buf.extend(u16::to_be_bytes(segs_len));
       }
+      self.route_info.as_path.iter().for_each(|x| x.write(buf));
 
       // BGP-4 next hop
       if let Some((_, next_hop)) = &old_nlri {
@@ -774,13 +773,7 @@ impl MessageSend for UpdateMessage<'_> {
             .expect("communities length should fit in u16")
             .to_be_bytes(),
         );
-        buf.extend(
-          (self.route_info.comm.iter())
-            .map(|x| x.0)
-            .flatten()
-            .map(u16::to_be_bytes)
-            .flatten(),
-        );
+        buf.extend((self.route_info.comm.iter()).flat_map(|x| x.0).flat_map(u16::to_be_bytes));
       }
 
       if !self.route_info.ext_comm.is_empty() {

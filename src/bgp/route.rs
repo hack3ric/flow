@@ -3,11 +3,13 @@ use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::net::IpPrefix;
 use crate::nft::{flow_to_nft_stmts, Nft};
 use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
+use either::Either;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
 use nftables::batch::Batch;
 use nftables::helper::NftablesError;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,7 +132,7 @@ impl Routes {
     fn print_info(info: &RouteInfo) {
       println!("  {BOLD}Origin:{RESET} {}", info.origin);
       if !info.as_path.is_empty() {
-        println!("  {BOLD}AS Path:{RESET} {}", info.as_path.iter().rev().format(", "));
+        println!("  {BOLD}AS Path:{RESET} {}", info.as_path.iter().format(", "));
       }
       if !info.comm.is_empty() {
         println!("  {BOLD}Communities:{RESET} {}", info.comm.iter().format(", "));
@@ -184,7 +186,7 @@ pub struct RouteInfo<'a> {
   pub origin: Origin,
 
   /// AS path, stored in reverse for easy prepending.
-  pub as_path: Cow<'a, [u32]>,
+  pub as_path: SmallVec<[AsSegment; 1]>,
 
   pub comm: BTreeSet<Community>,
   pub ext_comm: BTreeSet<ExtCommunity>,
@@ -232,6 +234,56 @@ impl Display for Origin {
 impl Default for Origin {
   fn default() -> Self {
     Self::Incomplete
+  }
+}
+
+#[derive(Debug, Clone, EnumDiscriminants, Serialize, Deserialize)]
+#[strum_discriminants(name(AsSegmentKind), derive(FromRepr))]
+#[repr(u8)]
+pub enum AsSegment {
+  Set(BTreeSet<u32>) = 1,
+  Sequence(SmallVec<[u32; 4]>) = 2,
+  ConfedSequence(SmallVec<[u32; 4]>) = 3,
+  ConfedSet(BTreeSet<u32>) = 4,
+}
+
+impl AsSegment {
+  pub fn kind(&self) -> AsSegmentKind {
+    self.into()
+  }
+
+  pub fn write(&self, buf: &mut Vec<u8>) {
+    buf.extend([self.kind() as u8, self.as_count()]);
+    buf.extend(self.iter().flat_map(u32::to_be_bytes));
+  }
+
+  pub fn as_count(&self) -> u8 {
+    match self {
+      Self::Set(set) | Self::ConfedSet(set) => set.len().try_into().unwrap(),
+      Self::Sequence(seq) | Self::ConfedSequence(seq) => seq.len().try_into().unwrap(),
+    }
+  }
+
+  pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+    match self {
+      Self::Set(set) | Self::ConfedSet(set) => Either::Left(set.iter().copied()),
+      Self::Sequence(seq) | Self::ConfedSequence(seq) => Either::Right(seq.iter().copied()),
+    }
+  }
+
+  pub fn bytes_len(&self) -> u16 {
+    (self.as_count() * 4 + 2).try_into().unwrap()
+  }
+}
+
+impl Display for AsSegment {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Set(set) => Debug::fmt(set, f),
+      Self::Sequence(seq) => Display::fmt(&seq.iter().format(", "), f),
+      Self::ConfedSequence(seq) => write!(f, "Confed {seq:?}"),
+      Self::ConfedSet(set) => write!(f, "Confed {set:?}"),
+    }
   }
 }
 

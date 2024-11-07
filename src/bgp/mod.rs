@@ -43,6 +43,7 @@ use State::*;
 ///   Routing (?)
 /// - RFC 1997: BGP Communities Attribute
 /// - RFC 4360: BGP Extended Communities Attribute
+/// - RFC 5065: Autonomous System Confederations for BGP
 /// - RFC 5668: 4-Octet AS Specific BGP Extended Community
 /// - RFC 5701: IPv6 Address Specific BGP Extended Community Attribute
 /// - RFC 7606: Revised Error Handling for BGP UPDATE Messages

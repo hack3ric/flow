@@ -213,6 +213,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap-verbosity",
+ "either",
  "env_logger",
  "futures",
  "itertools",
