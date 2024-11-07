@@ -4,9 +4,9 @@ use super::route::{Origin, RouteInfo};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
-use futures::TryFutureExt;
-use log::error;
+use log::{error, warn};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::io;
@@ -124,6 +124,12 @@ async fn get_pattr_buf(
   pattr_buf.extend(read_data);
   reader.take(len.into()).read_to_end(&mut pattr_buf).await?;
   Ok(pattr_buf.into())
+}
+
+async fn discard(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<()> {
+  let mut buf = Vec::new();
+  reader.read_to_end(&mut buf).await?;
+  Ok(())
 }
 
 pub const OPT_PARAM_CAP: u8 = 2;
@@ -370,8 +376,13 @@ impl UpdateMessage<'static> {
     let withdrawn_len = reader.read_u16().await?;
     let mut withdrawn_reader = (&mut reader).take(withdrawn_len.into());
     let mut withdrawn_prefixes = BTreeSet::new();
-    while let Some(prefix) = IpPrefix::read_v4(&mut withdrawn_reader).await? {
+    let mut withdrawn_read_bytes = 0u16;
+    while let Some((prefix, bytes)) = IpPrefix::read_v4(&mut withdrawn_reader).await? {
       withdrawn_prefixes.insert(prefix);
+      withdrawn_read_bytes += u16::from(bytes);
+    }
+    if withdrawn_read_bytes != withdrawn_len {
+      return Err(Notification::Update(MalformedAttrList).into());
     }
     if !withdrawn_prefixes.is_empty() {
       result.old_withdrawn = Some(Nlri::new_route(Afi::Ipv4, withdrawn_prefixes, None)?);
@@ -382,231 +393,278 @@ impl UpdateMessage<'static> {
     let pattrs_len = reader.read_u16().await?;
     let mut pattrs_reader = (&mut reader).take(pattrs_len.into());
 
-    while let Ok([flags, kind]) = pattrs_reader.read_u16().map_ok(u16::to_be_bytes).await {
-      let len: u16 = if flags & PF_EXT_LEN == 0 {
-        pattrs_reader.read_u8().await?.into()
-      } else {
-        pattrs_reader.read_u16().await?
-      };
+    let mut treat_as_withdraw: Option<UpdateError> = None;
 
-      async fn gen_attr_flags_error(
-        reader: &mut (impl AsyncRead + Unpin),
-        flags: u8,
-        kind: u8,
-        len: u16,
-      ) -> super::Result<UpdateMessage<'static>> {
-        let pattr_buf = get_pattr_buf(reader, flags, kind, len, []).await?;
-        Err(Notification::Update(AttrFlags(pattr_buf)).into())
+    let read = async {
+      while let Ok(flags) = pattrs_reader.read_u8().await {
+        let kind = pattrs_reader.read_u8().await?;
+        let len: u16 = if flags & PF_EXT_LEN == 0 {
+          pattrs_reader.read_u8().await?.into()
+        } else {
+          pattrs_reader.read_u16().await?
+        };
+
+        if visited.contains(&kind) {
+          if kind == PathAttr::MpReachNlri as u8 || kind == PathAttr::MpUnreachNlri as u8 {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            return Err(Notification::Update(AttrFlags(pattr_buf)).into());
+          } else {
+            warn!("duplicate path attribute {kind}, ignoring");
+            discard(&mut (&mut pattrs_reader).take(len.into())).await?;
+            continue;
+          }
+        }
+
+        match PathAttr::from_repr(kind) {
+          // Well-known attributes
+          Some(
+            PathAttr::Origin
+            | PathAttr::AsPath
+            | PathAttr::NextHop
+            | PathAttr::MultiExitDesc
+            | PathAttr::LocalPref
+            | PathAttr::AtomicAggregate
+            | PathAttr::Aggregator,
+          ) if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+          }
+
+          Some(PathAttr::Origin) => {
+            if len == 1 {
+              let origin = pattrs_reader.read_u8().await?;
+              match Origin::from_repr(origin) {
+                Some(x) => result.route_info.origin = x,
+                None => {
+                  let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [origin]).await?;
+                  treat_as_withdraw.get_or_insert(InvalidOrigin(pattr_buf));
+                }
+              }
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::AsPath) => {
+            if len != 0 {
+              let mut seg_reader = (&mut pattrs_reader).take(len.into());
+              let mut as_path = Vec::new();
+              while let Ok(seg_type) = seg_reader.read_u8().await {
+                // TODO: confederations
+                if seg_type != AS_SEQUENCE {
+                  error!("unknown AS_PATH segment type: {seg_type}");
+                  discard(&mut seg_reader).await?;
+                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  break;
+                }
+                let as_len = seg_reader.read_u8().await?;
+                if u16::from(as_len) != len / 4 {
+                  discard(&mut seg_reader).await?;
+                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  break;
+                }
+                let mut as_path_reader = (&mut seg_reader).take((as_len * 4).into());
+                let mut count = 0;
+                while let Ok(asn) = as_path_reader.read_u32().await {
+                  as_path.push(asn);
+                  count += 1;
+                }
+                if count != as_len {
+                  discard(&mut seg_reader).await?;
+                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  break;
+                }
+              }
+              as_path.reverse();
+              result.route_info.as_path = as_path.into();
+            }
+          }
+
+          Some(PathAttr::NextHop) => {
+            if len == 4 {
+              old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(InvalidNextHop(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::MultiExitDesc) => {
+            if len == 4 {
+              result.route_info.med = Some(pattrs_reader.read_u32().await?);
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::LocalPref) => {
+            if len == 4 {
+              result.route_info.local_pref = Some(pattrs_reader.read_u32().await?);
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::AtomicAggregate) => {
+            if len == 0 {
+              result.route_info.atomic_aggregate = true;
+            } else {
+              warn!("ATOMIC_AGGREGATE length is not zero, ignoring");
+            }
+          }
+
+          Some(PathAttr::Aggregator) => {
+            if len == 6 {
+              result.route_info.aggregator = Some((pattrs_reader.read_u16().await?, pattrs_reader.read_u32().await?));
+            } else {
+              warn!("AGGREGATOR length is not 6, ignoring");
+            }
+          }
+
+          // Known, optional, transitive attributes
+          Some(
+            PathAttr::Communities
+            | PathAttr::ExtCommunities
+            | PathAttr::Ipv6ExtCommunities
+            | PathAttr::LargeCommunities,
+          ) if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 => {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+          }
+
+          Some(PathAttr::Communities) => {
+            if len % 4 == 0 {
+              let mut opt_buf = vec![0; len.into()];
+              pattrs_reader.read_exact(&mut opt_buf).await?;
+              result.route_info.comm = opt_buf
+                .chunks_exact(4)
+                .map(|x| Community::from_bytes(x.try_into().unwrap()))
+                .collect();
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::ExtCommunities) => {
+            if len % 8 == 0 {
+              let mut opt_buf = vec![0; len.into()];
+              pattrs_reader.read_exact(&mut opt_buf).await?;
+              result.route_info.ext_comm = opt_buf
+                .chunks_exact(8)
+                .map(|x| ExtCommunity::from_bytes(x.try_into().unwrap()))
+                .collect();
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::Ipv6ExtCommunities) => {
+            if len % 20 == 0 {
+              let mut opt_buf = vec![0; len.into()];
+              pattrs_reader.read_exact(&mut opt_buf).await?;
+              if let Some(comm) = opt_buf
+                .chunks_exact(20)
+                .map(|x| Ipv6ExtCommunity::from_bytes(x.try_into().unwrap()))
+                .collect()
+              {
+                result.route_info.ipv6_ext_comm = comm;
+              } else {
+                let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, opt_buf).await?;
+                treat_as_withdraw.get_or_insert(OptAttr(pattr_buf));
+              }
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          Some(PathAttr::LargeCommunities) => {
+            if len % 12 == 0 {
+              let mut opt_buf = vec![0; len.into()];
+              pattrs_reader.read_exact(&mut opt_buf).await?;
+              result.route_info.large_comm = opt_buf
+                .chunks_exact(12)
+                .map(|x| LargeCommunity::from_bytes(x.try_into().unwrap()))
+                .collect();
+            } else {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+            }
+          }
+
+          // Known, optional, non-transitive attributes
+          Some(PathAttr::MpReachNlri | PathAttr::MpUnreachNlri)
+            if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
+          {
+            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+          }
+
+          Some(PathAttr::MpReachNlri) => {
+            let mut opt_buf = vec![0; len.into()];
+            pattrs_reader.read_exact(&mut opt_buf).await?;
+            match Nlri::read_mp_reach(&mut &opt_buf[..]).await {
+              Ok(nlri) => result.nlri = Some(nlri),
+              Err(_) => {
+                let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
+                return Err(Notification::Update(OptAttr(pattr_buf)).into());
+              }
+            }
+          }
+
+          Some(PathAttr::MpUnreachNlri) => {
+            let mut opt_buf = vec![0; len.into()];
+            pattrs_reader.read_exact(&mut opt_buf).await?;
+            match Nlri::read_mp_unreach(&mut &opt_buf[..]).await {
+              Ok(nlri) => result.withdrawn = Some(nlri),
+              Err(_) => {
+                let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
+                return Err(Notification::Update(OptAttr(pattr_buf)).into());
+              }
+            }
+          }
+
+          // Others
+          None => {
+            // reject unknown well-known attribute
+            if flags & PF_OPTIONAL == 0 {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+            }
+            // reject non-transitive but partial set
+            if flags & PF_TRANSITIVE == 0 && flags & PF_PARTIAL != 0 {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+            }
+            // store transitive unknown attributes
+            if flags & PF_TRANSITIVE != 0 {
+              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
+              result.route_info.other_attrs.insert(kind, pattr_buf);
+            }
+            // silently ignore optional non-transitive unrecognized attributes
+          }
+        }
+
+        visited.insert(kind);
       }
-
-      if visited.contains(&kind) {
-        let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-        return Err(Notification::Update(AttrFlags(pattr_buf)).into());
+      Ok(())
+    };
+    match read.await {
+      Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+        discard(&mut pattrs_reader).await?;
+        treat_as_withdraw.get_or_insert(MalformedAttrList);
       }
-
-      match PathAttr::from_repr(kind) {
-        // Well-known attributes
-        Some(
-          PathAttr::Origin
-          | PathAttr::AsPath
-          | PathAttr::NextHop
-          | PathAttr::MultiExitDesc
-          | PathAttr::LocalPref
-          | PathAttr::AtomicAggregate
-          | PathAttr::Aggregator,
-        ) if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
-          return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
-        }
-        Some(PathAttr::Origin) => {
-          if len != 1 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(AttrLen(pattr_buf)).into());
-          }
-          let origin = pattrs_reader.read_u8().await?;
-          result.route_info.origin = match Origin::from_repr(origin) {
-            Some(x) => x,
-            None => {
-              let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [origin]).await?;
-              return Err(Notification::Update(InvalidOrigin(pattr_buf)).into());
-            }
-          };
-        }
-        Some(PathAttr::AsPath) if len == 0 => {}
-        Some(PathAttr::AsPath) => {
-          let mut seg_reader = (&mut pattrs_reader).take(len.into());
-          let mut as_path = Vec::new();
-          while let Ok([seg_type, as_len]) = seg_reader.read_u16().map_ok(u16::to_be_bytes).await {
-            // TODO: confederations
-            if seg_type != AS_SEQUENCE {
-              error!("unknown AS_PATH segment type: {seg_type}");
-              return Err(Notification::Update(MalformedAsPath).into());
-            }
-            if u16::from(as_len) != len / 4 {
-              return Err(Notification::Update(MalformedAsPath).into());
-            }
-            let mut as_path_reader = (&mut seg_reader).take((as_len * 4).into());
-            let mut count = 0;
-            while let Ok(asn) = as_path_reader.read_u32().await {
-              as_path.push(asn);
-              count += 1;
-            }
-            if count != as_len {
-              return Err(Notification::Update(MalformedAsPath).into());
-            }
-          }
-          as_path.reverse();
-          result.route_info.as_path = as_path.into();
-        }
-        Some(PathAttr::NextHop) => {
-          if len != 4 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
-          }
-          old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
-        }
-        Some(PathAttr::MultiExitDesc) => {
-          if len != 4 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
-          }
-          result.route_info.med = Some(pattrs_reader.read_u32().await?);
-        }
-        Some(PathAttr::LocalPref) => {
-          if len != 4 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
-          }
-          result.route_info.local_pref = Some(pattrs_reader.read_u32().await?);
-        }
-        Some(PathAttr::AtomicAggregate) => {
-          if len != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
-          }
-          result.route_info.atomic_aggregate = true;
-        }
-        Some(PathAttr::Aggregator) => {
-          if len != 6 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(InvalidNextHop(pattr_buf)).into());
-          }
-          result.route_info.aggregator = Some((pattrs_reader.read_u16().await?, pattrs_reader.read_u32().await?));
-        }
-
-        // Known, optional, transitive attributes
-        Some(
-          PathAttr::Communities | PathAttr::ExtCommunities | PathAttr::Ipv6ExtCommunities | PathAttr::LargeCommunities,
-        ) if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 => {
-          return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
-        }
-        Some(PathAttr::Communities) => {
-          if len % 4 != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          }
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.route_info.comm = opt_buf
-            .chunks_exact(4)
-            .map(|x| Community::from_bytes(x.try_into().unwrap()))
-            .collect();
-        }
-        Some(PathAttr::ExtCommunities) => {
-          if len % 8 != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          }
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.route_info.ext_comm = opt_buf
-            .chunks_exact(8)
-            .map(|x| ExtCommunity::from_bytes(x.try_into().unwrap()))
-            .collect();
-        }
-        Some(PathAttr::Ipv6ExtCommunities) => {
-          if len % 20 != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          }
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          let Some(comm) = opt_buf
-            .chunks_exact(20)
-            .map(|x| Ipv6ExtCommunity::from_bytes(x.try_into().unwrap()))
-            .collect()
-          else {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, opt_buf).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          };
-          result.route_info.ipv6_ext_comm = comm;
-        }
-        Some(PathAttr::LargeCommunities) => {
-          if len % 12 != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            return Err(Notification::Update(OptAttr(pattr_buf)).into());
-          }
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          result.route_info.large_comm = opt_buf
-            .chunks_exact(12)
-            .map(|x| LargeCommunity::from_bytes(x.try_into().unwrap()))
-            .collect();
-        }
-
-        // Known, optional, non-transitive attributes
-        Some(PathAttr::MpReachNlri | PathAttr::MpUnreachNlri)
-          if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
-        {
-          return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
-        }
-        Some(PathAttr::MpReachNlri) => {
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          match Nlri::read_mp_reach(&mut &opt_buf[..]).await {
-            Ok(nlri) => result.nlri = Some(nlri),
-            Err(_) => {
-              let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
-              return Err(Notification::Update(OptAttr(pattr_buf)).into());
-            }
-          }
-        }
-        Some(PathAttr::MpUnreachNlri) => {
-          let mut opt_buf = vec![0; len.into()];
-          pattrs_reader.read_exact(&mut opt_buf).await?;
-          match Nlri::read_mp_unreach(&mut &opt_buf[..]).await {
-            Ok(nlri) => result.withdrawn = Some(nlri),
-            Err(_) => {
-              let pattr_buf = get_pattr_buf(&mut &[][..], flags, kind, len, opt_buf).await?;
-              return Err(Notification::Update(OptAttr(pattr_buf)).into());
-            }
-          }
-        }
-
-        // Others
-        _ => {
-          // reject unknown well-known attribute
-          if flags & PF_OPTIONAL == 0 {
-            return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
-          }
-          // reject non-transitive but partial set
-          if flags & PF_TRANSITIVE == 0 && flags & PF_PARTIAL != 0 {
-            return gen_attr_flags_error(&mut pattrs_reader, flags, kind, len).await;
-          }
-          // store transitive unknown attributes
-          if flags & PF_TRANSITIVE != 0 {
-            let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            result.route_info.other_attrs.insert(kind, pattr_buf);
-          }
-          // silently ignore optional non-transitive unrecognized attributes
-        }
-      }
-
-      visited.insert(kind);
+      other => other?,
     }
 
     let mut old_prefixes = BTreeSet::new();
     let exec = async {
-      while let Some(prefix) = IpPrefix::read_v4(reader).await? {
+      while let Some((prefix, _)) = IpPrefix::read_v4(reader).await? {
         old_prefixes.insert(prefix);
       }
       Ok::<_, IpPrefixError>(())
@@ -614,22 +672,39 @@ impl UpdateMessage<'static> {
     if exec.await.is_err() {
       return Err(Notification::Update(InvalidNetwork).into());
     }
+
     if let Some(next_hop) = old_next_hop {
       result.old_nlri = Some(Nlri::new_route(Afi::Ipv4, old_prefixes, Some(next_hop))?);
     } else if !old_prefixes.is_empty() {
-      return Err(Notification::Update(MissingWellKnownAttr(PathAttr::NextHop as u8)).into());
+      warn!("missing NEXT_HOP while containing BGP-4 NLRI");
+      treat_as_withdraw.get_or_insert(MissingWellKnownAttr(PathAttr::NextHop as u8));
     }
 
     if result.nlri.is_some() || result.old_nlri.is_some() {
       for attr in [PathAttr::Origin, PathAttr::AsPath] {
         let attr = attr as u8;
         if !visited.contains(&attr) {
-          return Err(Notification::Update(MissingWellKnownAttr(attr)).into());
+          warn!("missing well-known mandatory attribute {attr}");
+          treat_as_withdraw.get_or_insert(MissingWellKnownAttr(attr));
         }
       }
     }
 
-    Ok(result)
+    // TODO: process treat-as-withdraw
+    if let Some(error) = treat_as_withdraw {
+      let nlris: SmallVec<_> = [result.nlri, result.old_nlri, result.withdrawn, result.old_withdrawn]
+        .into_iter()
+        .flatten()
+        .collect();
+      if nlris.is_empty() {
+        Err(Notification::Update(error).into())
+      } else {
+        Err(super::Error::Withdraw(error, nlris))
+      }
+    } else {
+      // TODO: check for NEXT_HOP semantic correctness
+      Ok(result)
+    }
   }
 }
 
@@ -655,15 +730,8 @@ impl MessageSend for UpdateMessage<'_> {
     });
 
     extend_with_u16_len(buf, |buf| {
-      // MP_REACH_NLRI
-      if let Some(nlri) = &self.nlri {
-        nlri.write_mp_reach(buf);
-      }
-
-      // MP_UNREACH_NLRI
-      if let Some(withdrawn) = &self.withdrawn {
-        withdrawn.write_mp_unreach(buf);
-      }
+      self.nlri.as_ref().map(|n| n.write_mp_reach(buf));
+      self.withdrawn.as_ref().map(|w| w.write_mp_unreach(buf));
 
       // Path attributes
       buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.route_info.origin as u8]);

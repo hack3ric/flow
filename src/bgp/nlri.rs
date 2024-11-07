@@ -16,8 +16,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// Network Layer Reachability Information (NLRI).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nlri {
-  pub(super) afi: Afi,
-  pub(super) content: NlriContent,
+  pub afi: Afi,
+  pub content: NlriContent,
 }
 
 /// NLRI contents, defined by (AFI, SAFI) tuple.
@@ -117,7 +117,7 @@ impl Nlri {
       (Some(afi @ Afi::Ipv4), Some(NlriKind::Unicast), Some(next_hop))
       | (Some(afi @ Afi::Ipv6), Some(NlriKind::Unicast), Some(next_hop @ NextHop::V6(..))) => {
         let mut prefixes = BTreeSet::new();
-        while let Some(prefix) = IpPrefix::read(reader, afi).await? {
+        while let Some((prefix, _)) = IpPrefix::read(reader, afi).await? {
           prefixes.insert(prefix);
         }
         Ok(Self::new_route(afi, prefixes, Some(next_hop))?)

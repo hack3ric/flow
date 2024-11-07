@@ -306,7 +306,7 @@ impl Component {
   }
 
   async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> super::Result<Self> {
-    let prefix = IpPrefix::read_v4(reader).await?.ok_or_else(|| io::Error::from(UnexpectedEof))?;
+    let (prefix, _) = IpPrefix::read_v4(reader).await?.ok_or_else(|| io::Error::from(UnexpectedEof))?;
     Ok(f(prefix, 0))
   }
 

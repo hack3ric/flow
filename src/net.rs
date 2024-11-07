@@ -60,7 +60,11 @@ impl IpWithPrefix {
   }
 
   const fn mask_raw(self) -> u128 {
-    u128::MAX.wrapping_shl((prefix_max_len(self.addr) - self.prefix_len) as u32)
+    if self.prefix_len == 0 {
+      0
+    } else {
+      u128::MAX.wrapping_shl((prefix_max_len(self.addr) - self.prefix_len) as u32)
+    }
   }
 
   pub fn mask(self) -> IpAddr {
@@ -197,7 +201,7 @@ impl IpPrefix {
     match self.len().cmp(&other.len()) {
       Less => match (self.prefix(), self.inner.mask(), other.prefix()) {
         (V4(p1), V4(mask), V4(p2)) => p2 & mask == p1,
-        (V6(p1), V6(mask), V6(p2)) => p2 & mask == p1,
+        (V6(p1), V6(mask), V6(p2)) => dbg!(p2 & dbg!(mask)) == dbg!(p1),
         _ => false,
       },
       Equal => self == other,
@@ -236,25 +240,25 @@ impl IpPrefix {
     }
   }
 
-  pub(crate) async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>, IpPrefixError> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<(Self, u8)>, IpPrefixError> {
     match afi {
       Afi::Ipv4 => Self::read_v4(reader).await,
       Afi::Ipv6 => Self::read_v6(reader).await,
     }
   }
 
-  pub(crate) async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<(Self, u8)>, IpPrefixError> {
     Self::read_generic::<32, 4, _, _>(reader, IpAddr::V4).await
   }
 
-  pub(crate) async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>, IpPrefixError> {
+  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<(Self, u8)>, IpPrefixError> {
     Self::read_generic::<128, 16, _, _>(reader, IpAddr::V6).await
   }
 
   async fn read_generic<const L: u8, const M: usize, T, R>(
     reader: &mut R,
     ctor: fn(T) -> IpAddr,
-  ) -> Result<Option<Self>, IpPrefixError>
+  ) -> Result<Option<(Self, u8)>, IpPrefixError>
   where
     T: From<[u8; M]>,
     R: AsyncRead + Unpin,
@@ -273,7 +277,7 @@ impl IpPrefix {
     let inner = IpWithPrefix { addr: ctor(buf.into()), prefix_len: len };
     let result = inner.prefix();
     if result.inner == inner {
-      Ok(Some(result))
+      Ok(Some((result, prefix_bytes)))
     } else {
       Err(IpPrefixError { kind: IpPrefixErrorKind::TrailingBitsNonZero, value: None })
     }

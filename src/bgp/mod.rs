@@ -9,15 +9,16 @@ use crate::nft::Nft;
 use flow::FlowError;
 use futures::future::pending;
 use log::{debug, error, info, warn};
-use msg::HeaderError::*;
 use msg::OpenError::*;
+use msg::{HeaderError::*, UpdateError};
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn};
 use nftables::helper::NftablesError;
-use nlri::{NlriError, NlriKind};
+use nlri::{Nlri, NlriError, NlriKind};
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::future::Future;
@@ -44,12 +45,10 @@ use State::*;
 /// - RFC 4360: BGP Extended Communities Attribute
 /// - RFC 5668: 4-Octet AS Specific BGP Extended Community
 /// - RFC 5701: IPv6 Address Specific BGP Extended Community Attribute
+/// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 /// - RFC 8092: BGP Large Communities Attribute
 /// - RFC 8955: Dissemination of Flow Specification Rules
 /// - RFC 8956: Dissemination of Flow Specification Rules for IPv6
-///
-/// To implement:
-/// - RFC 7606: Revised Error Handling for BGP UPDATE Messages
 #[derive(Debug)]
 pub struct Session {
   config: RunArgs,
@@ -170,8 +169,8 @@ impl Session {
       },
       Established { stream, timers, .. } => select! {
         msg = Message::read(stream) => {
-          match msg? {
-            Message::Update(msg) => if let Some((afi, safi)) = msg.is_end_of_rib() {
+          match msg {
+            Ok(Message::Update(msg)) => if let Some((afi, safi)) = msg.is_end_of_rib() {
               debug!("received End-of-RIB of ({afi}, {safi:?})");
             } else {
               debug!("received update: {msg:?}");
@@ -191,8 +190,15 @@ impl Session {
                   .collect::<Result<(), _>>()?;
               }
             },
-            Message::Keepalive => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
-            other => bad_type(other, stream).await?,
+            Err(Error::Withdraw(error, nlris)) => {
+              error!("{error}");
+              nlris
+                .into_iter()
+                .map(|n| self.routes.withdraw(n))
+                .collect::<Result<(), _>>()?;
+            },
+            Ok(Message::Keepalive) => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
+            other => bad_type(other?, stream).await?,
           };
         }
         inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
@@ -347,6 +353,8 @@ pub enum Error {
   Notification(#[from] Notification<'static>),
   #[error("remote said: {0}")]
   Remote(Notification<'static>),
+  #[error("withdraw")] // TODO: print all routes to withdraw
+  Withdraw(UpdateError<'static>, SmallVec<[Nlri; 1]>),
 
   #[error(transparent)]
   Io(#[from] io::Error),
