@@ -5,8 +5,8 @@ use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 pub struct IpcServer {
   path: PathBuf,
@@ -31,7 +31,7 @@ impl Drop for IpcServer {
   }
 }
 
-impl Session {
+impl Session<BufReader<TcpStream>> {
   pub async fn write_states(&self, writer: &mut (impl AsyncWrite + Unpin)) -> anyhow::Result<()> {
     writer.write_all(&postcard::to_allocvec_cobs(self.config())?).await?;
     writer.write_all(&postcard::to_allocvec_cobs(&self.state().view())?).await?;

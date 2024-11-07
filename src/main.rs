@@ -19,10 +19,11 @@ use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
 use std::fs::{create_dir_all, File};
 use std::io::ErrorKind::UnexpectedEof;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::ExitCode;
+use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{pin, select};
@@ -34,7 +35,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
     args = RunArgs::parse_from(
       Some(Ok(format!("{cmd} run")))
         .into_iter()
-        .chain(BufReader::new(File::open(file)?).lines())
+        .chain(std::io::BufReader::new(File::open(file)?).lines())
         .filter(|x| !x.as_ref().is_ok_and(|x| x.is_empty() || x.chars().next().unwrap() == '#'))
         .map_ok(|x| "--".to_string() + &x)
         .collect::<Result<Vec<_>, _>>()?,
@@ -72,7 +73,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
         result = listener.accept(), if matches!(bgp.state(), bgp::State::Active) => {
           let (stream, mut addr) = result.context("failed to accept TCP connection")?;
           addr.set_ip(addr.ip().to_canonical());
-          bgp.accept(stream, addr).await.context("failed to accept BGP connection")?;
+          bgp.accept(BufReader::new(stream), addr).await.context("failed to accept BGP connection")?;
         }
         result = bgp.process() => match result {
           Ok(()) => {}

@@ -27,7 +27,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use strum::EnumDiscriminants;
 use thiserror::Error;
-use tokio::io::{AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::time::{interval, Duration, Instant, Interval};
@@ -51,13 +51,13 @@ use State::*;
 /// - RFC 8955: Dissemination of Flow Specification Rules
 /// - RFC 8956: Dissemination of Flow Specification Rules for IPv6
 #[derive(Debug)]
-pub struct Session {
+pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
   config: RunArgs,
-  state: State,
+  state: State<S>,
   routes: Routes,
 }
 
-impl Session {
+impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub fn new(c: RunArgs) -> Result<Self> {
     let nft = (!c.dry_run)
       .then(|| Nft::new(c.table.clone(), c.chain.clone(), c.hooked, c.priority))
@@ -83,14 +83,14 @@ impl Session {
   pub fn config(&self) -> &RunArgs {
     &self.config
   }
-  pub fn state(&self) -> &State {
+  pub fn state(&self) -> &State<S> {
     &self.state
   }
   pub fn routes(&self) -> &Routes {
     &self.routes
   }
 
-  pub async fn accept(&mut self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
+  pub async fn accept(&mut self, mut stream: S, addr: SocketAddr) -> Result<()> {
     let ip = addr.ip();
     if !self.config.allowed_ips.iter().any(|x| x.contains(ip)) {
       return Err(Error::UnacceptableAddr(ip));
@@ -103,7 +103,7 @@ impl Session {
       self.config.router_id.to_bits(),
     );
     open.send(&mut stream).await?;
-    replace_with_or_abort(&mut self.state, |_| OpenSent { stream: BufReader::new(stream) });
+    replace_with_or_abort(&mut self.state, |_| OpenSent { stream });
     info!("accepting BGP connection from {addr}");
     Ok(())
   }
@@ -212,30 +212,29 @@ impl Session {
 }
 
 #[derive(Debug)]
-pub enum State {
+pub enum State<S: AsyncRead + AsyncWrite + Unpin> {
   Idle,
   Connect, // never used in passive mode
   Active,
-  OpenSent {
-    stream: BufReader<TcpStream>,
-  },
-  OpenConfirm {
-    stream: BufReader<TcpStream>,
-    remote_open: OpenMessage<'static>,
-    timers: Option<Timers>,
-  },
-  Established {
-    stream: BufReader<TcpStream>,
-    remote_open: OpenMessage<'static>,
-    timers: Option<Timers>,
-  },
+  OpenSent { stream: S },
+  OpenConfirm { stream: S, remote_open: OpenMessage<'static>, timers: Option<Timers> },
+  Established { stream: S, remote_open: OpenMessage<'static>, timers: Option<Timers> },
 }
 
-impl State {
+impl<S: AsyncRead + AsyncWrite + Unpin> State<S> {
   pub fn kind(&self) -> StateKind {
-    self.view().into()
+    match self {
+      Idle => StateKind::Idle,
+      Connect => StateKind::Connect,
+      Active => StateKind::Active,
+      OpenSent { .. } => StateKind::OpenSent,
+      OpenConfirm { .. } => StateKind::OpenConfirm,
+      Established { .. } => StateKind::Established,
+    }
   }
+}
 
+impl State<BufReader<TcpStream>> {
   pub fn view(&self) -> StateView {
     match self {
       Idle => StateView::Idle,
