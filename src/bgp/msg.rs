@@ -1,6 +1,6 @@
-use super::extend_with_u16_len;
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
 use super::route::{AsSegment, AsSegmentKind, Origin, RouteInfo};
+use super::{extend_with_u16_len, Result};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
@@ -58,7 +58,7 @@ impl Message<'_> {
 }
 
 impl Message<'static> {
-  pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
+  pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
     let mut header = [0; 19];
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
@@ -86,7 +86,7 @@ impl Message<'static> {
     }
   }
 
-  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> super::Result<Self> {
+  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self> {
     match Message::read_raw(socket).await {
       Ok(Message::Notification(n)) => Err(super::Error::Remote(n.into())),
       Err(super::Error::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
@@ -116,7 +116,7 @@ async fn get_pattr_buf(
   kind: u8,
   len: u16,
   read_data: impl IntoIterator<Item = u8>,
-) -> super::Result<Cow<'static, [u8]>> {
+) -> Result<Cow<'static, [u8]>> {
   let mut pattr_buf = vec![flags, kind];
   if flags & PF_EXT_LEN == 0 {
     pattr_buf.push(len as u8);
@@ -177,7 +177,7 @@ impl OpenMessage<'static> {
     }
   }
 
-  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> super::Result<Self> {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self> {
     match Self::read_inner(ptr).await {
       Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
         Err(Notification::Open(Unspecific).into())
@@ -186,7 +186,7 @@ impl OpenMessage<'static> {
     }
   }
 
-  async fn read_inner<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
+  async fn read_inner<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
     if reader.read_u8().await? != 4 {
       return Err(Notification::Open(UnsupportedVersion(4)).into());
     }
@@ -363,7 +363,7 @@ impl UpdateMessage<'_> {
 }
 
 impl UpdateMessage<'static> {
-  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
+  async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
     match Self::read_inner(reader).await {
       Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
         Err(Notification::Update(MalformedAttrList).into())
@@ -372,7 +372,7 @@ impl UpdateMessage<'static> {
     }
   }
 
-  async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> super::Result<Self> {
+  async fn read_inner<R: AsyncRead + Unpin>(mut reader: &mut R) -> Result<Self> {
     let mut result = Self::default();
 
     let withdrawn_len = reader.read_u16().await?;
@@ -876,7 +876,7 @@ impl Notification<'_> {
 }
 
 impl Notification<'static> {
-  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> super::Result<Self> {
+  async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self> {
     use Notification::*;
     use {HeaderErrorKind as HEK, NotificationKind as NK, OpenErrorKind as OEK, UpdateErrorKind as UEK};
 
@@ -951,11 +951,11 @@ impl<'a> From<UpdateError<'a>> for Notification<'a> {
 
 pub trait SendAndReturn {
   #[allow(async_fn_in_trait)]
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> super::Result<()>;
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<()>;
 }
 
 impl<T: Into<Notification<'static>>> SendAndReturn for T {
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> super::Result<()> {
+  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<()> {
     let n = self.into();
     n.send(writer).await?;
     Err(n.into())

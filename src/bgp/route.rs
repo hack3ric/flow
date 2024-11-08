@@ -1,13 +1,11 @@
 use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
+use crate::kernel::{self, flow_to_rules, Kernel};
 use crate::net::IpPrefix;
-use crate::nft::{flow_to_nft_stmts, Nft};
 use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use either::Either;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
-use nftables::batch::Batch;
-use nftables::helper::NftablesError;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -24,23 +22,22 @@ use strum::{EnumDiscriminants, FromRepr};
 pub struct Routes {
   unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
   flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
-  counter: u64,
-  nft: Option<Nft>,
+  kernel: Option<Kernel>,
 }
 
 impl Routes {
-  pub fn new(nft: Option<Nft>) -> Self {
-    Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), counter: 0, nft }
+  pub fn new(kernel: Option<Kernel>) -> Self {
+    Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), kernel }
   }
 
-  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> Result<(), NftablesError> {
+  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> kernel::Result<()> {
     match nlri.content {
       NlriContent::Unicast { prefixes, next_hop } => self
         .unicast
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
         for spec in specs {
-          let rules = match flow_to_nft_stmts(&spec, &info) {
+          let rules = match flow_to_rules(&spec, &info) {
             Ok(rules) => rules,
             Err(error) => {
               warn!("flowspec {spec} rejected: {error}");
@@ -49,23 +46,17 @@ impl Routes {
             }
           };
 
-          let id = self.counter;
-          self.counter += 1;
-          let mut batch = Batch::new();
-          if let Some(nft) = &self.nft {
-            rules.into_iter().for_each(|s| batch.add(nft.make_new_rule(s, Some(id))));
-          }
+          let id = self.kernel.as_mut().map(|x| x.apply(rules)).transpose()?.unwrap_or(0);
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              self.remove_nft_entry(id)?
+              if let Some(kernel) = &self.kernel {
+                kernel.remove(id)?;
+              }
             }
-          }
-          if let Some(nft) = &self.nft {
-            nft.apply_ruleset(batch)?;
           }
         }
       }
@@ -73,7 +64,7 @@ impl Routes {
     Ok(())
   }
 
-  pub fn withdraw(&mut self, nlri: Nlri) -> Result<(), NftablesError> {
+  pub fn withdraw(&mut self, nlri: Nlri) -> kernel::Result<()> {
     match nlri.content {
       NlriContent::Unicast { prefixes, .. } => prefixes
         .into_iter()
@@ -83,47 +74,24 @@ impl Routes {
     Ok(())
   }
 
-  pub fn withdraw_all(&mut self) -> Result<(), NftablesError> {
+  pub fn withdraw_all(&mut self) -> kernel::Result<()> {
     self.unicast.clear();
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
-    for (_, (id, _)) in flow {
-      self.remove_nft_entry(id)?;
+    if let Some(kernel) = &self.kernel {
+      for (_, (id, _)) in flow {
+        kernel.remove(id)?;
+      }
     }
     Ok(())
   }
 
-  fn withdraw_spec(&mut self, spec: Flowspec) -> Result<(), NftablesError> {
+  fn withdraw_spec(&mut self, spec: Flowspec) -> kernel::Result<()> {
     let Some((id, _)) = self.flow.remove(&spec) else {
       return Ok(());
     };
-    self.remove_nft_entry(id)
-  }
-
-  fn remove_nft_entry(&self, id: u64) -> Result<(), NftablesError> {
-    #[derive(Debug, Deserialize)]
-    struct MyNftables {
-      nftables: Vec<MyNftObject>,
-    }
-    #[derive(Debug, Deserialize)]
-    struct MyNftObject {
-      rule: Option<MyNftRule>,
-    }
-    #[derive(Debug, Deserialize)]
-    struct MyNftRule {
-      comment: Option<String>,
-      handle: u32,
-    }
-    if let Some(nft) = &self.nft {
-      let mut batch = Batch::new();
-      let s = nft.get_current_ruleset_raw()?;
-      let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
-      nftables
-        .into_iter()
-        .filter_map(|x| x.rule)
-        .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
-        .for_each(|x| batch.delete(nft.make_rule_handle(x.handle)));
-      nft.apply_ruleset(batch)?;
+    if let Some(kernel) = &self.kernel {
+      kernel.remove(id)?;
     }
     Ok(())
   }

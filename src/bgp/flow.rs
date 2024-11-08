@@ -1,3 +1,4 @@
+use super::Result;
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -59,9 +60,7 @@ impl Flowspec {
 
   pub fn write(&self, buf: &mut Vec<u8>) {
     let mut buf2 = Vec::new();
-    self.inner.iter().for_each(|ComponentStore(c)| {
-      c.write(&mut buf2);
-    });
+    self.inner.iter().for_each(|c| c.0.write(&mut buf2));
     let len: u16 = buf2.len().try_into().expect("flowspec length should fit in u16");
     assert!(len < 0xf000);
     if len < 240 {
@@ -74,7 +73,7 @@ impl Flowspec {
     buf.extend(buf2);
   }
 
-  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>> {
     let mut len_bytes = [0; 2];
     match reader.read_u8().await {
       Ok(n) => len_bytes[0] = n,
@@ -104,10 +103,10 @@ impl Flowspec {
     }
     Ok(Some(Self { afi, inner }))
   }
-  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
+  pub async fn read_v4<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>> {
     Self::read(reader, Afi::Ipv4).await
   }
-  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
+  pub async fn read_v6<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>> {
     Self::read(reader, Afi::Ipv6).await
   }
 
@@ -250,7 +249,7 @@ impl Component {
     }
   }
 
-  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> super::Result<Option<Self>> {
+  pub async fn read<R: AsyncRead + Unpin>(reader: &mut R, afi: Afi) -> Result<Option<Self>> {
     use ComponentKind as CK;
 
     let kind = match reader.read_u8().await {
@@ -305,15 +304,12 @@ impl Component {
     }
   }
 
-  async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> super::Result<Self> {
+  async fn parse_v4_prefix(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
     let (prefix, _) = IpPrefix::read_v4(reader).await?.ok_or_else(|| io::Error::from(UnexpectedEof))?;
     Ok(f(prefix, 0))
   }
 
-  async fn parse_v6_prefix_pattern(
-    f: fn(IpPrefix, u8) -> Self,
-    reader: &mut (impl AsyncRead + Unpin),
-  ) -> super::Result<Self> {
+  async fn parse_v6_prefix_pattern(f: fn(IpPrefix, u8) -> Self, reader: &mut (impl AsyncRead + Unpin)) -> Result<Self> {
     let len = reader.read_u8().await?;
     if len > 128 {
       return Err(IpPrefixError { kind: IpWithPrefixErrorKind::PrefixLenTooLong(len, 128).into(), value: None }.into());

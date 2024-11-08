@@ -1,7 +1,7 @@
 pub mod bgp;
 pub mod ipc;
+pub mod kernel;
 pub mod net;
-pub mod nft;
 pub mod util;
 
 mod args;

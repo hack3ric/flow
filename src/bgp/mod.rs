@@ -4,15 +4,14 @@ pub mod nlri;
 pub mod route;
 
 use crate::args::RunArgs;
+use crate::kernel::{self, Kernel};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
-use crate::nft::Nft;
 use flow::FlowError;
 use futures::future::pending;
 use log::{debug, error, info, warn};
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn, UpdateError};
-use nftables::helper::NftablesError;
 use nlri::{Nlri, NlriError, NlriKind};
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
@@ -59,9 +58,7 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub fn new(c: RunArgs) -> Result<Self> {
-    let nft = (!c.dry_run)
-      .then(|| Nft::new(c.table.clone(), c.chain.clone(), c.hooked, c.priority))
-      .transpose()?;
+    let nft = (!c.dry_run).then(|| Kernel::new(c.kernel.clone())).transpose()?;
     Ok(Self { config: c, state: Active, routes: Routes::new(nft) })
   }
 
@@ -366,7 +363,7 @@ pub enum Error {
   Nlri(#[from] NlriError),
 
   #[error(transparent)]
-  Nftables(#[from] NftablesError),
+  Kernel(#[from] kernel::Error),
 }
 
 impl From<IpPrefixError> for Error {

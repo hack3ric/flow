@@ -10,7 +10,7 @@ use strum::FromRepr;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
+/// <https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromRepr, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum Afi {

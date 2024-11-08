@@ -1,11 +1,13 @@
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
+use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
-use crate::util::Intersect;
+use crate::util::{Intersect, TruthTable};
 use itertools::Itertools;
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::helper::{apply_ruleset, get_current_ruleset_raw, NftablesError};
+use nftables::helper::{apply_ruleset, get_current_ruleset_raw};
+use nftables::schema::Nftables;
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
 use serde::{Deserialize, Serialize};
@@ -13,12 +15,10 @@ use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{self, Display, Formatter, Write};
 use std::marker::PhantomData;
 use std::mem::replace;
 use std::net::IpAddr;
-use std::ops::{Add, Not, RangeInclusive};
-use thiserror::Error;
+use std::ops::{Not, RangeInclusive};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Nft {
@@ -34,7 +34,7 @@ impl Nft {
     chain: impl Into<Cow<'static, str>>,
     hooked: bool,
     priority: i32,
-  ) -> Result<Self, NftablesError> {
+  ) -> Result<Self> {
     let table = table.into();
     let chain = chain.into();
     let mut batch = Batch::new();
@@ -56,7 +56,7 @@ impl Nft {
     Ok(Self { table, chain, armed: true })
   }
 
-  fn exit(&self) -> Result<(), NftablesError> {
+  fn exit(&self) -> Result<()> {
     let mut batch = Batch::new();
     batch.delete(schema::NfListObject::Chain(schema::Chain {
       family: types::NfFamily::INet,
@@ -64,7 +64,7 @@ impl Nft {
       name: self.chain.to_string(),
       ..Default::default()
     }));
-    apply_ruleset(&batch.to_nftables(), None, None)
+    Ok(apply_ruleset(&batch.to_nftables(), None, None)?)
   }
 
   pub fn make_new_rule(&self, stmts: Vec<stmt::Statement>, comment: Option<impl ToString>) -> schema::NfListObject {
@@ -88,13 +88,13 @@ impl Nft {
     })
   }
 
-  pub fn get_current_ruleset_raw(&self) -> Result<String, NftablesError> {
+  pub fn get_current_ruleset_raw(&self) -> Result<String> {
     let args = vec!["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
-    get_current_ruleset_raw(None, Some(args))
+    Ok(get_current_ruleset_raw(None, Some(args))?)
   }
 
-  pub fn apply_ruleset(&self, batch: Batch) -> Result<(), NftablesError> {
-    apply_ruleset(&batch.to_nftables(), None, None)
+  pub fn apply_ruleset(&self, n: &Nftables) -> Result<()> {
+    Ok(apply_ruleset(n, None, None)?)
   }
 }
 
@@ -106,10 +106,7 @@ impl Drop for Nft {
   }
 }
 
-pub fn flow_to_nft_stmts(
-  spec: &Flowspec,
-  info: &RouteInfo,
-) -> Result<impl Iterator<Item = Vec<stmt::Statement>>, ToNftStmtError> {
+pub fn flow_to_nft_stmts(spec: &Flowspec, info: &RouteInfo) -> Result<impl Iterator<Item = Vec<stmt::Statement>>> {
   let mut total = 1usize;
   let base = spec
     .to_nft_stmts()?
@@ -143,7 +140,7 @@ type StatementBlock = SmallVec<[stmt::Statement; 1]>;
 type StatementBranch = SmallVec<[StatementBlock; 1]>;
 
 impl Flowspec {
-  fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch, ToNftStmtError>> + '_, ToNftStmtError> {
+  fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch>> + '_> {
     use ComponentKind as CK;
 
     let set = self.component_set();
@@ -153,7 +150,7 @@ impl Flowspec {
       (false, false) => Transport::Unknown,
       (false, true) => Transport::Icmp,
       (true, false) => Transport::Tcp,
-      _ => return Err(ToNftStmtError(())),
+      _ => return Err(Error::ToNftStmt),
     };
 
     let first = make_match(
@@ -170,7 +167,7 @@ impl Flowspec {
 }
 
 impl Component {
-  fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch, ToNftStmtError> {
+  fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch> {
     use Component::*;
     use Transport::*;
 
@@ -179,7 +176,7 @@ impl Component {
     let (th, tp_code) = match tp {
       Tcp => (Ok("tcp"), Some(6)),
       Icmp => (
-        Err(ToNftStmtError(())),
+        Err(Error::ToNftStmt),
         Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58)),
       ),
       Unknown => (Ok("th"), None),
@@ -191,25 +188,28 @@ impl Component {
       &SrcPrefix(pattern, offset) => pattern_stmt(true, pattern, offset).into_iter().collect(),
 
       Protocol(ops) => match tp_code {
-        Some(code) => ops.op(code).then(SmallVec::new_const).ok_or(ToNftStmtError(()))?,
+        Some(code) => ops.op(code).then(SmallVec::new_const).ok_or(Error::ToNftStmt)?,
         None => range_stmt_branch(make_meta(expr::MetaKey::L4proto), ops, 0xff)?,
       },
 
-      Port(ops) => range_stmt(make_payload_field(th?, "dport"), ops, 0xffff)?
-        .into_iter()
-        .chain(range_stmt(make_payload_field(th?, "sport"), ops, 0xffff)?)
-        .map(|x| smallvec_inline![x])
-        .collect(),
+      Port(ops) => {
+        let th = th?;
+        range_stmt(make_payload_field(th, "dport"), ops, 0xffff)?
+          .into_iter()
+          .chain(range_stmt(make_payload_field(th, "sport"), ops, 0xffff)?)
+          .map(|x| smallvec_inline![x])
+          .collect()
+      }
       DstPort(ops) => range_stmt_branch(make_payload_field(th?, "dport"), ops, 0xffff)?,
       SrcPort(ops) => range_stmt_branch(make_payload_field(th?, "sport"), ops, 0xffff)?,
       IcmpType(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "type"), ops, 0xff)?,
       IcmpCode(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "code"), ops, 0xff)?,
-      IcmpType(_) | IcmpCode(_) => return Err(ToNftStmtError(())),
+      IcmpType(_) | IcmpCode(_) => return Err(Error::ToNftStmt),
       TcpFlags(ops) => {
         let tt = ops.to_truth_table();
         let tt = tt.shrink(0b11111111);
         if tt.is_always_false() {
-          return Err(ToNftStmtError(()));
+          return Err(Error::ToNftStmt);
         } else if tt.is_always_true() {
           return Ok(SmallVec::new_const());
         }
@@ -471,12 +471,12 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlo
   Some(buf)
 }
 
-fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>, ToNftStmtError> {
+fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>> {
   let ranges = ops.to_ranges();
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
   } else if ranges.is_empty() {
-    return Err(ToNftStmtError(()));
+    return Err(Error::ToNftStmt);
   }
   let allowed = ranges
     .into_iter()
@@ -499,13 +499,9 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
   )))
 }
 
-fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch, ToNftStmtError> {
+fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch> {
   range_stmt(left, ops, max).map(|x| x.into_iter().map(|x| smallvec_inline![x]).collect())
 }
-
-#[derive(Debug, Clone, Copy, Error)]
-#[error("flowspec matches nothing")]
-pub struct ToNftStmtError(());
 
 impl Ops<Numeric> {
   fn to_ranges(&self) -> Vec<RangeInclusive<u64>> {
@@ -630,7 +626,7 @@ impl Op<Numeric> {
 }
 
 impl Op<Bitmask> {
-  fn to_truth_table(self) -> TruthTable {
+  pub fn to_truth_table(self) -> TruthTable {
     use BitmaskFlags::*;
     let (inv, init) = match (BitmaskFlags::from_repr(self.flags & 0b11).unwrap(), self.value) {
       (Any | NotAll, 0) => (false, None), // always false
@@ -662,187 +658,6 @@ fn is_sorted_ranges_always_true<'a>(ranges: impl IntoIterator<Item = &'a RangeIn
   buf == (0..=u64::MAX)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TruthTable {
-  mask: u64,
-  inv: bool,
-  truth: BTreeSet<u64>,
-}
-
-impl TruthTable {
-  pub fn always_true() -> Self {
-    Self { mask: 0, inv: false, truth: BTreeSet::new() }
-  }
-
-  pub fn always_false() -> Self {
-    Self { mask: 0, inv: false, truth: BTreeSet::new() }
-  }
-
-  pub fn is_always_true(&self) -> bool {
-    self.inv && self.truth.is_empty() || !self.inv && self.truth.len() == 1 << self.mask.count_ones()
-  }
-
-  pub fn is_always_false(&self) -> bool {
-    !self.inv && self.truth.is_empty() || self.inv && self.truth.len() == 1 << self.mask.count_ones()
-  }
-
-  pub fn and(self, other: Self) -> Self {
-    if self.is_always_false() || other.is_always_false() {
-      Self::always_false()
-    } else if self.is_always_true() {
-      other
-    } else if other.is_always_true() {
-      self
-    } else {
-      match (self.inv, other.inv) {
-        (false, false) => self.truth_intersection(&other, false),
-        (true, true) => self.truth_union(&other, true),
-        (false, true) => self.truth_difference(&other, false),
-        (true, false) => other.and(self),
-      }
-    }
-  }
-
-  pub fn or(self, other: Self) -> Self {
-    if self.is_always_true() || other.is_always_true() {
-      Self::always_true()
-    } else if self.is_always_false() {
-      other
-    } else if other.is_always_false() {
-      self
-    } else {
-      match (self.inv, other.inv) {
-        (false, false) => self.truth_union(&other, false),
-        (true, true) => self.truth_intersection(&other, true),
-        (false, true) => other.truth_difference(&self, true),
-        (true, false) => other.or(self),
-      }
-    }
-  }
-
-  #[allow(unused)]
-  pub fn not(mut self) -> Self {
-    self.inv = !self.inv;
-    self
-  }
-
-  fn possible_values_masked(&self) -> Cow<BTreeSet<u64>> {
-    if self.inv {
-      Cow::Owned(
-        iter_masked(self.mask)
-          .collect::<BTreeSet<_>>()
-          .difference(&self.truth)
-          .copied()
-          .collect(),
-      )
-    } else {
-      Cow::Borrowed(&self.truth)
-    }
-  }
-
-  pub fn shrink(&self, other_mask: u64) -> Cow<Self> {
-    let mask = self.mask & other_mask;
-    if mask == self.mask {
-      Cow::Borrowed(self)
-    } else {
-      Cow::Owned(Self { mask, inv: self.inv, truth: self.truth.iter().map(|v| v & mask).collect() })
-    }
-  }
-
-  pub fn expand(&self, other_mask: u64) -> Cow<Self> {
-    let mask = self.mask | other_mask;
-    if mask == self.mask {
-      Cow::Borrowed(self)
-    } else {
-      Cow::Owned(Self {
-        mask,
-        inv: self.inv,
-        truth: iter_masked(other_mask & !self.mask)
-          .map(|a| self.truth.iter().map(move |b| a | b))
-          .flatten()
-          .collect(),
-      })
-    }
-  }
-
-  fn expand_set(&self, other_mask: u64) -> Cow<BTreeSet<u64>> {
-    match self.expand(other_mask) {
-      Cow::Borrowed(x) => Cow::Borrowed(&x.truth),
-      Cow::Owned(x) => Cow::Owned(x.truth),
-    }
-  }
-
-  fn truth_intersection(&self, other: &Self, inv: bool) -> Self {
-    self.truth_op(other, inv, |a, b| a.intersection(b).copied().collect())
-  }
-  fn truth_union(&self, other: &Self, inv: bool) -> Self {
-    self.truth_op(other, inv, |a, b| a.union(b).copied().collect())
-  }
-  fn truth_difference(&self, other: &Self, inv: bool) -> Self {
-    self.truth_op(other, inv, |a, b| a.difference(b).copied().collect())
-  }
-  fn truth_op<F>(&self, other: &Self, inv: bool, f: F) -> Self
-  where
-    F: for<'a> FnOnce(&'a BTreeSet<u64>, &'a BTreeSet<u64>) -> BTreeSet<u64>,
-  {
-    Self {
-      mask: self.mask | other.mask,
-      inv,
-      truth: f(&self.expand_set(other.mask), &other.expand_set(self.mask)),
-    }
-  }
-}
-
-fn pos_of_set_bits(mut mask: u64) -> SmallVec<[u8; 6]> {
-  let mut pos = SmallVec::with_capacity(mask.count_ones().try_into().unwrap());
-  while mask.trailing_zeros() < 64 {
-    pos.push(mask.trailing_zeros().try_into().unwrap());
-    mask ^= 1 << mask.trailing_zeros();
-  }
-  pos
-}
-
-/// Iterator over every possible value under the mask.
-fn iter_masked(mask: u64) -> impl Iterator<Item = u64> + Clone + 'static {
-  let pos = pos_of_set_bits(mask);
-  let empty_zero = pos.is_empty().then_some(0);
-  (0u64..1 << mask.count_ones())
-    .map(move |x| pos.iter().enumerate().map(|(i, p)| ((x >> i) & 1) << p).fold(0, Add::add))
-    .chain(empty_zero)
-}
-
-impl Display for TruthTable {
-  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    write!(f, "({}{:b}) {{", if f.alternate() { "0b" } else { "" }, self.mask)?;
-    let possible_values = self.possible_values_masked();
-    let mut iter = possible_values.iter();
-    if let Some(first) = iter.next() {
-      if f.alternate() {
-        f.write_str("0b")?;
-      }
-      for _ in 0..first.leading_zeros() - self.mask.leading_zeros() {
-        f.write_char('0')?;
-      }
-      if *first > 0 {
-        write!(f, "{:b}", first)?;
-      }
-      for val in iter {
-        f.write_str(", ")?;
-        if f.alternate() {
-          f.write_str("0b")?;
-        }
-        for _ in 0..val.leading_zeros() - self.mask.leading_zeros() {
-          f.write_char('0')?;
-        }
-        if *val > 0 {
-          write!(f, "{:b}", val)?;
-        }
-      }
-    }
-    f.write_char('}')
-  }
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -857,13 +672,5 @@ mod tests {
     println!("{ranges:?}");
     assert_eq!(ranges, result);
     Ok(())
-  }
-
-  #[test]
-  fn test_truth_table() {
-    let op1 = Op::all(0b0100);
-    let op2 = Op::not_all(0b1010);
-    let tt = op1.to_truth_table().or(op2.to_truth_table());
-    println!("{}", tt);
   }
 }

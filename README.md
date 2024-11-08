@@ -72,6 +72,7 @@ Show information of currently running Flow instance:
 
 ## Future Work
 
+- **Implement [Redirect-to-IP Action](https://datatracker.ietf.org/doc/draft-ietf-idr-flowspec-redirect-ip/) draft**: will bring in iproute2/rtnetlink dependency
 - **Programmatic handling**: custom traffic filter actions and route handling (not limited to flowspecs)
 - [**Validation procedure**](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure): currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here
 - **VPN routes and VRF redirection**: does not have many knowledge right now, but certainly doable

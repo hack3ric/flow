@@ -1,8 +1,8 @@
 //! Network Layer Reachability Information (NLRI).
 
-use super::extend_with_u16_len;
 use super::flow::Flowspec;
 use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
+use super::{extend_with_u16_len, Result};
 use crate::net::{Afi, IpPrefix};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -97,13 +97,13 @@ impl Nlri {
     }
   }
 
-  pub async fn read_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
+  pub async fn read_mp_reach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
     Self::read_mp(reader, true).await
   }
-  pub async fn read_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Self> {
+  pub async fn read_mp_unreach<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
     Self::read_mp(reader, false).await
   }
-  pub async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> super::Result<Self> {
+  pub async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R, reach: bool) -> Result<Self> {
     let afi = reader.read_u16().await?;
     let safi = reader.read_u8().await?;
     let next_hop;
@@ -165,7 +165,7 @@ impl NextHop {
     }
   }
 
-  async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R) -> super::Result<Option<Self>> {
+  async fn read_mp<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Self>> {
     let len = reader.read_u8().await?;
     match len {
       0 => Ok(None),

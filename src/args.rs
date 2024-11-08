@@ -1,3 +1,4 @@
+use crate::kernel::KernelArgs;
 use crate::net::IpPrefix;
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity::{InfoLevel, Verbosity};
@@ -69,28 +70,8 @@ pub struct RunArgs {
   #[arg(short, long)]
   pub dry_run: bool,
 
-  /// nftables table name.
-  ///
-  /// The table WILL NOT be automatically deleted when the program exits.
-  #[arg(long, default_value_t = Cow::Borrowed("flowspecs"))]
-  pub table: Cow<'static, str>,
-
-  /// nftables chain name.
-  ///
-  /// The chain WILL be automatically deleted when the program exits.
-  #[arg(long, default_value_t = Cow::Borrowed("flowspecs"))]
-  pub chain: Cow<'static, str>,
-
-  /// Attach flowspec rules to nftables input hook.
-  ///
-  /// If not set, the nftables rule must be `jump`ed or `goto`ed from a base
-  /// (hooked) chain in the same table to take effect.
-  #[arg(long)]
-  pub hooked: bool,
-
-  /// Hook priority.
-  #[arg(long, default_value_t = 0)]
-  pub priority: i32,
+  #[command(flatten)]
+  pub kernel: KernelArgs,
 
   /// File to read arguments from.
   ///
