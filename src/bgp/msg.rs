@@ -19,9 +19,6 @@ use UpdateError::*;
 
 pub const AS_TRANS: u16 = 23456;
 
-// pub const AS_SET: u8 = 1;
-pub const AS_SEQUENCE: u8 = 2;
-
 pub trait MessageSend {
   fn write_data(&self, buf: &mut Vec<u8>);
 
@@ -398,7 +395,7 @@ impl UpdateMessage<'static> {
     let pattrs_len = reader.read_u16().await?;
     let mut pattrs_reader = take(&mut reader, pattrs_len.into());
 
-    let mut treat_as_withdraw: Option<UpdateError> = None;
+    let mut withdraw = None;
 
     let read = async {
       while let Ok(flags) = pattrs_reader.read_u8().await {
@@ -432,7 +429,7 @@ impl UpdateMessage<'static> {
             | PathAttr::Aggregator,
           ) if flags & (PF_OPTIONAL | PF_PARTIAL) != 0 || flags & PF_TRANSITIVE == 0 => {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+            withdraw.get_or_insert(AttrFlags(pattr_buf));
           }
 
           Some(PathAttr::Origin) => {
@@ -442,12 +439,12 @@ impl UpdateMessage<'static> {
                 Some(x) => result.route_info.origin = x,
                 None => {
                   let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, [origin]).await?;
-                  treat_as_withdraw.get_or_insert(InvalidOrigin(pattr_buf));
+                  withdraw.get_or_insert(InvalidOrigin(pattr_buf));
                 }
               }
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -459,13 +456,13 @@ impl UpdateMessage<'static> {
                 let Some(seg_type) = AsSegmentKind::from_repr(seg_type) else {
                   error!("unknown AS_PATH segment type: {seg_type}");
                   discard(seg_reader).await?;
-                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  withdraw.get_or_insert(MalformedAsPath);
                   break;
                 };
                 let as_len = seg_reader.read_u8().await?;
                 if u16::from(as_len) != len / 4 {
                   discard(seg_reader).await?;
-                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  withdraw.get_or_insert(MalformedAsPath);
                   break;
                 }
                 let mut seq = SmallVec::with_capacity(as_len.into());
@@ -477,7 +474,7 @@ impl UpdateMessage<'static> {
                 }
                 if count != as_len {
                   discard(seg_reader).await?;
-                  treat_as_withdraw.get_or_insert(MalformedAsPath);
+                  withdraw.get_or_insert(MalformedAsPath);
                   break;
                 }
                 let seg = match seg_type {
@@ -496,7 +493,7 @@ impl UpdateMessage<'static> {
               old_next_hop = Some(NextHop::V4(pattrs_reader.read_u32().await?.into()));
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(InvalidNextHop(pattr_buf));
+              withdraw.get_or_insert(InvalidNextHop(pattr_buf));
             }
           }
 
@@ -505,7 +502,7 @@ impl UpdateMessage<'static> {
               result.route_info.med = Some(pattrs_reader.read_u32().await?);
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -514,7 +511,7 @@ impl UpdateMessage<'static> {
               result.route_info.local_pref = Some(pattrs_reader.read_u32().await?);
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -542,7 +539,7 @@ impl UpdateMessage<'static> {
             | PathAttr::LargeCommunities,
           ) if flags & (PF_OPTIONAL | PF_TRANSITIVE) == 0 => {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+            withdraw.get_or_insert(AttrFlags(pattr_buf));
           }
 
           Some(PathAttr::Communities) => {
@@ -555,7 +552,7 @@ impl UpdateMessage<'static> {
                 .collect();
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -569,7 +566,7 @@ impl UpdateMessage<'static> {
                 .collect();
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -585,11 +582,11 @@ impl UpdateMessage<'static> {
                 result.route_info.ipv6_ext_comm = comm;
               } else {
                 let pattr_buf = get_pattr_buf(&[][..], flags, kind, len, opt_buf).await?;
-                treat_as_withdraw.get_or_insert(OptAttr(pattr_buf));
+                withdraw.get_or_insert(OptAttr(pattr_buf));
               }
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -603,7 +600,7 @@ impl UpdateMessage<'static> {
                 .collect();
             } else {
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrLen(pattr_buf));
+              withdraw.get_or_insert(AttrLen(pattr_buf));
             }
           }
 
@@ -612,7 +609,7 @@ impl UpdateMessage<'static> {
             if flags & PF_OPTIONAL == 0 || flags & (PF_TRANSITIVE | PF_PARTIAL) != 0 =>
           {
             let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-            treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+            withdraw.get_or_insert(AttrFlags(pattr_buf));
           }
 
           Some(PathAttr::MpReachNlri) => {
@@ -644,11 +641,11 @@ impl UpdateMessage<'static> {
             if flags & PF_OPTIONAL == 0 {
               // reject unknown well-known attribute
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+              withdraw.get_or_insert(AttrFlags(pattr_buf));
             } else if flags & PF_TRANSITIVE == 0 && flags & PF_PARTIAL != 0 {
               // reject non-transitive but partial set
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
-              treat_as_withdraw.get_or_insert(AttrFlags(pattr_buf));
+              withdraw.get_or_insert(AttrFlags(pattr_buf));
             } else if flags & PF_TRANSITIVE != 0 {
               // store transitive unknown attributes
               let pattr_buf = get_pattr_buf(&mut pattrs_reader, flags, kind, len, []).await?;
@@ -665,7 +662,7 @@ impl UpdateMessage<'static> {
     match read.await {
       Err(super::Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
         discard(pattrs_reader).await?;
-        treat_as_withdraw.get_or_insert(MalformedAttrList);
+        withdraw.get_or_insert(MalformedAttrList);
       }
       other => other?,
     }
@@ -685,7 +682,7 @@ impl UpdateMessage<'static> {
       result.old_nlri = Some(Nlri::new_route(Afi::Ipv4, old_prefixes, Some(next_hop))?);
     } else if !old_prefixes.is_empty() {
       warn!("missing NEXT_HOP while containing BGP-4 NLRI");
-      treat_as_withdraw.get_or_insert(MissingWellKnownAttr(PathAttr::NextHop as u8));
+      withdraw.get_or_insert(MissingWellKnownAttr(PathAttr::NextHop as u8));
     }
 
     if result.nlri.is_some() || result.old_nlri.is_some() {
@@ -693,13 +690,12 @@ impl UpdateMessage<'static> {
         let attr_num = attr as u8;
         if !visited.contains(&attr_num) {
           warn!("missing well-known mandatory attribute {attr}");
-          treat_as_withdraw.get_or_insert(MissingWellKnownAttr(attr_num));
+          withdraw.get_or_insert(MissingWellKnownAttr(attr_num));
         }
       }
     }
 
-    // TODO: process treat-as-withdraw
-    if let Some(error) = treat_as_withdraw {
+    if let Some(error) = withdraw {
       let nlris: SmallVec<_> = [result.nlri, result.old_nlri, result.withdrawn, result.old_withdrawn]
         .into_iter()
         .flatten()
