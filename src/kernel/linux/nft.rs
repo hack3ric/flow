@@ -7,7 +7,7 @@ use itertools::Itertools;
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
 use nftables::helper::{apply_ruleset, get_current_ruleset_raw};
-use nftables::schema::Nftables;
+use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
 use serde::{Deserialize, Serialize};
@@ -21,14 +21,14 @@ use std::net::IpAddr;
 use std::ops::{Not, RangeInclusive};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Nft {
+pub struct Nftables {
   table: Cow<'static, str>,
   chain: Cow<'static, str>,
   #[serde(skip)]
   armed: bool,
 }
 
-impl Nft {
+impl Nftables {
   pub fn new(
     table: impl Into<Cow<'static, str>>,
     chain: impl Into<Cow<'static, str>>,
@@ -93,12 +93,12 @@ impl Nft {
     Ok(get_current_ruleset_raw(None, Some(args))?)
   }
 
-  pub fn apply_ruleset(&self, n: &Nftables) -> Result<()> {
+  pub fn apply_ruleset(&self, n: &NftablesReq) -> Result<()> {
     Ok(apply_ruleset(n, None, None)?)
   }
 }
 
-impl Drop for Nft {
+impl Drop for Nftables {
   fn drop(&mut self) {
     if self.armed {
       let _ = self.exit();

@@ -4,10 +4,10 @@ pub use nft::flow_to_nft_stmts as flow_to_rules;
 
 use super::Result;
 use clap::Args;
-use nft::Nft;
+use nft::Nftables;
 use nftables::batch::Batch;
 use nftables::helper::NftablesError;
-use nftables::schema::{NfCmd, NfObject, Nftables};
+use nftables::schema::{NfCmd, NfObject, Nftables as NftablesReq};
 use nftables::stmt::Statement;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -17,20 +17,21 @@ pub type Rule = Vec<Statement>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Kernel {
-  nft: Nft,
+  nft: Nftables,
   counter: u64,
 }
 
 impl Kernel {
   pub fn new(args: KernelArgs) -> Result<Self> {
     let KernelArgs { table, chain, hooked, priority } = args;
-    Ok(Self { nft: Nft::new(table, chain, hooked, priority)?, counter: 0 })
+    Ok(Self { nft: Nftables::new(table, chain, hooked, priority)?, counter: 0 })
   }
 
+  // TODO: move flow_to_rules here, and directly use flowspec and route info
   pub fn apply(&mut self, rules: impl IntoIterator<Item = Rule>) -> Result<u64> {
     let id = self.counter;
     self.counter += 1;
-    let nftables = Nftables {
+    let nftables = NftablesReq {
       objects: rules
         .into_iter()
         .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x, Some(id)))))
