@@ -201,7 +201,23 @@ impl IpPrefix {
     match self.len().cmp(&other.len()) {
       Less => match (self.prefix(), self.inner.mask(), other.prefix()) {
         (V4(p1), V4(mask), V4(p2)) => p2 & mask == p1,
-        (V6(p1), V6(mask), V6(p2)) => dbg!(p2 & dbg!(mask)) == dbg!(p1),
+        (V6(p1), V6(mask), V6(p2)) => p2 & mask == p1,
+        _ => false,
+      },
+      Equal => self == other,
+      Greater => false,
+    }
+  }
+
+  pub fn overlaps<T: Into<Self>>(self, other: T) -> bool {
+    use std::cmp::Ordering::*;
+    use IpAddr::*;
+
+    let other = other.into();
+    match self.len().cmp(&other.len()) {
+      Less => match (self.prefix(), self.inner.mask(), other.prefix()) {
+        (V4(p1), V4(mask), V4(p2)) => (p1.to_bits() ^ p2.to_bits()) & mask.to_bits() == 0,
+        (V6(p1), V6(mask), V6(p2)) => (p1.to_bits() ^ p2.to_bits()) & mask.to_bits() == 0,
         _ => false,
       },
       Equal => self == other,
