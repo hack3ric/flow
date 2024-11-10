@@ -1,13 +1,12 @@
 use anstyle::{AnsiColor, Color, Reset, Style};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::BTreeSet;
-use std::fmt::{self, Write};
-use std::fmt::{Display, Formatter};
+use std::fmt::{self, Display, Formatter, Write};
 use std::ops::{Add, Deref, RangeInclusive};
 use std::rc::Rc;
-use std::borrow::Cow;
 
 pub const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
 pub const FG_BLUE_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Blue))).bold();

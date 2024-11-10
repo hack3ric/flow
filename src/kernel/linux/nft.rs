@@ -297,6 +297,8 @@ impl Component {
 
 impl RouteInfo<'_> {
   fn to_nft_stmts(&self, afi: Afi) -> Option<StatementBranch> {
+    // TODO: redirect to IP
+    // if copy bit is set, no need for rtnl
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))

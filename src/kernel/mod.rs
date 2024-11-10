@@ -3,6 +3,9 @@
 //! Currently only Linux is supported, which uses nftables. Future support may
 //! include *BSD using `pf` as backend.
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod rtnl;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

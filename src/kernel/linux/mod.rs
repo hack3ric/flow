@@ -66,6 +66,8 @@ impl Kernel {
     self.nft.apply_ruleset(&batch.to_nftables())?;
     Ok(())
   }
+
+  // TODO: Kernel::process
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -98,6 +100,9 @@ pub struct KernelArgs {
 pub enum Error {
   #[error(transparent)]
   Nftables(#[from] NftablesError),
+
+  #[error(transparent)]
+  RtNetlink(#[from] rtnetlink::Error),
 
   // TODO: move this out
   #[error("flowspec matches nothing")]
