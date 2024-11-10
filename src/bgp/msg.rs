@@ -706,7 +706,7 @@ impl UpdateMessage<'static> {
         Err(super::Error::Withdraw(error, nlris))
       }
     } else {
-      // TODO: check for NEXT_HOP semantic correctness
+      // XXX: we don't have a way to check semantics of next hop
       Ok(result)
     }
   }

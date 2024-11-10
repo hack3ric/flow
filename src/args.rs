@@ -70,6 +70,7 @@ pub struct RunArgs {
   #[arg(short, long)]
   pub dry_run: bool,
 
+  /// Platform-specific kernel settings.
   #[command(flatten)]
   pub kernel: KernelArgs,
 
