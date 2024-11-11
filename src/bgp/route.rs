@@ -1,9 +1,10 @@
 use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
-use crate::kernel::{self, flow_to_rules, Kernel};
+use crate::kernel::{self, Kernel};
 use crate::net::IpPrefix;
 use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use either::Either;
+use futures::future::pending;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::mem::swap;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
 use strum::{EnumDiscriminants, FromRepr};
 
@@ -30,31 +31,35 @@ impl Routes {
     Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), kernel }
   }
 
-  pub fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> kernel::Result<()> {
+  pub async fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> kernel::Result<()> {
     match nlri.content {
       NlriContent::Unicast { prefixes, next_hop } => self
         .unicast
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
         for spec in specs {
-          let rules = match flow_to_rules(&spec, &info) {
-            Ok(rules) => rules,
-            Err(error) => {
-              warn!("flowspec {spec} rejected: {error}");
-              self.withdraw_spec(spec)?;
-              continue;
+          let id = if let Some(kernel) = &mut self.kernel {
+            match kernel.apply(&spec, &info).await {
+              Ok(id) => id,
+              Err(e @ kernel::Error::ToNftStmt) => {
+                warn!("flowspec {spec} rejected: {e}");
+                self.withdraw_spec(spec).await?;
+                continue;
+              }
+              Err(e) => return Err(e),
             }
+          } else {
+            0
           };
 
-          let id = self.kernel.as_mut().map(|x| x.apply(rules)).transpose()?.unwrap_or(0);
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              if let Some(kernel) = &self.kernel {
-                kernel.remove(id)?;
+              if let Some(kernel) = &mut self.kernel {
+                kernel.remove(id).await?;
               }
             }
           }
@@ -64,36 +69,48 @@ impl Routes {
     Ok(())
   }
 
-  pub fn withdraw(&mut self, nlri: Nlri) -> kernel::Result<()> {
+  pub async fn withdraw(&mut self, nlri: Nlri) -> kernel::Result<()> {
     match nlri.content {
       NlriContent::Unicast { prefixes, .. } => prefixes
         .into_iter()
         .for_each(|p| self.unicast.remove(&p).map(|_| ()).unwrap_or(())),
-      NlriContent::Flow { specs } => specs.into_iter().map(|s| self.withdraw_spec(s)).collect::<Result<(), _>>()?,
-    }
-    Ok(())
-  }
-
-  pub fn withdraw_all(&mut self) -> kernel::Result<()> {
-    self.unicast.clear();
-    let mut flow = BTreeMap::new();
-    swap(&mut flow, &mut self.flow);
-    if let Some(kernel) = &self.kernel {
-      for (_, (id, _)) in flow {
-        kernel.remove(id)?;
+      NlriContent::Flow { specs } => {
+        for s in specs {
+          self.withdraw_spec(s).await?;
+        }
       }
     }
     Ok(())
   }
 
-  fn withdraw_spec(&mut self, spec: Flowspec) -> kernel::Result<()> {
+  pub async fn withdraw_all(&mut self) -> kernel::Result<()> {
+    self.unicast.clear();
+    let mut flow = BTreeMap::new();
+    swap(&mut flow, &mut self.flow);
+    if let Some(kernel) = &mut self.kernel {
+      for (_, (id, _)) in flow {
+        kernel.remove(id).await?;
+      }
+    }
+    Ok(())
+  }
+
+  async fn withdraw_spec(&mut self, spec: Flowspec) -> kernel::Result<()> {
     let Some((id, _)) = self.flow.remove(&spec) else {
       return Ok(());
     };
-    if let Some(kernel) = &self.kernel {
-      kernel.remove(id)?;
+    if let Some(kernel) = &mut self.kernel {
+      kernel.remove(id).await?;
     }
     Ok(())
+  }
+
+  pub async fn process(&mut self) -> kernel::Result<()> {
+    if let Some(kernel) = &mut self.kernel {
+      kernel.process().await
+    } else {
+      pending().await
+    }
   }
 
   pub fn print(&self, verbosity: LevelFilter) {
@@ -386,6 +403,7 @@ impl ExtCommunity {
       (As(_), 0x07) => TrafficAction { terminal: l & 1 == 0, sample: l & (1 << 1) != 0 },
       (_, 0x08) => RtRedirect { rt: g, value: l },
       (As(_), 0x09) => TrafficMarking { dscp: (l as u8) & 0b111111 },
+      (Ipv4(ip), 0x0c) => RedirectToIp { ip: ip.into(), copy: l & 1 != 0 },
       _ => return None,
     };
     Some(result)
@@ -460,8 +478,13 @@ impl Ipv6ExtCommunity {
   }
 
   pub fn action(self) -> Option<TrafficFilterAction> {
-    ([self.kind, self.sub_kind] == [0x00, 0x0d])
-      .then(|| TrafficFilterAction::RtRedirectIpv6 { rt: self.global_admin, value: self.local_admin })
+    use TrafficFilterAction::*;
+    let action = match [self.kind, self.sub_kind] {
+      [0x00, 0x0c] => RedirectToIp { ip: self.global_admin.into(), copy: self.local_admin & 1 != 0 },
+      [0x00, 0x0d] => RtRedirectIpv6 { rt: self.global_admin, value: self.local_admin },
+      _ => return None,
+    };
+    Some(action)
   }
 }
 
@@ -473,13 +496,16 @@ impl Debug for Ipv6ExtCommunity {
 
 impl Display for Ipv6ExtCommunity {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    match [self.kind, self.sub_kind] {
-      [0x00, 0x02] => f.write_str("(rt, ")?,
-      [0x00, 0x03] => f.write_str("(ro, ")?,
-      [0x00, 0x0d] => f.write_str("(rt-redirect-ipv6, ")?,
-      bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
+    if let Some(action) = self.action() {
+      Display::fmt(&action, f)
+    } else {
+      match [self.kind, self.sub_kind] {
+        [0x00, 0x02] => f.write_str("(rt, ")?,
+        [0x00, 0x03] => f.write_str("(ro, ")?,
+        bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
+      }
+      write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
     }
-    write!(f, "{}, {:#06x})", self.global_admin, self.local_admin)
   }
 }
 
@@ -507,7 +533,7 @@ pub enum TrafficFilterAction {
   RtRedirect { rt: GlobalAdmin, value: u32 },
   RtRedirectIpv6 { rt: Ipv6Addr, value: u16 },
   TrafficMarking { dscp: u8 },
-  // TODO: RedirectToIp
+  RedirectToIp { ip: IpAddr, copy: bool },
 }
 
 impl TrafficFilterAction {
@@ -525,8 +551,8 @@ impl Display for TrafficFilterAction {
       TrafficAction { terminal, sample } => write!(
         f,
         "(traffic-action{}{})",
-        if *terminal { ", terminal" } else { "" },
-        if *sample { ", sample" } else { "" }
+        terminal.then_some(", terminal").unwrap_or(""),
+        sample.then_some(", sample").unwrap_or(""),
       ),
       RtRedirect { rt, value } => {
         write!(f, "(rt-redirect, {rt}, ")?;
@@ -538,6 +564,7 @@ impl Display for TrafficFilterAction {
       }
       RtRedirectIpv6 { rt, value } => write!(f, "(rt-redirect-ipv6, {rt}, {value:#06x})"),
       TrafficMarking { dscp } => write!(f, "(traffic-marking, {dscp})"),
+      RedirectToIp { ip, copy } => write!(f, "(redirect-to-ip, {ip}{})", copy.then_some(", copy").unwrap_or("")),
     }
   }
 }

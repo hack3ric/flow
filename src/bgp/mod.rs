@@ -109,7 +109,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     let result = self.process_inner().await;
     if result.is_err() {
       self.state = Active;
-      self.routes.withdraw_all()?; // TODO: print this error only
+      self.routes.withdraw_all().await?; // TODO: print this error only
     }
     result
   }
@@ -174,26 +174,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
               debug!("received update: {msg:?}");
               if msg.nlri.is_some() || msg.old_nlri.is_some() {
                 let route_info = Rc::new(msg.route_info);
-                (msg.nlri)
-                  .into_iter()
-                  .chain(msg.old_nlri)
-                  .map(|n| self.routes.commit(n, route_info.clone()))
-                  .collect::<Result<(), _>>()?;
+                for n in msg.nlri.into_iter().chain(msg.old_nlri) {
+                  self.routes.commit(n, route_info.clone()).await?;
+                }
               }
               if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
-                (msg.withdrawn)
-                  .into_iter()
-                  .chain(msg.old_withdrawn)
-                  .map(|n| self.routes.withdraw(n))
-                  .collect::<Result<(), _>>()?;
+                for n in msg.withdrawn.into_iter().chain(msg.old_withdrawn) {
+                  self.routes.withdraw(n).await?;
+                }
               }
             },
             Err(Error::Withdraw(error, nlris)) => {
               error!("{error}");
-              nlris
-                .into_iter()
-                .map(|n| self.routes.withdraw(n))
-                .collect::<Result<(), _>>()?;
+              for n in nlris {
+                self.routes.withdraw(n).await?;
+              }
             },
             Ok(Message::Keepalive) => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
             other => bad_type(other?, stream).await?,

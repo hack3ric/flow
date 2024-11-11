@@ -1,9 +1,9 @@
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
+use crate::kernel::rtnl::RtNetlink;
 use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
 use crate::util::{Intersect, TruthTable};
-use itertools::Itertools;
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
 use nftables::helper::{apply_ruleset, get_current_ruleset_raw};
@@ -106,27 +106,6 @@ impl Drop for Nftables {
   }
 }
 
-pub fn flow_to_nft_stmts(spec: &Flowspec, info: &RouteInfo) -> Result<impl Iterator<Item = Vec<stmt::Statement>>> {
-  let mut total = 1usize;
-  let base = spec
-    .to_nft_stmts()?
-    .chain(info.to_nft_stmts(spec.afi()).map(Ok))
-    .map_ok(|branch| {
-      let count = total;
-      total *= branch.len();
-      (branch, count)
-    })
-    .collect::<Result<Vec<_>, _>>()?;
-  let result = (0..total).map(move |i| {
-    (base.iter())
-      .map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i / v % x.len())].iter())
-      .flatten()
-      .cloned()
-      .collect::<Vec<_>>()
-  });
-  Ok(result)
-}
-
 /// Makes sure transport protocol is consistent across components inside a
 /// flowspec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +119,7 @@ type StatementBlock = SmallVec<[stmt::Statement; 1]>;
 type StatementBranch = SmallVec<[StatementBlock; 1]>;
 
 impl Flowspec {
-  fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch>> + '_> {
+  pub(super) fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch>> + '_> {
     use ComponentKind as CK;
 
     let set = self.component_set();
@@ -296,9 +275,11 @@ impl Component {
 }
 
 impl RouteInfo<'_> {
-  fn to_nft_stmts(&self, afi: Afi) -> Option<StatementBranch> {
-    // TODO: redirect to IP
-    // if copy bit is set, no need for rtnl
+  pub(super) fn to_nft_stmts(
+    &self,
+    afi: Afi,
+    rtnl: &mut Option<RtNetlink>,
+  ) -> Option<(StatementBranch, Option<(IpAddr, u32)>)> {
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
@@ -315,10 +296,15 @@ impl RouteInfo<'_> {
       .map(extract_terminal)
       .unwrap_or(true);
     let mut last_term = false;
+    let mut rt_info = None;
     let mut result = set
       .into_values()
-      .map(move |x| x.to_nft_stmts(afi))
-      .map(|(x, term)| (x, replace(&mut last_term, term.then(|| terminal = false).is_some())))
+      .map(move |x| x.to_nft_stmts(afi, rtnl))
+      .map(|(x, r, term)| {
+        term.then(|| terminal = false);
+        rt_info = r;
+        (x, replace(&mut last_term, term))
+      })
       .map_while(|(x, term)| term.not().then_some(x))
       .filter(|x| !x.is_empty())
       .collect::<StatementBranch>();
@@ -330,16 +316,16 @@ impl RouteInfo<'_> {
         result.last_mut().unwrap().push(ACCEPT);
       }
     }
-    result.is_empty().not().then_some(result)
+    result.is_empty().not().then_some((result, rt_info))
   }
 }
 
 impl TrafficFilterAction {
-  fn to_nft_stmts(self, afi: Afi) -> (StatementBlock, bool) {
+  fn to_nft_stmts(self, afi: Afi, rtnl: &mut Option<RtNetlink>) -> (StatementBlock, Option<(IpAddr, u32)>, bool) {
     use TrafficFilterAction::*;
     let action = match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
-        return (smallvec_inline![DROP], true)
+        return (smallvec_inline![DROP], None, true)
       }
       TrafficRateBytes { rate, .. } => smallvec![make_limit(true, rate, "bytes", "second"), DROP],
       TrafficRatePackets { rate, .. } => smallvec![make_limit(true, rate, "packets", "second"), DROP],
@@ -350,8 +336,26 @@ impl TrafficFilterAction {
         key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
         value: NUM(dscp.into()),
       })],
+      RedirectToIp { ip, copy: true } => smallvec_inline![stmt::Statement::Dup(stmt::Dup {
+        addr: STRING(ip.to_string()),
+        dev: None,
+      })],
+      RedirectToIp { ip, copy: false } => {
+        let rtnl = if let Some(rtnl) = rtnl {
+          rtnl
+        } else {
+          let new = RtNetlink::new().unwrap();
+          rtnl.get_or_insert(new)
+        };
+        let table_id = rtnl.next_table_id();
+        let result = smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
+          key: make_meta(expr::MetaKey::Mark),
+          value: NUM(table_id),
+        })];
+        return (result, Some((ip, table_id)), false);
+      }
     };
-    (action, false)
+    (action, None, false)
   }
 }
 

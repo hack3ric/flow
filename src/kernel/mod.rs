@@ -11,4 +11,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
+// TODO: Kernel trait
+// TODO: noop adapter
+// TODO: universal kernel::Error
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
