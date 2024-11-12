@@ -23,6 +23,7 @@ use tokio::time::{interval, Interval};
 
 #[derive(Debug)]
 pub struct RtNetlink {
+  args: RtNetlinkArgs,
   handle: Handle,
   msgs: UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>,
   routes: BTreeMap<u64, (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
@@ -33,13 +34,15 @@ pub struct RtNetlink {
 impl RtNetlink {
   pub fn new(args: RtNetlinkArgs) -> io::Result<Self> {
     let (conn, handle, msgs) = rtnetlink::new_connection()?;
+    let scan_time = args.route_scan_time;
     tokio::spawn(conn);
     Ok(Self {
+      args,
       handle,
       msgs,
       routes: BTreeMap::new(),
       rules: BTreeMap::new(),
-      timer: interval(Duration::from_secs(60)), // TODO: customize scan time
+      timer: interval(Duration::from_secs(scan_time)),
     })
   }
 
@@ -65,21 +68,20 @@ impl RtNetlink {
       prefixes.insert(prefix);
       *table_id
     } else {
-      // TODO: customize starting table ID/fwmark
       let table_id = self.next_table_id();
       self.rules.insert(table_id, Some(prefix).into_iter().collect());
       (self.handle.rule().add().v4())
         .fw_mark(table_id)
         .action(RuleAction::ToTable)
         .table_id(table_id)
-        .priority(100)
+        .priority(self.args.rt_rule_priority)
         .execute()
         .await?;
       (self.handle.rule().add().v6())
         .fw_mark(table_id)
         .action(RuleAction::ToTable)
         .table_id(table_id)
-        .priority(100)
+        .priority(self.args.rt_rule_priority)
         .execute()
         .await?;
       self.handle.rule().get(rtnetlink::IpVersion::V4);
@@ -100,7 +102,11 @@ impl RtNetlink {
   }
 
   pub fn next_table_id(&self) -> u32 {
-    self.rules.last_key_value().map(|(k, _)| *k + 1).unwrap_or(10000)
+    self
+      .rules
+      .last_key_value()
+      .map(|(k, _)| *k + 1)
+      .unwrap_or(self.args.init_table_id)
   }
 
   pub async fn del(&mut self, id: u64) -> Result<()> {
