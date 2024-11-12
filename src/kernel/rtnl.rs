@@ -1,6 +1,7 @@
 use super::Result;
 use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
+use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{StreamExt, TryStreamExt};
 use libc::{RTA_GATEWAY, RTA_OIF};
@@ -12,6 +13,7 @@ use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::packet_utils::nla::Nla;
 use rtnetlink::{Handle, RouteMessageBuilder};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
@@ -29,7 +31,7 @@ pub struct RtNetlink {
 }
 
 impl RtNetlink {
-  pub fn new() -> io::Result<Self> {
+  pub fn new(args: RtNetlinkArgs) -> io::Result<Self> {
     let (conn, handle, msgs) = rtnetlink::new_connection()?;
     tokio::spawn(conn);
     Ok(Self {
@@ -101,17 +103,16 @@ impl RtNetlink {
     self.rules.last_key_value().map(|(k, _)| *k + 1).unwrap_or(10000)
   }
 
-  // TODO: print error
-  pub async fn del(&mut self, id: u64) {
+  pub async fn del(&mut self, id: u64) -> Result<()> {
     let Some((prefix, _, table_id, _)) = self.routes.remove(&id) else {
-      return;
+      return Ok(());
     };
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
-    _ = self.handle.route().del(msg).execute().await;
+    self.handle.route().del(msg).execute().await?;
 
     let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existant table??");
     prefixes.remove(&prefix);
@@ -128,10 +129,11 @@ impl RtNetlink {
       } else {
         msg.header.table = table_id as u8;
       }
-      _ = self.handle.rule().del(msg.clone()).execute().await;
+      self.handle.rule().del(msg.clone()).execute().await?;
       msg.header.family = AddressFamily::Inet6;
-      _ = self.handle.rule().del(msg).execute().await;
+      self.handle.rule().del(msg).execute().await?;
     }
+    Ok(())
   }
 
   // route & addr change: check if next hop in changed prefix
@@ -195,6 +197,10 @@ impl RtNetlink {
     }
   }
 
+  pub fn is_empty(&self) -> bool {
+    self.routes.is_empty()
+  }
+
   async fn process_prefix(&mut self, prefix: IpPrefix) -> Result<()> {
     Self::process_iter(&self.handle, self.routes.values_mut().filter(|x| prefix.contains(x.1))).await
   }
@@ -234,8 +240,27 @@ impl RtNetlink {
     let Some(rt) = msg.try_next().await? else {
       unreachable!();
     };
-    // TODO: error on multiple routes received
     let attrs = rt.attributes.into_iter().filter(|x| [RTA_GATEWAY, RTA_OIF].contains(&x.kind()));
     Ok(attrs)
   }
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub struct RtNetlinkArgs {
+  /// Time between each routing table scan.
+  ///
+  /// Netlink allows route change notifications and does not need to scan the
+  /// entire routing table every time, so this value could be set higher.
+  #[arg(long, value_name = "TIME", default_value_t = 60)]
+  pub route_scan_time: u64,
+
+  /// Initial routing table ID.
+  ///
+  /// Table IDs are also used as fwmarks.
+  #[arg(long, value_name = "ID", default_value_t = 10000)]
+  pub init_table_id: u32,
+
+  /// Route rule priority as shown in `ip rule`.
+  #[arg(long, value_name = "PRIO", default_value_t = 100)]
+  pub rt_rule_priority: u32,
 }

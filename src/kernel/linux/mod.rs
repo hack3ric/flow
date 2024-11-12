@@ -1,6 +1,6 @@
 mod nft;
 
-use super::rtnl::RtNetlink;
+use super::rtnl::{RtNetlink, RtNetlinkArgs};
 use super::{KernelAdapter, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
@@ -19,13 +19,19 @@ pub struct Linux {
   nft: Nftables,
   #[serde(skip)]
   rtnl: Option<RtNetlink>,
+  rtnl_args: RtNetlinkArgs,
   counter: u64,
 }
 
 impl Linux {
   pub fn new(args: KernelArgs) -> Result<Self> {
-    let KernelArgs { table, chain, hooked, priority } = args;
-    Ok(Self { nft: Nftables::new(table, chain, hooked, priority)?, rtnl: None, counter: 0 })
+    let KernelArgs { table, chain, hooked, hook_priority, rtnl } = args;
+    Ok(Self {
+      nft: Nftables::new(table, chain, hooked, hook_priority)?,
+      rtnl: None,
+      rtnl_args: rtnl,
+      counter: 0,
+    })
   }
 }
 
@@ -35,7 +41,7 @@ impl KernelAdapter for Linux {
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
     let mut total = 1usize;
     let (info_stmts, rt_info) = info
-      .to_nft_stmts(spec.afi(), &mut self.rtnl)
+      .to_nft_stmts(spec.afi(), &mut self.rtnl, &self.rtnl_args)
       .map(|(a, b)| (Some(a), b))
       .unwrap_or_default();
     let base = spec
@@ -98,8 +104,10 @@ impl KernelAdapter for Linux {
     self.nft.apply_ruleset(&batch.to_nftables())?;
 
     if let Some(rtnl) = &mut self.rtnl {
-      rtnl.del(handle).await;
-      // TODO: if rtnl is empty, reset it to None
+      rtnl.del(handle).await?;
+      if rtnl.is_empty() {
+        self.rtnl = None;
+      }
     }
 
     Ok(())
@@ -136,6 +144,9 @@ pub struct KernelArgs {
   pub hooked: bool,
 
   /// Hook priority.
-  #[arg(long, default_value_t = 0)]
-  pub priority: i32,
+  #[arg(long, value_name = "PRIO", default_value_t = 0)]
+  pub hook_priority: i32,
+
+  #[command(flatten)]
+  pub rtnl: RtNetlinkArgs,
 }

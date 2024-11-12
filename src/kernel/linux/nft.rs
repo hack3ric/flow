@@ -1,6 +1,6 @@
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
-use crate::kernel::rtnl::RtNetlink;
+use crate::kernel::rtnl::{RtNetlink, RtNetlinkArgs};
 use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
 use crate::util::{Intersect, TruthTable};
@@ -279,6 +279,7 @@ impl RouteInfo<'_> {
     &self,
     afi: Afi,
     rtnl: &mut Option<RtNetlink>,
+    rtnl_args: &RtNetlinkArgs,
   ) -> Option<(StatementBranch, Option<(IpAddr, u32)>)> {
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
@@ -299,7 +300,7 @@ impl RouteInfo<'_> {
     let mut rt_info = None;
     let mut result = set
       .into_values()
-      .map(move |x| x.to_nft_stmts(afi, rtnl))
+      .map(move |x| x.to_nft_stmts(afi, rtnl, rtnl_args))
       .map(|(x, r, term)| {
         term.then(|| terminal = false);
         rt_info = r;
@@ -321,7 +322,12 @@ impl RouteInfo<'_> {
 }
 
 impl TrafficFilterAction {
-  fn to_nft_stmts(self, afi: Afi, rtnl: &mut Option<RtNetlink>) -> (StatementBlock, Option<(IpAddr, u32)>, bool) {
+  fn to_nft_stmts(
+    self,
+    afi: Afi,
+    rtnl: &mut Option<RtNetlink>,
+    rtnl_args: &RtNetlinkArgs,
+  ) -> (StatementBlock, Option<(IpAddr, u32)>, bool) {
     use TrafficFilterAction::*;
     let action = match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
@@ -344,7 +350,7 @@ impl TrafficFilterAction {
         let rtnl = if let Some(rtnl) = rtnl {
           rtnl
         } else {
-          let new = RtNetlink::new().unwrap();
+          let new = RtNetlink::new(rtnl_args.clone()).unwrap();
           rtnl.get_or_insert(new)
         };
         let table_id = rtnl.next_table_id();
