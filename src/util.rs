@@ -74,9 +74,9 @@ impl<T: Ord> Intersect for RangeInclusive<T> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruthTable {
-  pub(crate) mask: u64,
-  pub(crate) inv: bool,
-  pub(crate) truth: BTreeSet<u64>,
+  pub mask: u64,
+  pub inv: bool,
+  pub truth: BTreeSet<u64>,
 }
 
 impl TruthTable {

@@ -1,10 +1,9 @@
 use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
-use crate::kernel::{self, Kernel};
+use crate::kernel::{self, Kernel, KernelAdapter, KernelHandle};
 use crate::net::IpPrefix;
 use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use either::Either;
-use futures::future::pending;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
 use serde::{Deserialize, Serialize};
@@ -22,12 +21,12 @@ use strum::{EnumDiscriminants, FromRepr};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Routes {
   unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
-  flow: BTreeMap<Flowspec, (u64, MaybeRc<RouteInfo<'static>>)>,
-  kernel: Option<Kernel>,
+  flow: BTreeMap<Flowspec, (KernelHandle, MaybeRc<RouteInfo<'static>>)>,
+  kernel: Kernel,
 }
 
 impl Routes {
-  pub fn new(kernel: Option<Kernel>) -> Self {
+  pub fn new(kernel: Kernel) -> Self {
     Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), kernel }
   }
 
@@ -38,18 +37,14 @@ impl Routes {
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
         for spec in specs {
-          let id = if let Some(kernel) = &mut self.kernel {
-            match kernel.apply(&spec, &info).await {
-              Ok(id) => id,
-              Err(e @ kernel::Error::ToNftStmt) => {
-                warn!("flowspec {spec} rejected: {e}");
-                self.withdraw_spec(spec).await?;
-                continue;
-              }
-              Err(e) => return Err(e),
+          let id = match self.kernel.apply(&spec, &info).await {
+            Ok(id) => id,
+            Err(e @ kernel::Error::MatchNothing) => {
+              warn!("flowspec {spec} rejected: {e}");
+              self.withdraw_spec(spec).await?;
+              continue;
             }
-          } else {
-            0
+            Err(e) => return Err(e),
           };
 
           match self.flow.entry(spec) {
@@ -58,9 +53,7 @@ impl Routes {
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              if let Some(kernel) = &mut self.kernel {
-                kernel.remove(id).await?;
-              }
+              self.kernel.remove(id).await?;
             }
           }
         }
@@ -87,10 +80,8 @@ impl Routes {
     self.unicast.clear();
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
-    if let Some(kernel) = &mut self.kernel {
-      for (_, (id, _)) in flow {
-        kernel.remove(id).await?;
-      }
+    for (_, (id, _)) in flow {
+      self.kernel.remove(id).await?;
     }
     Ok(())
   }
@@ -99,18 +90,12 @@ impl Routes {
     let Some((id, _)) = self.flow.remove(&spec) else {
       return Ok(());
     };
-    if let Some(kernel) = &mut self.kernel {
-      kernel.remove(id).await?;
-    }
+    self.kernel.remove(id).await?;
     Ok(())
   }
 
   pub async fn process(&mut self) -> kernel::Result<()> {
-    if let Some(kernel) = &mut self.kernel {
-      kernel.process().await
-    } else {
-      pending().await
-    }
+    self.kernel.process().await
   }
 
   pub fn print(&self, verbosity: LevelFilter) {

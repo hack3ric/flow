@@ -6,13 +6,15 @@ pub mod route;
 use crate::args::RunArgs;
 use crate::kernel::{self, Kernel};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
+use either::Either;
 use flow::FlowError;
 use futures::future::pending;
+use itertools::Itertools;
 use log::{debug, error, info, warn};
 use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn, UpdateError};
-use nlri::{Nlri, NlriError, NlriKind};
+use nlri::{Nlri, NlriContent, NlriError, NlriKind};
 use num::integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
@@ -20,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::min;
+use std::fmt::Display;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -58,8 +61,11 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub fn new(c: RunArgs) -> Result<Self> {
-    let nft = (!c.dry_run).then(|| Kernel::new(c.kernel.clone())).transpose()?;
-    Ok(Self { config: c, state: Active, routes: Routes::new(nft) })
+    let kernel = (!c.dry_run)
+      .then(|| Kernel::linux(c.kernel.clone()))
+      .transpose()?
+      .unwrap_or(Kernel::Noop);
+    Ok(Self { config: c, state: Active, routes: Routes::new(kernel) })
   }
 
   pub fn start(&mut self) {
@@ -345,7 +351,7 @@ pub enum Error {
   Notification(#[from] Notification<'static>),
   #[error("remote said: {0}")]
   Remote(Notification<'static>),
-  #[error("withdraw")] // TODO: print all routes to withdraw
+  #[error("withdraw {}: {}", print_withdraw(.1.iter()), .0)]
   Withdraw(UpdateError<'static>, SmallVec<[Nlri; 1]>),
 
   #[error(transparent)]
@@ -368,6 +374,17 @@ impl From<IpPrefixError> for Error {
       _ => Self::IpPrefix(e),
     }
   }
+}
+
+fn print_withdraw<'a>(nlris: impl Iterator<Item = &'a Nlri> + 'a) -> impl Display + 'a {
+  use Either::*;
+  use NlriContent::*;
+  nlris
+    .flat_map(|x| match &x.content {
+      Unicast { prefixes, .. } => Left(prefixes.iter().map(|y| Box::new(y) as Box<dyn Display>)),
+      Flow { specs } => Right(specs.iter().map(|y| Box::new(y) as Box<dyn Display>)),
+    })
+    .format(", ")
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

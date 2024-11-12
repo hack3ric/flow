@@ -129,7 +129,7 @@ impl Flowspec {
       (false, false) => Transport::Unknown,
       (false, true) => Transport::Icmp,
       (true, false) => Transport::Tcp,
-      _ => return Err(Error::ToNftStmt),
+      _ => return Err(Error::MatchNothing),
     };
 
     let first = make_match(
@@ -155,7 +155,7 @@ impl Component {
     let (th, tp_code) = match tp {
       Tcp => (Ok("tcp"), Some(6)),
       Icmp => (
-        Err(Error::ToNftStmt),
+        Err(Error::MatchNothing),
         Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58)),
       ),
       Unknown => (Ok("th"), None),
@@ -167,7 +167,7 @@ impl Component {
       &SrcPrefix(pattern, offset) => pattern_stmt(true, pattern, offset).into_iter().collect(),
 
       Protocol(ops) => match tp_code {
-        Some(code) => ops.op(code).then(SmallVec::new_const).ok_or(Error::ToNftStmt)?,
+        Some(code) => ops.op(code).then(SmallVec::new_const).ok_or(Error::MatchNothing)?,
         None => range_stmt_branch(make_meta(expr::MetaKey::L4proto), ops, 0xff)?,
       },
 
@@ -183,12 +183,12 @@ impl Component {
       SrcPort(ops) => range_stmt_branch(make_payload_field(th?, "sport"), ops, 0xffff)?,
       IcmpType(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "type"), ops, 0xff)?,
       IcmpCode(ops) if tp == Icmp => range_stmt_branch(make_payload_field(icmp, "code"), ops, 0xff)?,
-      IcmpType(_) | IcmpCode(_) => return Err(Error::ToNftStmt),
+      IcmpType(_) | IcmpCode(_) => return Err(Error::MatchNothing),
       TcpFlags(ops) => {
         let tt = ops.to_truth_table();
         let tt = tt.shrink(0b11111111);
         if tt.is_always_false() {
-          return Err(Error::ToNftStmt);
+          return Err(Error::MatchNothing);
         } else if tt.is_always_true() {
           return Ok(SmallVec::new_const());
         }
@@ -482,7 +482,7 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
   } else if ranges.is_empty() {
-    return Err(Error::ToNftStmt);
+    return Err(Error::MatchNothing);
   }
   let allowed = ranges
     .into_iter()

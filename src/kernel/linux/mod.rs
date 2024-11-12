@@ -1,7 +1,7 @@
 mod nft;
 
 use super::rtnl::RtNetlink;
-use super::Result;
+use super::{KernelAdapter, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
 use clap::Args;
@@ -13,23 +13,26 @@ use nftables::helper::NftablesError;
 use nftables::schema::{NfCmd, NfObject, Nftables as NftablesReq};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use thiserror::Error;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Kernel {
+pub struct Linux {
   nft: Nftables,
   #[serde(skip)]
   rtnl: Option<RtNetlink>,
   counter: u64,
 }
 
-impl Kernel {
+impl Linux {
   pub fn new(args: KernelArgs) -> Result<Self> {
     let KernelArgs { table, chain, hooked, priority } = args;
     Ok(Self { nft: Nftables::new(table, chain, hooked, priority)?, rtnl: None, counter: 0 })
   }
+}
 
-  pub async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<u64> {
+impl KernelAdapter for Linux {
+  type Handle = u64;
+
+  async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
     let mut total = 1usize;
     let (info_stmts, rt_info) = info
       .to_nft_stmts(spec.afi(), &mut self.rtnl)
@@ -51,26 +54,26 @@ impl Kernel {
         .collect::<Vec<_>>()
     });
 
-    let id = self.counter;
+    let handle = self.counter;
     self.counter += 1;
     let nftables = NftablesReq {
       objects: rules
         .into_iter()
-        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x, Some(id)))))
+        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x, Some(handle)))))
         .collect(),
     };
 
     self.nft.apply_ruleset(&nftables)?;
     if let Some((next_hop, table_id)) = rt_info {
       let rtnl = self.rtnl.as_mut().expect("RtNetlink should be initialized");
-      let real_table_id = rtnl.add(id, spec, next_hop).await?;
+      let real_table_id = rtnl.add(handle, spec, next_hop).await?;
       assert_eq!(table_id, real_table_id, "table ID mismatch");
     }
 
-    Ok(id)
+    Ok(handle)
   }
 
-  pub async fn remove(&mut self, id: u64) -> Result<()> {
+  async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
     #[derive(Debug, Deserialize)]
     struct MyNftables {
       nftables: Vec<MyNftObject>,
@@ -90,19 +93,19 @@ impl Kernel {
     nftables
       .into_iter()
       .filter_map(|x| x.rule)
-      .filter(|x| x.comment.as_ref().is_some_and(|y| y == &id.to_string()))
+      .filter(|x| x.comment.as_ref().is_some_and(|y| y == &handle.to_string()))
       .for_each(|x| batch.delete(self.nft.make_rule_handle(x.handle)));
     self.nft.apply_ruleset(&batch.to_nftables())?;
 
     if let Some(rtnl) = &mut self.rtnl {
-      rtnl.del(id).await;
+      rtnl.del(handle).await;
       // TODO: if rtnl is empty, reset it to None
     }
 
     Ok(())
   }
 
-  pub async fn process(&mut self) -> Result<()> {
+  async fn process(&mut self) -> Result<()> {
     if let Some(rtnl) = &mut self.rtnl {
       rtnl.process().await
     } else {
@@ -135,17 +138,4 @@ pub struct KernelArgs {
   /// Hook priority.
   #[arg(long, default_value_t = 0)]
   pub priority: i32,
-}
-
-#[derive(Debug, Error)]
-pub enum Error {
-  #[error(transparent)]
-  Nftables(#[from] NftablesError),
-
-  #[error(transparent)]
-  RtNetlink(#[from] rtnetlink::Error),
-
-  // TODO: move this out
-  #[error("flowspec matches nothing")]
-  ToNftStmt,
 }

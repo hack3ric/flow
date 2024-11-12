@@ -114,7 +114,7 @@ impl Flowspec {
     self.inner.iter().map(|c| &c.0)
   }
 
-  pub(crate) fn component_set(&self) -> &BTreeSet<ComponentStore> {
+  pub fn component_set(&self) -> &BTreeSet<ComponentStore> {
     &self.inner
   }
 }
@@ -144,7 +144,7 @@ impl Display for Flowspec {
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub(crate) struct ComponentStore(pub Component);
+pub struct ComponentStore(pub Component);
 
 impl PartialEq for ComponentStore {
   fn eq(&self, other: &Self) -> bool {
@@ -413,7 +413,7 @@ impl Ord for Component {
 
 /// Operator sequence with values.
 #[derive(Serialize, Deserialize)]
-pub struct Ops<K: OpKind>(pub(crate) SmallVec<[Op<K>; 4]>);
+pub struct Ops<K: OpKind>(pub SmallVec<[Op<K>; 4]>);
 
 impl<K: OpKind> Ops<K> {
   pub fn new(op: Op<K>) -> Self {
@@ -543,13 +543,13 @@ impl<K: OpKind> Hash for Ops<K> {
 
 #[derive(Serialize, Deserialize)]
 pub struct Op<K: OpKind> {
-  pub(crate) flags: u8,
-  pub(crate) value: u64,
-  pub(crate) _k: PhantomData<K>,
+  pub flags: u8,
+  pub value: u64,
+  pub _k: PhantomData<K>,
 }
 
 impl<K: OpKind> Op<K> {
-  pub(crate) const AND: u8 = 0b0100_0000;
+  pub const AND: u8 = 0b0100_0000;
 
   pub fn op(self, data: u64) -> bool {
     K::op(self.flags, data, self.value)

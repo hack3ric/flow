@@ -351,8 +351,8 @@ impl Ord for IpPrefix {
 
 #[derive(Debug, Error)]
 pub struct IpPrefixError {
-  pub(crate) kind: IpPrefixErrorKind,
-  pub(crate) value: Option<String>,
+  pub kind: IpPrefixErrorKind,
+  pub value: Option<String>,
 }
 
 impl Display for IpPrefixError {

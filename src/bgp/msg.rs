@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::io;
 use strum::{Display, EnumDiscriminants, FromRepr};
 use thiserror::Error;
@@ -31,13 +32,14 @@ pub trait MessageSend {
     buf[start_pos + 16..start_pos + 18].copy_from_slice(&total_len.to_be_bytes());
   }
 
-  #[allow(async_fn_in_trait)]
-  async fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-    let mut buf = Vec::new();
-    self.write_msg(&mut buf);
-    writer.write_all(&buf).await?;
-    writer.flush().await?;
-    Ok(())
+  fn send<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> impl Future<Output = io::Result<()>> {
+    async {
+      let mut buf = Vec::new();
+      self.write_msg(&mut buf);
+      writer.write_all(&buf).await?;
+      writer.flush().await?;
+      Ok(())
+    }
   }
 }
 
@@ -452,7 +454,6 @@ impl UpdateMessage<'static> {
             if len != 0 {
               let mut seg_reader = take(&mut pattrs_reader, len.into());
               while let Ok(seg_type) = seg_reader.read_u8().await {
-                // TODO: confederations
                 let Some(seg_type) = AsSegmentKind::from_repr(seg_type) else {
                   error!("unknown AS_PATH segment type: {seg_type}");
                   discard(seg_reader).await?;
@@ -950,8 +951,7 @@ impl<'a> From<UpdateError<'a>> for Notification<'a> {
 }
 
 pub trait SendAndReturn {
-  #[allow(async_fn_in_trait)]
-  async fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> Result<()>;
+  fn send_and_return<W: AsyncWrite + Unpin>(self, writer: &mut W) -> impl Future<Output = Result<()>>;
 }
 
 impl<T: Into<Notification<'static>>> SendAndReturn for T {
