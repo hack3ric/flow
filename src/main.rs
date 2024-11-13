@@ -53,7 +53,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   let local_as = args.local_as;
   let router_id = args.router_id;
 
-  let mut bgp = Session::new(args)?;
+  let mut bgp = Session::new(args).await?;
 
   create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
   let mut ipc = IpcServer::new(sock_path).with_context(|| format!("failed to create socket at {sock_path}"))?;

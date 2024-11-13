@@ -130,7 +130,6 @@ impl TruthTable {
     }
   }
 
-  #[allow(unused)]
   pub fn not(mut self) -> Self {
     self.inv = !self.inv;
     self

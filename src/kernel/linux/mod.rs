@@ -24,10 +24,10 @@ pub struct Linux {
 }
 
 impl Linux {
-  pub fn new(args: KernelArgs) -> Result<Self> {
+  pub async fn new(args: KernelArgs) -> Result<Self> {
     let KernelArgs { table, chain, hooked, hook_priority, rtnl } = args;
     Ok(Self {
-      nft: Nftables::new(table, chain, hooked, hook_priority)?,
+      nft: Nftables::new(table, chain, hooked, hook_priority).await?,
       rtnl: None,
       rtnl_args: rtnl,
       counter: 0,
@@ -69,7 +69,7 @@ impl KernelAdapter for Linux {
         .collect(),
     };
 
-    self.nft.apply_ruleset(&nftables)?;
+    self.nft.apply_ruleset(&nftables).await?;
     if let Some((next_hop, table_id)) = rt_info {
       let rtnl = self.rtnl.as_mut().expect("RtNetlink should be initialized");
       let real_table_id = rtnl.add(handle, spec, next_hop).await?;
@@ -94,14 +94,14 @@ impl KernelAdapter for Linux {
       handle: u32,
     }
     let mut batch = Batch::new();
-    let s = self.nft.get_current_ruleset_raw()?;
+    let s = self.nft.get_current_ruleset_raw().await?;
     let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
     nftables
       .into_iter()
       .filter_map(|x| x.rule)
       .filter(|x| x.comment.as_ref().is_some_and(|y| y == &handle.to_string()))
       .for_each(|x| batch.delete(self.nft.make_rule_handle(x.handle)));
-    self.nft.apply_ruleset(&batch.to_nftables())?;
+    self.nft.apply_ruleset(&batch.to_nftables()).await?;
 
     if let Some(rtnl) = &mut self.rtnl {
       rtnl.del(handle).await?;

@@ -60,11 +60,12 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
-  pub fn new(c: RunArgs) -> Result<Self> {
-    let kernel = (!c.dry_run)
-      .then(|| Kernel::linux(c.kernel.clone()))
-      .transpose()?
-      .unwrap_or(Kernel::Noop);
+  pub async fn new(c: RunArgs) -> Result<Self> {
+    let kernel = if c.dry_run {
+      Kernel::Noop
+    } else {
+      Kernel::linux(c.kernel.clone()).await?
+    };
     Ok(Self { config: c, state: Active, routes: Routes::new(kernel) })
   }
 

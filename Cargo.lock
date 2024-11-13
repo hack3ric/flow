@@ -232,6 +232,7 @@ dependencies = [
  "libc",
  "log",
  "nftables",
+ "nftables-async",
  "num",
  "pin-project",
  "postcard",
@@ -492,6 +493,17 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 1.0.68",
+]
+
+[[package]]
+name = "nftables-async"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6041770939ebc822b255f1dd14540b5e88b9aa9f71aedb57ded7ebe8856bfffd"
+dependencies = [
+ "nftables",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::{Intersect, TruthTable};
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::helper::{apply_ruleset, get_current_ruleset_raw};
+use nftables_async::{apply_ruleset, get_current_ruleset_raw};
 use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
@@ -29,7 +29,7 @@ pub struct Nftables {
 }
 
 impl Nftables {
-  pub fn new(
+  pub async fn new(
     table: impl Into<Cow<'static, str>>,
     chain: impl Into<Cow<'static, str>>,
     hooked: bool,
@@ -52,11 +52,12 @@ impl Nftables {
       prio: hooked.then_some(priority),
       ..Default::default()
     }));
-    apply_ruleset(&batch.to_nftables(), None, None)?;
+    apply_ruleset(&batch.to_nftables(), None, None).await?;
     Ok(Self { table, chain, armed: true })
   }
 
-  fn exit(&self) -> Result<()> {
+  #[expect(unused)]
+  async fn exit(&self) -> Result<()> {
     let mut batch = Batch::new();
     batch.delete(schema::NfListObject::Chain(schema::Chain {
       family: types::NfFamily::INet,
@@ -64,7 +65,18 @@ impl Nftables {
       name: self.chain.to_string(),
       ..Default::default()
     }));
-    Ok(apply_ruleset(&batch.to_nftables(), None, None)?)
+    Ok(apply_ruleset(&batch.to_nftables(), None, None).await?)
+  }
+
+  fn exit_sync(&self) -> Result<()> {
+    let mut batch = Batch::new();
+    batch.delete(schema::NfListObject::Chain(schema::Chain {
+      family: types::NfFamily::INet,
+      table: self.table.to_string(),
+      name: self.chain.to_string(),
+      ..Default::default()
+    }));
+    Ok(nftables::helper::apply_ruleset(&batch.to_nftables(), None, None)?)
   }
 
   pub fn make_new_rule(&self, stmts: Vec<stmt::Statement>, comment: Option<impl ToString>) -> schema::NfListObject {
@@ -88,20 +100,20 @@ impl Nftables {
     })
   }
 
-  pub fn get_current_ruleset_raw(&self) -> Result<String> {
+  pub async fn get_current_ruleset_raw(&self) -> Result<String> {
     let args = vec!["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
-    Ok(get_current_ruleset_raw(None, Some(args))?)
+    Ok(get_current_ruleset_raw(None, Some(args)).await?)
   }
 
-  pub fn apply_ruleset(&self, n: &NftablesReq) -> Result<()> {
-    Ok(apply_ruleset(n, None, None)?)
+  pub async fn apply_ruleset(&self, n: &NftablesReq) -> Result<()> {
+    Ok(apply_ruleset(n, None, None).await?)
   }
 }
 
 impl Drop for Nftables {
   fn drop(&mut self) {
     if self.armed {
-      let _ = self.exit();
+      let _ = self.exit_sync();
     }
   }
 }

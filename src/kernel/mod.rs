@@ -37,8 +37,8 @@ pub enum Kernel {
 
 impl Kernel {
   #[cfg(target_os = "linux")]
-  pub fn linux(args: KernelArgs) -> Result<Self> {
-    Ok(Self::Linux(Linux::new(args)?))
+  pub async fn linux(args: KernelArgs) -> Result<Self> {
+    Ok(Self::Linux(Linux::new(args).await?))
   }
 }
 
