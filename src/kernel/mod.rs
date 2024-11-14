@@ -1,7 +1,7 @@
 //! Bridges flowspecs to OS kernel.
 //!
-//! Currently only Linux is supported, which uses nftables. Future support may
-//! include *BSD using `pf` as backend.
+//! Currently only Linux is supported. Future support may include *BSD using
+//! `pf` as backend.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -19,30 +19,42 @@ use std::future::Future;
 use strum::Display;
 use thiserror::Error;
 
-pub trait KernelAdapter {
+/// Interface between BGP flowspec and the OS.
+pub trait Kernel {
+  /// Type representing a flowspec's counterpart in kernel.
   type Handle;
+
+  /// Apply a flowspec to kernel.
   fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> impl Future<Output = Result<Self::Handle>>;
+
+  /// Remove a flowspec from kernel using previously returned handle.
   fn remove(&mut self, handle: Self::Handle) -> impl Future<Output = Result<()>>;
+
+  /// Process notifications from kernel, timers, etc.
   fn process(&mut self) -> impl Future<Output = Result<()>> {
     pending()
   }
 }
 
+/// Adapter of different `Kernel` implementations.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Kernel {
+pub enum KernelAdapter {
+  /// Do nothing.
   Noop,
+
+  /// Linux implementation, using nftables and rtnetlink.
   #[cfg(target_os = "linux")]
   Linux(Linux),
 }
 
-impl Kernel {
+impl KernelAdapter {
   #[cfg(target_os = "linux")]
   pub async fn linux(args: KernelArgs) -> Result<Self> {
     Ok(Self::Linux(Linux::new(args).await?))
   }
 }
 
-impl KernelAdapter for Kernel {
+impl Kernel for KernelAdapter {
   type Handle = KernelHandle;
 
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
@@ -75,7 +87,7 @@ pub enum KernelHandle {
 
   #[cfg(target_os = "linux")]
   #[strum(to_string = "{0}")]
-  Linux(<Linux as KernelAdapter>::Handle),
+  Linux(<Linux as Kernel>::Handle),
 }
 
 #[derive(Debug, Error)]

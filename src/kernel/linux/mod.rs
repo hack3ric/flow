@@ -1,7 +1,7 @@
 mod nft;
 
 use super::rtnl::{RtNetlink, RtNetlinkArgs};
-use super::{KernelAdapter, Result};
+use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
 use clap::Args;
@@ -35,7 +35,7 @@ impl Linux {
   }
 }
 
-impl KernelAdapter for Linux {
+impl Kernel for Linux {
   type Handle = u64;
 
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {

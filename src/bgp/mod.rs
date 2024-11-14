@@ -4,7 +4,7 @@ pub mod nlri;
 pub mod route;
 
 use crate::args::RunArgs;
-use crate::kernel::{self, Kernel};
+use crate::kernel::{self, KernelAdapter};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
 use either::Either;
 use flow::FlowError;
@@ -62,9 +62,9 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub async fn new(c: RunArgs) -> Result<Self> {
     let kernel = if c.dry_run {
-      Kernel::Noop
+      KernelAdapter::Noop
     } else {
-      Kernel::linux(c.kernel.clone()).await?
+      KernelAdapter::linux(c.kernel.clone()).await?
     };
     Ok(Self { config: c, state: Active, routes: Routes::new(kernel) })
   }

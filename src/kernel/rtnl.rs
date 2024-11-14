@@ -65,6 +65,7 @@ impl RtNetlink {
       .filter(|(_, v)| v.iter().all(|p| !p.overlaps(prefix)))
       .next()
     {
+      // there's a table whose content doesn't overlap with our prefix, we reuse it
       prefixes.insert(prefix);
       *table_id
     } else {
@@ -84,7 +85,6 @@ impl RtNetlink {
         .priority(self.args.rt_rule_priority)
         .execute()
         .await?;
-      self.handle.rule().get(rtnetlink::IpVersion::V4);
       table_id
     };
 

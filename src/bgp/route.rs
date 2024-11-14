@@ -22,11 +22,11 @@ use strum::{EnumDiscriminants, FromRepr};
 pub struct Routes {
   unicast: BTreeMap<IpPrefix, (NextHop, MaybeRc<RouteInfo<'static>>)>,
   flow: BTreeMap<Flowspec, (KernelHandle, MaybeRc<RouteInfo<'static>>)>,
-  kernel: Kernel,
+  kernel: KernelAdapter,
 }
 
 impl Routes {
-  pub fn new(kernel: Kernel) -> Self {
+  pub fn new(kernel: KernelAdapter) -> Self {
     Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), kernel }
   }
 
