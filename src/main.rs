@@ -175,6 +175,7 @@ async fn main() -> ExitCode {
   env_logger::builder()
     .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)
+    .filter_module("netlink", LevelFilter::Off)
     .init();
   match cli.command {
     Command::Run(args) => match run(args, &sock_path).await {
