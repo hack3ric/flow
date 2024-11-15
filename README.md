@@ -1,6 +1,6 @@
 # Flow
 
-Flow enables [BGP Flow Specification (flowspec)](https://www.rfc-editor.org/rfc/rfc8955.html) on Linux software routers/firewalls. It acts as a sink that receives routes from another BGP speaker and transforms flowspecs into [nftables](https://wiki.nftables.org) rules.
+Flow enables [BGP Flow Specification (flowspec)](https://www.rfc-editor.org/rfc/rfc8955.html) on Linux software routers/firewalls. It acts as a sink that receives routes from another BGP speaker and transforms flowspecs into [nftables](https://wiki.nftables.org) rules and kernel routing tables via [rtnetlink(7)](https://www.man7.org/linux/man-pages/man7/rtnetlink.7.html).
 
 It:
 
@@ -9,10 +9,16 @@ It:
 
 It doesn't:
 
-- work as a full-blown BGP client; you will need another BGP implementation (likely running on the same node) like [BIRD](https://bird.network.cz) or [OpenBGPD](https://www.openbgpd.org) to peer with others;
+- work as a full-blown BGP client; you will need another BGP implementation (likely running on the same node) like [BIRD](https://bird.network.cz), [OpenBGPD](https://www.openbgpd.org) or [GoBGP](https://osrg.github.io/gobgp/) to peer with others;
 - allow multiple BGP sessions, only one-on-one;
 - initiate BGP session actively;
 - currently support VRF and VPN routes.
+
+## Implemented RFCs/Drafts
+
+- [RFC 8955](https://www.rfc-editor.org/rfc/rfc8955.html): Dissemination of Flow Specification Rules
+- [RFC 8956](https://www.rfc-editor.org/rfc/rfc8956.html): Dissemination of Flow Specification Rules for IPv6
+- [draft-ietf-idr-flowspec-redirect-ip-03](https://www.ietf.org/archive/id/draft-ietf-idr-flowspec-redirect-ip-03.html): BGP Flow-Spec Redirect-to-IP Action
 
 ## Usage
 
@@ -72,11 +78,10 @@ Show information of currently running Flow instance:
 
 ## Future Work
 
-- **Implement [Redirect-to-IP Action](https://datatracker.ietf.org/doc/draft-ietf-idr-flowspec-redirect-ip/) draft**: will bring in iproute2/rtnetlink dependency
 - **Programmatic handling**: custom traffic filter actions and route handling (not limited to flowspecs)
 - [**Validation procedure**](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure): currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here
 - **VPN routes and VRF redirection**: does not have many knowledge right now, but certainly doable
-- **OpenBSD `pf` backend**: provide an alternative to Linux
+- ***BSD support**: provide an alternative to Linux; first FreeBSD (that uses `pf` and reuse existing rtnetlink code), and then OpenBSD ([route(4)](https://man.openbsd.org/route.4))
 
 ## License
 
