@@ -65,7 +65,7 @@ impl Kernel for Linux {
     let nftables = NftablesReq {
       objects: rules
         .into_iter()
-        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x, Some(handle)))))
+        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x.into(), Some(handle)))))
         .collect(),
     };
 
