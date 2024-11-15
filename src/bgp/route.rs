@@ -149,6 +149,10 @@ impl Routes {
       println!();
     }
   }
+
+  pub async fn terminate(self) {
+    self.kernel.terminate().await;
+  }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

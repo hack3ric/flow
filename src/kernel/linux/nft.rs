@@ -24,8 +24,6 @@ use std::ops::{Not, RangeInclusive};
 pub struct Nftables {
   table: Cow<'static, str>,
   chain: Cow<'static, str>,
-  #[serde(skip)]
-  armed: bool,
 }
 
 impl Nftables {
@@ -53,10 +51,9 @@ impl Nftables {
       ..Default::default()
     }));
     apply_ruleset_async(&batch.to_nftables(), None, None).await?;
-    Ok(Self { table, chain, armed: true })
+    Ok(Self { table, chain })
   }
 
-  #[expect(unused)]
   async fn exit(&self) -> Result<()> {
     let mut batch = Batch::new();
     batch.delete(schema::NfListObject::Chain(schema::Chain {
@@ -66,17 +63,6 @@ impl Nftables {
       ..Default::default()
     }));
     Ok(apply_ruleset_async(&batch.to_nftables(), None, None).await?)
-  }
-
-  fn exit_sync(&self) -> Result<()> {
-    let mut batch = Batch::new();
-    batch.delete(schema::NfListObject::Chain(schema::Chain {
-      family: types::NfFamily::INet,
-      table: self.table.clone(),
-      name: self.chain.clone(),
-      ..Default::default()
-    }));
-    Ok(nftables::helper::apply_ruleset(&batch.to_nftables(), None, None)?)
   }
 
   pub fn make_new_rule(
@@ -112,13 +98,9 @@ impl Nftables {
   pub async fn apply_ruleset(&self, n: &NftablesReq) -> Result<()> {
     Ok(apply_ruleset_async(n, None, None).await?)
   }
-}
 
-impl Drop for Nftables {
-  fn drop(&mut self) {
-    if self.armed {
-      let _ = self.exit_sync();
-    }
+  pub async fn terminate(self) {
+    _ = self.exit().await;
   }
 }
 

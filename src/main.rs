@@ -94,7 +94,10 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
       anyhow::Ok(None)
     };
     match select.await {
-      Ok(Some(x)) => return Ok(x),
+      Ok(Some(x)) => {
+        bgp.terminate().await;
+        return Ok(x);
+      }
       Ok(None) => {}
       Err(error) => error!("{error:?}"),
     }

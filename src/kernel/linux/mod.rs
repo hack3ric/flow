@@ -5,7 +5,8 @@ use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
 use clap::Args;
-use futures::future::pending;
+use futures::future::OptionFuture;
+use futures::join;
 use itertools::Itertools;
 use nft::Nftables;
 use nftables::batch::Batch;
@@ -13,6 +14,7 @@ use nftables::helper::NftablesError;
 use nftables::schema::{NfCmd, NfObject, Nftables as NftablesReq};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::future::pending;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Linux {
@@ -119,6 +121,13 @@ impl Kernel for Linux {
     } else {
       pending().await
     }
+  }
+
+  async fn terminate(self) {
+    join!(
+      self.nft.terminate(),
+      OptionFuture::from(self.rtnl.map(RtNetlink::terminate)),
+    );
   }
 }
 

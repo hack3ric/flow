@@ -13,14 +13,13 @@ mod rtnl;
 
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
-use futures::future::pending;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::future::{pending, ready, Future};
 use strum::Display;
 use thiserror::Error;
 
 /// Interface between BGP flowspec and the OS.
-pub trait Kernel {
+pub trait Kernel: Sized {
   /// Type representing a flowspec's counterpart in kernel.
   type Handle;
 
@@ -33,6 +32,10 @@ pub trait Kernel {
   /// Process notifications from kernel, timers, etc.
   fn process(&mut self) -> impl Future<Output = Result<()>> {
     pending()
+  }
+
+  fn terminate(self) -> impl Future<Output = ()> {
+    ready(())
   }
 }
 
@@ -76,6 +79,13 @@ impl Kernel for KernelAdapter {
     match self {
       Self::Noop => pending().await,
       Self::Linux(linux) => linux.process().await,
+    }
+  }
+
+  async fn terminate(self) {
+    match self {
+      Self::Noop => {}
+      Self::Linux(linux) => linux.terminate().await,
     }
   }
 }

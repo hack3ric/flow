@@ -8,7 +8,6 @@ use crate::kernel::{self, KernelAdapter};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
 use either::Either;
 use flow::FlowError;
-use futures::future::pending;
 use itertools::Itertools;
 use log::{debug, error, info, warn};
 use msg::HeaderError::*;
@@ -23,7 +22,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::fmt::Display;
-use std::future::Future;
+use std::future::{pending, Future};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
@@ -207,6 +206,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
       },
     }
     Ok(())
+  }
+
+  pub async fn terminate(self) {
+    self.routes.terminate().await;
   }
 }
 

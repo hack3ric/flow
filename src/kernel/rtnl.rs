@@ -3,7 +3,7 @@ use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::{StreamExt, TryStreamExt};
+use futures::{try_join, StreamExt, TryStreamExt};
 use libc::{RTA_GATEWAY, RTA_OIF};
 use log::warn;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
@@ -71,20 +71,14 @@ impl RtNetlink {
     } else {
       let table_id = self.next_table_id();
       self.rules.insert(table_id, Some(prefix).into_iter().collect());
-      (self.handle.rule().add().v4())
+
+      let rule_add = (self.handle.rule().add())
         .fw_mark(table_id)
         .action(RuleAction::ToTable)
         .table_id(table_id)
-        .priority(self.args.rt_rule_priority)
-        .execute()
-        .await?;
-      (self.handle.rule().add().v6())
-        .fw_mark(table_id)
-        .action(RuleAction::ToTable)
-        .table_id(table_id)
-        .priority(self.args.rt_rule_priority)
-        .execute()
-        .await?;
+        .priority(self.args.rt_rule_priority);
+      try_join!(rule_add.clone().v4().execute(), rule_add.v6().execute())?;
+
       table_id
     };
 
@@ -113,32 +107,41 @@ impl RtNetlink {
     let Some((prefix, _, table_id, _)) = self.routes.remove(&id) else {
       return Ok(());
     };
+    self.del_route(table_id, prefix).await?;
+
+    let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existant table??");
+    prefixes.remove(&prefix);
+    if prefixes.is_empty() {
+      self.rules.remove(&table_id);
+      self.del_rule(table_id).await?;
+    }
+    Ok(())
+  }
+
+  async fn del_route(&self, table_id: u32, prefix: IpPrefix) -> Result<()> {
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
     self.handle.route().del(msg).execute().await?;
+    Ok(())
+  }
 
-    let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existant table??");
-    prefixes.remove(&prefix);
-    if prefixes.is_empty() {
-      self.rules.remove(&table_id);
-
-      // TODO: add RuleMessageBuilder to rtnetlink crate
-      let mut msg = RuleMessage::default();
-      msg.header.family = AddressFamily::Inet;
-      msg.attributes.push(RuleAttribute::FwMark(table_id));
-      msg.header.action = RuleAction::ToTable;
-      if table_id > 255 {
-        msg.attributes.push(RuleAttribute::Table(table_id));
-      } else {
-        msg.header.table = table_id as u8;
-      }
-      self.handle.rule().del(msg.clone()).execute().await?;
-      msg.header.family = AddressFamily::Inet6;
-      self.handle.rule().del(msg).execute().await?;
+  async fn del_rule(&self, table_id: u32) -> Result<()> {
+    // TODO: add RuleMessageBuilder to rtnetlink crate
+    let mut msg = RuleMessage::default();
+    msg.header.family = AddressFamily::Inet;
+    msg.attributes.push(RuleAttribute::FwMark(table_id));
+    msg.header.action = RuleAction::ToTable;
+    if table_id > 255 {
+      msg.attributes.push(RuleAttribute::Table(table_id));
+    } else {
+      msg.header.table = table_id as u8;
     }
+    self.handle.rule().del(msg.clone()).execute().await?;
+    msg.header.family = AddressFamily::Inet6;
+    self.handle.rule().del(msg).execute().await?;
     Ok(())
   }
 
@@ -217,6 +220,7 @@ impl RtNetlink {
     handle: &Handle,
     iter: impl Iterator<Item = &mut (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
   ) -> Result<()> {
+    // TODO: remove route if next hop becomes unreachable
     for (prefix, next_hop, table_id, attrs) in iter {
       warn!("process {prefix}");
       let new_attrs = Self::get_route2(handle, *next_hop).await?.collect::<Vec<_>>();
@@ -248,6 +252,15 @@ impl RtNetlink {
     };
     let attrs = rt.attributes.into_iter().filter(|x| [RTA_GATEWAY, RTA_OIF].contains(&x.kind()));
     Ok(attrs)
+  }
+
+  pub async fn terminate(self) {
+    for (table_id, prefixes) in &self.rules {
+      _ = self.del_rule(*table_id).await;
+      for prefix in prefixes {
+        _ = self.del_route(*table_id, *prefix).await;
+      }
+    }
   }
 }
 
