@@ -54,17 +54,6 @@ impl Nftables {
     Ok(Self { table, chain })
   }
 
-  async fn exit(&self) -> Result<()> {
-    let mut batch = Batch::new();
-    batch.delete(schema::NfListObject::Chain(schema::Chain {
-      family: types::NfFamily::INet,
-      table: self.table.clone(),
-      name: self.chain.clone(),
-      ..Default::default()
-    }));
-    Ok(apply_ruleset_async(&batch.to_nftables(), None, None).await?)
-  }
-
   pub fn make_new_rule(
     &self,
     stmts: Cow<'static, [stmt::Statement]>,
@@ -100,7 +89,14 @@ impl Nftables {
   }
 
   pub async fn terminate(self) {
-    _ = self.exit().await;
+    let mut batch = Batch::new();
+    batch.delete(schema::NfListObject::Chain(schema::Chain {
+      family: types::NfFamily::INet,
+      table: self.table.clone(),
+      name: self.chain.clone(),
+      ..Default::default()
+    }));
+    _ = apply_ruleset_async(&batch.to_nftables(), None, None).await;
   }
 }
 
