@@ -45,6 +45,8 @@ tokio-util = "0.7.11"
 nftables = { git = "https://github.com/hack3ric/rust-nftables", branch = "for-flow", features = [
   "tokio",
 ] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-flow" }
 
 [dev-dependencies]

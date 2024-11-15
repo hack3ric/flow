@@ -34,6 +34,7 @@ pub trait Kernel: Sized {
     pending()
   }
 
+  /// Drops the kernel interface and do asynchronous cleanups.
   fn terminate(self) -> impl Future<Output = ()> {
     ready(())
   }
@@ -63,6 +64,7 @@ impl Kernel for KernelAdapter {
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
     match self {
       Self::Noop => Ok(KernelHandle::Noop),
+      #[cfg(target_os = "linux")]
       Self::Linux(linux) => Ok(KernelHandle::Linux(linux.apply(spec, info).await?)),
     }
   }
@@ -70,6 +72,7 @@ impl Kernel for KernelAdapter {
   async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
     match (self, handle) {
       (Self::Noop, KernelHandle::Noop) => Ok(()),
+      #[cfg(target_os = "linux")]
       (Self::Linux(linux), KernelHandle::Linux(handle)) => linux.remove(handle).await,
       _ => Err(Error::HandleMismatch),
     }
@@ -78,6 +81,7 @@ impl Kernel for KernelAdapter {
   async fn process(&mut self) -> Result<()> {
     match self {
       Self::Noop => pending().await,
+      #[cfg(target_os = "linux")]
       Self::Linux(linux) => linux.process().await,
     }
   }
@@ -85,6 +89,7 @@ impl Kernel for KernelAdapter {
   async fn terminate(self) {
     match self {
       Self::Noop => {}
+      #[cfg(target_os = "linux")]
       Self::Linux(linux) => linux.terminate().await,
     }
   }
