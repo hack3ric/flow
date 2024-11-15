@@ -3,11 +3,17 @@ name = "flow"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "DONTSHIPIT-flow-gen"
+path = "src/gen.rs"
+
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
-clap = { version = "4.5.20", features = ["derive"] }
+clap = { workspace = true }
 clap-verbosity = "2.1.0"
+clap_complete = "4.5.38"
+clap_mangen = "0.2.24"
 either = "1.13.0"
 env_logger = { version = "0.11.5", default-features = false }
 futures = "0.3.30"
@@ -57,3 +63,9 @@ strip = true
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[workspace]
+members = [".", "xtask"]
+
+[workspace.dependencies]
+clap = { version = "4.5.20", features = ["derive"] }
