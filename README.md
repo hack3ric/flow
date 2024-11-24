@@ -4,7 +4,7 @@ Flow enables [BGP Flow Specification (flowspec)](https://www.rfc-editor.org/rfc/
 
 It:
 
-- executes BGP flowspec on Linux, using nftables;
+- executes BGP flowspec on Linux, using nftables and rtnetlink;
 - enables what previously can only be done on commercial routers or [bulky routing software](https://frrouting.org) on lightweight Linux systems.
 
 It doesn't:
@@ -76,12 +76,27 @@ Show information of currently running Flow instance:
 # flow show
 ```
 
+## Building
+
+Just use your general Cargo workflow:
+
+```console
+$ cargo build
+$ cargo run
+```
+
+To generate manpages and shell autocompletions into target/assets directory, run:
+
+```console
+$ cargo xtask gen
+```
+
 ## Future Work
 
 - **Programmatic handling**: custom traffic filter actions and route handling (not limited to flowspecs)
 - [**Validation procedure**](https://www.rfc-editor.org/rfc/rfc8955.html#name-validation-procedure): currently this can be done from the connecting BGP speaker, but for the sake of completeness and also future programmability it should also be done here
 - **VPN routes and VRF redirection**: does not have many knowledge right now, but certainly doable
-- ***BSD support**: provide an alternative to Linux; first FreeBSD (that uses `pf` and reuse existing rtnetlink code), and then OpenBSD ([route(4)](https://man.openbsd.org/route.4))
+- **\*BSD support**: provide an alternative to Linux; first FreeBSD (that uses `pf` and reuse existing rtnetlink code), and then OpenBSD ([route(4)](https://man.openbsd.org/route.4))
 
 ## License
 

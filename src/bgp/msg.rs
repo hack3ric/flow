@@ -61,6 +61,8 @@ impl Message<'_> {
 
 impl Message<'static> {
   pub async fn read_raw<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+    use MessageKind as MK;
+
     let mut header = [0; 19];
     reader.read_exact(&mut header).await?;
     if header[0..16] != [u8::MAX; 16] {
@@ -80,10 +82,10 @@ impl Message<'static> {
 
     let mut msg_reader = reader.take(msg_len.into());
     match MessageKind::from_repr(msg_type) {
-      Some(MessageKind::Open) => OpenMessage::read(&mut msg_reader).await.map(Message::Open),
-      Some(MessageKind::Update) => UpdateMessage::read(&mut msg_reader).await.map(Message::Update),
-      Some(MessageKind::Notification) => Notification::read(&mut msg_reader).await.map(Message::Notification),
-      Some(MessageKind::Keepalive) => Err(Notification::Header(BadLen(len)).into()),
+      Some(MK::Open) => OpenMessage::read(&mut msg_reader).await.map(Self::Open),
+      Some(MK::Update) => UpdateMessage::read(&mut msg_reader).await.map(Self::Update),
+      Some(MK::Notification) => Notification::read(&mut msg_reader).await.map(Self::Notification),
+      Some(MK::Keepalive) => Err(Notification::Header(BadLen(len)).into()),
       _ => Err(Notification::Header(BadType(msg_type)).into()),
     }
   }

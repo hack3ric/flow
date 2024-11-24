@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "nftables"
 version = "0.5.0"
-source = "git+https://github.com/hack3ric/rust-nftables?branch=for-flow#23568838e6a18aa73824df0ad7390df9c4698345"
+source = "git+https://github.com/hack3ric/rust-nftables?branch=for-flow#52902cd79b44b2582cb57beb4c137be66660a7ba"
 dependencies = [
  "serde",
  "serde_json",

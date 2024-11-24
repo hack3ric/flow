@@ -7,6 +7,12 @@ edition = "2021"
 name = "DONTSHIPIT-flow-gen"
 path = "src/gen.rs"
 
+[workspace]
+members = [".", "xtask"]
+
+[workspace.dependencies]
+clap = { version = "4.5.20", features = ["derive"] }
+
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
@@ -59,13 +65,8 @@ rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-
 test-case = "3.3.1"
 
 [profile.release]
-strip = true
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-
-[workspace]
-members = [".", "xtask"]
-
-[workspace.dependencies]
-clap = { version = "4.5.20", features = ["derive"] }
+strip = true
