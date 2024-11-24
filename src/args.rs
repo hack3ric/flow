@@ -1,7 +1,7 @@
 use crate::kernel::KernelArgs;
 use crate::net::IpPrefix;
 use clap::{Args, Parser, Subcommand};
-use clap_verbosity::{InfoLevel, Verbosity};
+use clap_verbosity_flag::{InfoLevel, Verbosity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
