@@ -90,7 +90,6 @@ fn check_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "no BIRD tests for now"]
 fn check_bird_2() -> anyhow::Result<()> {
   check_bird_ver(
     "2",
@@ -101,7 +100,7 @@ fn check_bird_2() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "no BIRD tests for now"]
+#[ignore = "no BIRD 2.16 tests for now"]
 fn check_bird_2_16() -> anyhow::Result<()> {
   check_bird_ver(
     "2.16",
