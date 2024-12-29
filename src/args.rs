@@ -2,7 +2,6 @@ use crate::net::IpPrefix;
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -17,8 +16,8 @@ pub struct Cli {
   pub verbosity: Verbosity<InfoLevel>,
 
   /// Path of runtime directory.
-  #[arg(long, global = true, default_value_t = Cow::Borrowed("/run/flow"))]
-  pub run_dir: Cow<'static, str>,
+  #[arg(long, global = true, default_value = "/run/flow")]
+  pub run_dir: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]

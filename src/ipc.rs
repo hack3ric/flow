@@ -49,7 +49,7 @@ pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Re
 
 /// Network namespace-aware socket path.
 #[cfg(linux)]
-pub fn get_sock_path(dir: &str) -> io::Result<String> {
+pub fn get_sock_path(dir: &Path) -> io::Result<PathBuf> {
   use std::mem::MaybeUninit;
 
   let stat = unsafe {
@@ -60,10 +60,10 @@ pub fn get_sock_path(dir: &str) -> io::Result<String> {
     }
     buf.assume_init()
   };
-  Ok(format!("{dir}/{:x}.sock", stat.st_ino))
+  Ok(dir.join(format!("{:x}.sock", stat.st_ino)))
 }
 
 #[cfg(not(linux))]
-pub fn get_sock_path(dir: &str) -> io::Result<String> {
-  Ok(format!("{dir}/flow.sock"))
+pub fn get_sock_path(dir: &Path) -> io::Result<PathBuf> {
+  Ok(dir.join("flow.sock"))
 }

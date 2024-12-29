@@ -39,7 +39,7 @@ use {
   tokio::signal::unix::{signal, SignalKind},
 };
 
-async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
+async fn run(mut args: RunArgs, sock_path: &Path) -> anyhow::Result<ExitCode> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
     args = RunArgs::parse_from(
@@ -66,7 +66,8 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   let mut bgp = Session::new(args).await?;
 
   create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
-  let mut ipc = IpcServer::new(sock_path).with_context(|| format!("failed to create socket at {sock_path}"))?;
+  let mut ipc =
+    IpcServer::new(sock_path).with_context(|| format!("failed to create socket at {}", sock_path.display()))?;
 
   info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
@@ -126,12 +127,12 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   }
 }
 
-async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &str) -> anyhow::Result<()> {
+async fn show(_args: ShowArgs, verbosity: LevelFilter, sock_path: &Path) -> anyhow::Result<()> {
   use StateView::*;
   let mut buf = Vec::new();
   let (config, state, routes) = ipc::get_states(sock_path, &mut buf)
     .await
-    .with_context(|| format!("failed to connect to {sock_path}"))?;
+    .with_context(|| format!("failed to connect to {}", sock_path.display()))?;
 
   println!("{FG_GREEN_BOLD}Flow{RESET} listening to {:?}", config.bind);
   println!("  {BOLD}State:{RESET} {:?}", state.kind());
