@@ -8,8 +8,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Run tests for ${{ matrix.target }}
+  stable-test:
+    name: Run tests on stable channel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: sudo apt install bird2
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test \
+          --config "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'" \
+          --verbose
+  cross-test:
+    name: Run cross tests for ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -28,8 +42,8 @@ jobs:
         run: cargo binstall cross
       - name: Build debug binary
         run: cross build --target=${{ matrix.target }} --verbose
-      - name: Run tests
-        run: cross test --target=${{ matrix.target }} --verbose
+      - name: Run cross unit tests
+        run: cross test --target=${{ matrix.target }} --verbose -- --skip integration_tests
       - name: Build release binary
         run: cross build --release --target=${{ matrix.target }} --verbose
       - name: Upload debug binary

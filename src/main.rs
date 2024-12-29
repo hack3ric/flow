@@ -7,7 +7,7 @@ pub mod util;
 mod args;
 
 #[cfg(test)]
-mod tests;
+mod integration_tests;
 
 use anstyle::{Reset, Style};
 use anyhow::Context;

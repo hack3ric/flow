@@ -6,6 +6,5 @@ fn main() {
     freebsd: { target_os = "freebsd" },
     kernel_supported: { linux },
     rtnetlink_supported: { any(linux, freebsd) },
-    unshare_supported: { linux },
   }
 }

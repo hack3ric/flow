@@ -69,10 +69,6 @@ cfg_aliases = "0.2.1"
 [dev-dependencies]
 test-case = "3.3.1"
 version-compare = "0.2.0"
-function_name = "0.3.0"
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-unshare = { git = "https://github.com/hack3ric/rust-unshare", branch = "for-flow" }
 
 [profile.release]
 opt-level = "z"
