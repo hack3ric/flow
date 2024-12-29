@@ -19,9 +19,10 @@ jobs:
       - name: Build
         run: cargo build --verbose
       - name: Run tests
-        run: cargo --config \
-          "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'" \
-          test --verbose
+        run: |
+          cargo --config \
+            "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'" \
+            test --verbose
   cross-test:
     name: Run cross tests for ${{ matrix.target }}
     runs-on: ubuntu-latest
