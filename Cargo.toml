@@ -6,6 +6,7 @@ edition = "2021"
 [[bin]]
 name = "DONTSHIPIT-flow-gen"
 path = "src/gen.rs"
+test = false
 
 [workspace]
 members = [".", "xtask"]
@@ -26,6 +27,7 @@ futures = "0.3.30"
 itertools = "0.13.0"
 libc = "0.2.161"
 log = "0.4.21"
+nix = { version = "0.29.0", features = ["user"] }
 num = { version = "0.4.3", features = ["num-bigint"] }
 pin-project = "1.1.5"
 postcard = { version = "1.0.10", default-features = false, features = [
@@ -63,6 +65,9 @@ rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-
 
 [dev-dependencies]
 test-case = "3.3.1"
+version-compare = "0.2.0"
+unshare = { git = "https://github.com/hack3ric/rust-unshare", branch = "for-flow" }
+function_name = "0.3.0"
 
 [profile.release]
 opt-level = "z"

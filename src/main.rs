@@ -6,6 +6,9 @@ pub mod util;
 
 mod args;
 
+#[cfg(test)]
+mod tests;
+
 use anstyle::{Reset, Style};
 use anyhow::Context;
 use args::{Cli, Command, RunArgs, ShowArgs};
@@ -171,9 +174,7 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
-  let cli = Cli::parse();
+pub async fn cli_entry(cli: Cli) -> ExitCode {
   let sock_path = get_sock_path(&cli.run_dir).unwrap();
   env_logger::builder()
     .filter_level(cli.verbosity.log_level_filter())
@@ -196,4 +197,10 @@ async fn main() -> ExitCode {
       }
     },
   }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+  let cli = Cli::parse();
+  cli_entry(cli).await
 }

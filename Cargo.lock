@@ -253,11 +253,13 @@ dependencies = [
  "clap_mangen",
  "either",
  "env_logger",
+ "function_name",
  "futures",
  "itertools",
  "libc",
  "log",
  "nftables",
+ "nix",
  "num",
  "pin-project",
  "postcard",
@@ -271,7 +273,24 @@ dependencies = [
  "thiserror 2.0.3",
  "tokio",
  "tokio-util",
+ "unshare",
+ "version-compare",
 ]
+
+[[package]]
+name = "function_name"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1ab577a896d09940b5fe12ec5ae71f9d8211fff62c919c03a3750a9901e98a7"
+dependencies = [
+ "function_name-proc-macro",
+]
+
+[[package]]
+name = "function_name-proc-macro"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673464e1e314dd67a0fd9544abc99e8eb28d0c7e3b69b033bcff9b2d00b87333"
 
 [[package]]
 name = "futures"
@@ -968,10 +987,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91b56cd4cadaeb79bbf1a5645f6b4f8dc5bde8834ad5894a8db35fda9efa1fe"
 
 [[package]]
+name = "unshare"
+version = "0.8.0-alpha.0"
+source = "git+https://github.com/hack3ric/rust-unshare?branch=for-flow#b03c1f656f1e7a41678a9e3aa0c2502fbfc328b0"
+dependencies = [
+ "libc",
+ "nix",
+]
+
+[[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "version-compare"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "852e951cb7832cb45cb1169900d19760cfa39b82bc0ea9c0e5a14ae88411c98b"
 
 [[package]]
 name = "wasi"
