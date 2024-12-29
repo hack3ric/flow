@@ -1,5 +1,6 @@
 use anyhow::bail;
 use nix::unistd::Uid;
+use tokio::net::TcpListener;
 
 #[cfg(rtnetlink_supported)]
 pub async fn ensure_loopback_up() -> anyhow::Result<()> {
@@ -20,6 +21,11 @@ pub async fn ensure_loopback_up() -> anyhow::Result<()> {
 
 #[cfg(not(rtnetlink_supported))]
 pub async fn ensure_loopback_up() -> anyhow::Result<()> {}
+
+pub async fn pick_port() -> anyhow::Result<u16> {
+  let sock = TcpListener::bind("127.0.0.1:0").await?;
+  Ok(sock.local_addr()?.port())
+}
 
 #[test]
 fn check_root() -> anyhow::Result<()> {

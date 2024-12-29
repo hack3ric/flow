@@ -1,11 +1,11 @@
 use anyhow::bail;
-use async_tempfile::{TempDir, TempFile};
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::{env, io};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use version_compare::compare_to;
 
@@ -118,21 +118,15 @@ fn check_bird_2_16() -> anyhow::Result<()> {
   )
 }
 
-pub async fn run_bird(config: &str) -> anyhow::Result<(Child, (TempFile, TempDir))> {
-  let mut config_file = TempFile::new().await?;
-  config_file.write_all(config.as_bytes()).await?;
-  config_file.flush().await?;
-
-  let sock_dir = TempDir::new().await?;
-  let sock_path = sock_dir.join("bird.sock");
-
+pub async fn run_bird(config_path: impl AsRef<Path>, sock_path: impl AsRef<Path>) -> anyhow::Result<Child> {
   let mut bird = Command::new(&*BIRD_PATH)
     .arg("-d")
-    .args(["-c".as_ref(), config_file.file_path().as_os_str()])
-    .args(["-s".as_ref(), sock_path.as_os_str()])
+    .args(["-c".as_ref(), config_path.as_ref().as_os_str()])
+    .args(["-s".as_ref(), sock_path.as_ref().as_os_str()])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
+    .kill_on_drop(true)
     .spawn()?;
 
   let mut bird_stderr = BufReader::new(bird.stderr.take().unwrap());
@@ -145,5 +139,5 @@ pub async fn run_bird(config: &str) -> anyhow::Result<(Child, (TempFile, TempDir
     anyhow::Ok(())
   });
 
-  Ok((bird, (config_file, sock_dir)))
+  Ok(bird)
 }
