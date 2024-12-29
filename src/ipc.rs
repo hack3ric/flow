@@ -50,11 +50,10 @@ pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Re
 /// Network namespace-aware socket path.
 #[cfg(linux)]
 pub fn get_sock_path(dir: &str) -> io::Result<String> {
-  use std::ffi::CStr;
   use std::mem::MaybeUninit;
 
   let stat = unsafe {
-    let netns_path = CStr::from_bytes_with_nul_unchecked(b"/proc/self/ns/net\0");
+    let netns_path = c"/proc/self/ns/net";
     let mut buf = MaybeUninit::uninit();
     if libc::stat(netns_path.as_ptr(), buf.as_mut_ptr()) < 0 {
       return Err(io::Error::last_os_error());
