@@ -91,6 +91,32 @@ To generate manpages and shell autocompletions into target/assets directory, run
 $ cargo xtask gen
 ```
 
+## Running Tests
+
+Intergration tests involve exchanging information with BIRD and modifying kernel network interface. For example, on Linux, install BIRD (version 2.x or above) and use [`unshare(1)`](https://www.man7.org/linux/man-pages/man1/unshare.1.html) to run the full sets of tests:
+
+```console
+$ cargo --config "runner='unshare -rn'" test
+```
+
+If `unshare` or similar unprivileged isolation methods are unavailable, be careful when running tests with root, since modifications to host network may not be completely reverted in test code:
+
+```console
+$ cargo --config "runner='sudo -E'" test
+```
+
+Or, skip integration tests and run only unit tests:
+
+```console
+$ cargo test -- --skip integration_tests
+```
+
+BIRD path can be specified via the `FLOW_BIRD_PATH` environment variable:
+
+```console
+$ FLOW_BIRD_PATH=/path/to/my/bird cargo <...options> test
+```
+
 ## Future Work
 
 - **Programmatic handling**: custom traffic filter actions and route handling (not limited to flowspecs)
