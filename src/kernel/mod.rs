@@ -61,11 +61,11 @@ impl KernelAdapter {
 impl Kernel for KernelAdapter {
   type Handle = KernelHandle;
 
-  async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
+  async fn apply(&mut self, _spec: &Flowspec, _info: &RouteInfo<'_>) -> Result<Self::Handle> {
     match self {
       Self::Noop => Ok(KernelHandle::Noop),
       #[cfg(target_os = "linux")]
-      Self::Linux(linux) => Ok(KernelHandle::Linux(linux.apply(spec, info).await?)),
+      Self::Linux(linux) => Ok(KernelHandle::Linux(linux.apply(_spec, _info).await?)),
     }
   }
 
@@ -74,6 +74,7 @@ impl Kernel for KernelAdapter {
       (Self::Noop, KernelHandle::Noop) => Ok(()),
       #[cfg(target_os = "linux")]
       (Self::Linux(linux), KernelHandle::Linux(handle)) => linux.remove(handle).await,
+      #[cfg(target_os = "linux")]
       _ => Err(Error::HandleMismatch),
     }
   }

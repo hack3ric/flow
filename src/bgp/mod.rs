@@ -60,11 +60,14 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub async fn new(c: RunArgs) -> Result<Self> {
+    #[cfg(target_os = "linux")]
     let kernel = if c.dry_run {
       KernelAdapter::Noop
     } else {
       KernelAdapter::linux(c.kernel.clone()).await?
     };
+    #[cfg(not(target_os = "linux"))]
+    let kernel = KernelAdapter::Noop;
     Ok(Self { config: c, state: Active, routes: Routes::new(kernel) })
   }
 

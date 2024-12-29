@@ -1,4 +1,3 @@
-use crate::kernel::KernelArgs;
 use crate::net::IpPrefix;
 use clap::{Args, Parser, Subcommand};
 use clap_verbosity_flag::{InfoLevel, Verbosity};
@@ -6,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+
+#[cfg(target_os = "linux")]
+use crate::kernel::KernelArgs;
 
 #[derive(Debug, Parser)]
 pub struct Cli {
@@ -67,10 +69,14 @@ pub struct RunArgs {
   pub hold_time: u16,
 
   /// Do not apply flowspecs to kernel settings.
+  ///
+  /// On unsupported platforms, this is no-op and no changes will be applied to
+  /// kernel.
   #[arg(short, long)]
   pub dry_run: bool,
 
   /// Platform-specific kernel settings.
+  #[cfg(target_os = "linux")]
   #[command(flatten)]
   pub kernel: KernelArgs,
 

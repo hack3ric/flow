@@ -1,9 +1,7 @@
 use crate::args::RunArgs;
 use crate::bgp::route::Routes;
 use crate::bgp::{Session, StateView};
-use std::ffi::CStr;
 use std::io;
-use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
@@ -52,6 +50,9 @@ pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Re
 /// Network namespace-aware socket path.
 #[cfg(target_os = "linux")]
 pub fn get_sock_path(dir: &str) -> io::Result<String> {
+  use std::ffi::CStr;
+  use std::mem::MaybeUninit;
+
   let stat = unsafe {
     let netns_path = CStr::from_bytes_with_nul_unchecked(b"/proc/self/ns/net\0");
     let mut buf = MaybeUninit::uninit();
