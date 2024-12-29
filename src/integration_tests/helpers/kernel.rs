@@ -1,10 +1,8 @@
 use anyhow::bail;
 use nix::unistd::Uid;
-use std::process::Command;
 
 #[test]
 fn check_root() -> anyhow::Result<()> {
-  println!("{}", String::from_utf8(Command::new("ip").arg("a").output()?.stdout).unwrap());
   if !Uid::effective().is_root() {
     bail!(
       "effective user not root\n\
