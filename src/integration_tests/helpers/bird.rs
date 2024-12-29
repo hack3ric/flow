@@ -38,7 +38,6 @@ fn bird_ver_ge(min_ver: &str) -> anyhow::Result<Option<bool>> {
     .map_err(|()| anyhow::Error::msg("invalid version number"))
 }
 
-#[expect(unused)]
 #[doc(hidden)]
 pub(crate) fn ensure_bird_ver_ge_internal(min_ver: &str) -> anyhow::Result<bool> {
   match bird_ver_ge(min_ver) {
@@ -58,19 +57,17 @@ pub(crate) fn ensure_bird_ver_ge_internal(min_ver: &str) -> anyhow::Result<bool>
   }
 }
 
-#[expect(unused)]
 macro_rules! ensure_bird_ver_ge {
   ($min_ver:expr) => {
-    $crate::tests::ensure_bird_ver_ge!($min_ver, ())
+    $crate::integration_tests::helpers::bird::ensure_bird_ver_ge!($min_ver, ())
   };
   ($min_ver:expr,$ret:expr) => {
-    if !$crate::tests::ensure_bird_ver_ge_internal($min_ver)? {
+    if !$crate::integration_tests::helpers::bird::ensure_bird_ver_ge_internal($min_ver)? {
       return Ok($ret);
     }
   };
 }
 
-#[expect(unused)]
 pub(crate) use ensure_bird_ver_ge;
 
 fn check_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
