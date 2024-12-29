@@ -92,7 +92,7 @@ impl Message<'static> {
 
   pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self> {
     match Message::read_raw(socket).await {
-      Ok(Message::Notification(n)) => Err(super::Error::Remote(n.into())),
+      Ok(Message::Notification(n)) => Err(super::Error::Remote(n)),
       Err(super::Error::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
     }
@@ -741,8 +741,12 @@ impl MessageSend for UpdateMessage<'_> {
     });
 
     extend_with_u16_len(buf, |buf| {
-      self.nlri.as_ref().map(|n| n.write_mp_reach(buf));
-      self.withdrawn.as_ref().map(|w| w.write_mp_unreach(buf));
+      if let Some(n) = self.nlri.as_ref() {
+        n.write_mp_reach(buf)
+      }
+      if let Some(w) = self.withdrawn.as_ref() {
+        w.write_mp_unreach(buf)
+      }
 
       // Path attributes
       buf.extend([PF_WELL_KNOWN, PathAttr::Origin as u8, 1, self.route_info.origin as u8]);

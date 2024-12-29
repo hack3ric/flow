@@ -36,7 +36,7 @@ impl<T> Deref for MaybeRc<T> {
 
   fn deref(&self) -> &Self::Target {
     match self {
-      Self::Rc(t) => &*t,
+      Self::Rc(t) => t,
       Self::Owned(t) => t,
     }
   }
@@ -130,7 +130,7 @@ impl TruthTable {
     }
   }
 
-  pub fn not(mut self) -> Self {
+  pub fn invert(mut self) -> Self {
     self.inv = !self.inv;
     self
   }
@@ -167,8 +167,7 @@ impl TruthTable {
         mask,
         inv: self.inv,
         truth: iter_masked(other_mask & !self.mask)
-          .map(|a| self.truth.iter().map(move |b| a | b))
-          .flatten()
+          .flat_map(|a| self.truth.iter().map(move |b| a | b))
           .collect(),
       })
     }

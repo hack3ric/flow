@@ -246,7 +246,7 @@ impl AsSegment {
   }
 
   pub fn bytes_len(&self) -> u16 {
-    (self.as_count() * 4 + 2).try_into().unwrap()
+    (self.as_count() * 4 + 2).into()
   }
 }
 
@@ -383,9 +383,7 @@ impl ExtCommunity {
     if !self.iana_authority() || !self.is_transitive() {
       return None;
     }
-    let Some((g, l)) = self.admins() else {
-      return None;
-    };
+    let (g, l) = self.admins()?;
     let result = match (g, self.sub_kind()) {
       (As(desc), 0x06) => TrafficRateBytes { desc: desc as u16, rate: f32::from_bits(l) },
       (As(desc), 0x0c) => TrafficRatePackets { desc: desc as u16, rate: f32::from_bits(l) },
@@ -411,8 +409,8 @@ impl Display for ExtCommunity {
       Display::fmt(&act, f)
     } else if let Some((g, l)) = self.admins() {
       match [self.kind(), self.sub_kind()] {
-        [0x00 | 0x01 | 0x02, 0x02] => f.write_str("(rt, ")?,
-        [0x00 | 0x01 | 0x02, 0x03] => f.write_str("(ro, ")?,
+        [0x00..=0x02, 0x02] => f.write_str("(rt, ")?,
+        [0x00..=0x02, 0x03] => f.write_str("(ro, ")?,
         bytes => write!(f, "({:#06x}, ", u16::from_be_bytes(bytes))?,
       }
       if l > u16::MAX.into() {

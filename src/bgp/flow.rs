@@ -144,6 +144,7 @@ impl Display for Flowspec {
 }
 
 #[derive(Debug, Clone, Hash, Serialize, Deserialize)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub struct ComponentStore(pub Component);
 
 impl PartialEq for ComponentStore {
@@ -156,7 +157,7 @@ impl Eq for ComponentStore {}
 
 impl PartialOrd for ComponentStore {
   fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    self.0.kind().partial_cmp(&other.0.kind())
+    Some(self.cmp(other))
   }
 }
 
@@ -402,9 +403,9 @@ impl Ord for Component {
         ord => ord,
       }
     } else if let (Some(ops1), Some(ops2)) = (self.numeric_ops(), other.numeric_ops()) {
-      ops1.cmp(&ops2)
+      ops1.cmp(ops2)
     } else if let (Some(ops1), Some(ops2)) = (self.bitmask_ops(), other.bitmask_ops()) {
-      ops1.cmp(&ops2)
+      ops1.cmp(ops2)
     } else {
       unreachable!()
     }
@@ -450,7 +451,7 @@ impl<K: OpKind> Ops<K> {
       }
       first = false;
     }
-    assert!(inner.len() > 0);
+    assert!(!inner.is_empty());
     inner[0].flags &= 0b1011_1111; // make sure first is always OR
     Ok(Self(inner.into()))
   }
@@ -521,7 +522,7 @@ impl<K: OpKind> Eq for Ops<K> {}
 
 impl<K: OpKind> PartialOrd for Ops<K> {
   fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    Some(self.cmp(&other))
+    Some(self.cmp(other))
   }
 }
 
@@ -687,7 +688,7 @@ impl<K: OpKind> Display for Op<K> {
 
 impl<K: OpKind> Clone for Op<K> {
   fn clone(&self) -> Self {
-    Self { flags: self.flags.clone(), value: self.value.clone(), _k: PhantomData }
+    *self
   }
 }
 

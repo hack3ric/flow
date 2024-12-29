@@ -129,7 +129,7 @@ impl Flowspec {
     let first = make_match(
       stmt::Operator::EQ,
       make_meta(expr::MetaKey::Nfproto),
-      STRING((self.afi() == Afi::Ipv4).then_some("ipv4").unwrap_or("ipv6").into()),
+      STRING(if self.afi() == Afi::Ipv4 { "ipv4" } else { "ipv6" }.into()),
     );
     let result = Some(Ok(smallvec_inline![smallvec_inline![first]]))
       .into_iter()
@@ -144,14 +144,11 @@ impl Component {
     use Component::*;
     use Transport::*;
 
-    let ip_ver = (afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6");
-    let icmp = (afi == Afi::Ipv4).then_some("icmp").unwrap_or("icmpv6");
+    let ip_ver = if afi == Afi::Ipv4 { "ip" } else { "ip6" };
+    let icmp = if afi == Afi::Ipv4 { "icmp" } else { "icmpv6" };
     let (th, tp_code) = match tp {
       Tcp => (Ok("tcp"), Some(6)),
-      Icmp => (
-        Err(Error::MatchNothing),
-        Some((afi == Afi::Ipv4).then_some(1).unwrap_or(58)),
-      ),
+      Icmp => (Err(Error::MatchNothing), Some(if afi == Afi::Ipv4 { 1 } else { 58 })),
       Unknown => (Ok("th"), None),
     };
     let result: StatementBranch = match self {
@@ -187,7 +184,11 @@ impl Component {
           return Ok(SmallVec::new_const());
         }
         smallvec_inline![smallvec_inline![make_match(
-          tt.inv.then_some(stmt::Operator::NEQ).unwrap_or(stmt::Operator::EQ),
+          if tt.inv {
+            stmt::Operator::NEQ
+          } else {
+            stmt::Operator::EQ
+          },
           expr::Expression::BinaryOperation(Box::new(expr::BinaryOperation::AND(
             make_payload_field("tcp", "flags"),
             NUM(tt.mask as u32),
@@ -209,7 +210,7 @@ impl Component {
       Fragment(ops) => {
         // int frag_op_value = [LF,FF,IsF,DF]
         // possible: [DF], [IsF], [FF], [LF], [LF,IsF](=[LF])
-        let mask = (afi == Afi::Ipv4).then_some(0b1111).unwrap_or(0b1110);
+        let mask = if afi == Afi::Ipv4 { 0b1111 } else { 0b1110 };
         let tt = ops.to_truth_table();
         let tt = tt.shrink(mask);
         let valid_set = [0b0001, 0b0010, 0b1010, 0b0100, 0b1000].into_iter().collect();
@@ -333,7 +334,7 @@ impl TrafficFilterAction {
       TrafficAction { .. } => SmallVec::new_const(),
       RtRedirect { .. } | RtRedirectIpv6 { .. } => SmallVec::new_const(), // redirect is not supported at the moment
       TrafficMarking { dscp } => smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
-        key: make_payload_field((afi == Afi::Ipv4).then_some("ip").unwrap_or("ip6"), "dscp"),
+        key: make_payload_field(if afi == Afi::Ipv4 { "ip" } else { "ip6" }, "dscp"),
         value: NUM(dscp.into()),
       })],
       RedirectToIp { ip, copy: true } => smallvec_inline![stmt::Statement::Dup(stmt::Dup {
@@ -427,7 +428,7 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlo
     STRING("ipv6".into()),
   ));
 
-  let addr_offset = src.then_some(192).unwrap_or(64);
+  let addr_offset = if src { 192 } else { 64 };
   let start_32bit = offset.next_multiple_of(32);
   let pre_rem = start_32bit - offset;
   let end_32bit = pattern.len().prev_multiple_of(&32); // this uses num::Integer, not std
@@ -487,7 +488,7 @@ fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Op
   let allowed = ranges
     .into_iter()
     .map(RangeInclusive::into_inner)
-    .filter_map(|(a, b)| (a <= max).then(|| (b <= max).then_some(a..=b).unwrap_or(a..=max)))
+    .filter_map(|(a, b)| (a <= max).then_some(if b <= max { a..=b } else { a..=max }))
     .map(|x| {
       let (start, end) = x.into_inner();
       // HACK: Does nftables itself support 64-bit integers? We shrink it for now.

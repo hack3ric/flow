@@ -130,9 +130,9 @@ impl Nlri {
         Ok(Self::new_flow(afi, specs)?)
       }
       (Some(afi), Some(kind @ NlriKind::Unicast), None) | (Some(afi), Some(kind @ NlriKind::Flow), Some(_)) => {
-        return Err(NlriError::InvalidNextHop { afi, kind, next_hop }.into())
+        Err(NlriError::InvalidNextHop { afi, kind, next_hop }.into())
       }
-      _ => return Err(NlriError::UnknownTuple(afi, safi).into()),
+      _ => Err(NlriError::UnknownTuple(afi, safi).into()),
     }
   }
 }

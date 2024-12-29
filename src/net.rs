@@ -185,6 +185,7 @@ impl IpPrefix {
     self.inner.addr
   }
 
+  #[allow(clippy::len_without_is_empty)]
   pub const fn len(self) -> u8 {
     self.inner.prefix_len
   }

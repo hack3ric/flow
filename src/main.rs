@@ -39,7 +39,7 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
       Some(Ok(format!("{cmd} run")))
         .into_iter()
         .chain(std::io::BufReader::new(File::open(file)?).lines())
-        .filter(|x| !x.as_ref().is_ok_and(|x| x.is_empty() || x.chars().next().unwrap() == '#'))
+        .filter(|x| !x.as_ref().is_ok_and(|x| x.is_empty() || x.starts_with('#')))
         .map_ok(|x| "--".to_string() + &x)
         .collect::<Result<Vec<_>, _>>()?,
     );

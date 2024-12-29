@@ -61,9 +61,8 @@ impl RtNetlink {
         Afi::Ipv6 => IpPrefix::V6_ALL,
       });
 
-    let table_id = if let Some((table_id, prefixes)) = (self.rules.iter_mut())
-      .filter(|(_, v)| v.iter().all(|p| !p.overlaps(prefix)))
-      .next()
+    let table_id = if let Some((table_id, prefixes)) =
+      (self.rules).iter_mut().find(|(_, v)| v.iter().all(|p| !p.overlaps(prefix)))
     {
       // there's a table whose content doesn't overlap with our prefix, we reuse it
       prefixes.insert(prefix);
@@ -154,9 +153,11 @@ impl RtNetlink {
     use RouteNetlinkMessage::*;
 
     fn af_to_wildcard(f: AddressFamily) -> IpPrefix {
-      (f == AddressFamily::Inet)
-        .then_some(IpPrefix::V4_ALL)
-        .unwrap_or(IpPrefix::V6_ALL)
+      if f == AddressFamily::Inet {
+        IpPrefix::V4_ALL
+      } else {
+        IpPrefix::V6_ALL
+      }
     }
 
     fn route_msg_dst_prefix(msg: RouteMessage) -> IpPrefix {
@@ -243,7 +244,7 @@ impl RtNetlink {
   }
   async fn get_route2(handle: &Handle, ip: IpAddr) -> Result<impl Iterator<Item = RouteAttribute>> {
     let msg = RouteMessageBuilder::<IpAddr>::new()
-      .destination_prefix(ip, ip.is_ipv4().then_some(32).unwrap_or(128))
+      .destination_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })
       .expect("destination prefix should be valid")
       .build();
     let mut msg = (handle.route()).get(msg).dump(false).execute();

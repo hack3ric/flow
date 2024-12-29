@@ -95,7 +95,7 @@ fn parse_bgp_bind(bind: &str) -> anyhow::Result<SocketAddr> {
 fn parse_prefix(p: &str) -> anyhow::Result<IpPrefix> {
   let result = p.parse().or_else(|_| {
     p.parse::<IpAddr>()
-      .map(|x| IpPrefix::new(x, x.is_ipv4().then_some(32).unwrap_or(128)))
+      .map(|x| IpPrefix::new(x, if x.is_ipv4() { 32 } else { 128 }))
   })?;
   Ok(result)
 }
