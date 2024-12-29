@@ -247,6 +247,7 @@ version = "0.2.0"
 dependencies = [
  "anstyle",
  "anyhow",
+ "cfg_aliases",
  "clap",
  "clap-verbosity-flag",
  "clap_complete",

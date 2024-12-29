@@ -48,7 +48,7 @@ pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Re
 }
 
 /// Network namespace-aware socket path.
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 pub fn get_sock_path(dir: &str) -> io::Result<String> {
   use std::ffi::CStr;
   use std::mem::MaybeUninit;
@@ -64,7 +64,7 @@ pub fn get_sock_path(dir: &str) -> io::Result<String> {
   Ok(format!("{dir}/{:x}.sock", stat.st_ino))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(linux))]
 pub fn get_sock_path(dir: &str) -> io::Result<String> {
   Ok(format!("{dir}/flow.sock"))
 }

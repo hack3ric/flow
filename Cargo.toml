@@ -63,6 +63,9 @@ nftables = { git = "https://github.com/hack3ric/rust-nftables", branch = "for-fl
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-flow" }
 
+[build-dependencies]
+cfg_aliases = "0.2.1"
+
 [dev-dependencies]
 test-case = "3.3.1"
 version-compare = "0.2.0"

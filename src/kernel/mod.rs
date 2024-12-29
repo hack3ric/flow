@@ -3,12 +3,12 @@
 //! Currently only Linux is supported. Future support may include *BSD using
 //! `pf` as backend.
 
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 pub use linux::*;
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(rtnetlink_supported)]
 mod rtnl;
 
 use crate::bgp::flow::Flowspec;
@@ -47,12 +47,12 @@ pub enum KernelAdapter {
   Noop,
 
   /// Linux implementation, using nftables and rtnetlink.
-  #[cfg(target_os = "linux")]
+  #[cfg(linux)]
   Linux(Linux),
 }
 
 impl KernelAdapter {
-  #[cfg(target_os = "linux")]
+  #[cfg(linux)]
   pub async fn linux(args: KernelArgs) -> Result<Self> {
     Ok(Self::Linux(Linux::new(args).await?))
   }
@@ -64,7 +64,7 @@ impl Kernel for KernelAdapter {
   async fn apply(&mut self, _spec: &Flowspec, _info: &RouteInfo<'_>) -> Result<Self::Handle> {
     match self {
       Self::Noop => Ok(KernelHandle::Noop),
-      #[cfg(target_os = "linux")]
+      #[cfg(linux)]
       Self::Linux(linux) => Ok(KernelHandle::Linux(linux.apply(_spec, _info).await?)),
     }
   }
@@ -72,9 +72,9 @@ impl Kernel for KernelAdapter {
   async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
     match (self, handle) {
       (Self::Noop, KernelHandle::Noop) => Ok(()),
-      #[cfg(target_os = "linux")]
+      #[cfg(linux)]
       (Self::Linux(linux), KernelHandle::Linux(handle)) => linux.remove(handle).await,
-      #[cfg(target_os = "linux")]
+      #[cfg(linux)]
       _ => Err(Error::HandleMismatch),
     }
   }
@@ -82,7 +82,7 @@ impl Kernel for KernelAdapter {
   async fn process(&mut self) -> Result<()> {
     match self {
       Self::Noop => pending().await,
-      #[cfg(target_os = "linux")]
+      #[cfg(linux)]
       Self::Linux(linux) => linux.process().await,
     }
   }
@@ -90,7 +90,7 @@ impl Kernel for KernelAdapter {
   async fn terminate(self) {
     match self {
       Self::Noop => {}
-      #[cfg(target_os = "linux")]
+      #[cfg(linux)]
       Self::Linux(linux) => linux.terminate().await,
     }
   }
@@ -101,18 +101,18 @@ pub enum KernelHandle {
   #[strum(to_string = "()")]
   Noop,
 
-  #[cfg(target_os = "linux")]
+  #[cfg(linux)]
   #[strum(to_string = "{0}")]
   Linux(<Linux as Kernel>::Handle),
 }
 
 #[derive(Debug, Error)]
 pub enum Error {
-  #[cfg(target_os = "linux")]
+  #[cfg(linux)]
   #[error(transparent)]
   Nftables(#[from] nftables::helper::NftablesError),
 
-  #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+  #[cfg(rtnetlink_supported)]
   #[error(transparent)]
   RtNetlink(#[from] rtnetlink::Error),
 

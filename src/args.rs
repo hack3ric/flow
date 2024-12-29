@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
+#[cfg(kernel_supported)]
 use crate::kernel::KernelArgs;
 
 #[derive(Debug, Parser)]
@@ -76,7 +76,7 @@ pub struct RunArgs {
   pub dry_run: bool,
 
   /// Platform-specific kernel settings.
-  #[cfg(target_os = "linux")]
+  #[cfg(kernel_supported)]
   #[command(flatten)]
   pub kernel: KernelArgs,
 
