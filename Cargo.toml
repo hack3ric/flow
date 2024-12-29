@@ -2,6 +2,7 @@
 name = "flow"
 version = "0.2.0"
 edition = "2021"
+default-run = "flow"
 
 [[bin]]
 name = "DONTSHIPIT-flow-gen"
@@ -17,6 +18,7 @@ clap = { version = "4.5.20", features = ["derive"] }
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
+async-tempfile = "0.6.0"
 clap = { workspace = true }
 clap-verbosity-flag = "3.0.0"
 clap_complete = "4.5.38"
@@ -51,6 +53,7 @@ tokio = { version = "1.38.0", features = [
   "sync",
   "macros",
   "io-util",
+  "io-std",
   "signal",
 ] }
 tokio-util = "0.7.11"

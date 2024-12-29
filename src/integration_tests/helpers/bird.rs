@@ -1,9 +1,12 @@
 use anyhow::bail;
+use async_tempfile::{TempDir, TempFile};
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::LazyLock;
 use std::{env, io};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use version_compare::compare_to;
 
 static BIRD_PATH: LazyLock<Cow<'static, OsStr>> = LazyLock::new(|| {
@@ -13,7 +16,10 @@ static BIRD_PATH: LazyLock<Cow<'static, OsStr>> = LazyLock::new(|| {
 });
 
 static BIRD_VERSION: LazyLock<Result<Option<String>, String>> = LazyLock::new(|| {
-  let output = Command::new(&*BIRD_PATH).arg("--version").stdin(Stdio::null()).output();
+  let output = std::process::Command::new(&*BIRD_PATH)
+    .arg("--version")
+    .stdin(Stdio::null())
+    .output();
   let mut stderr = match output {
     Ok(output) => output.stderr,
     Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -110,4 +116,34 @@ fn check_bird_2_16() -> anyhow::Result<()> {
       See https://gitlab.nic.cz/labs/bird/-/commit/072821e55e2a3bd0fb3ffee309937592\n  \
       for more information.",
   )
+}
+
+pub async fn run_bird(config: &str) -> anyhow::Result<(Child, (TempFile, TempDir))> {
+  let mut config_file = TempFile::new().await?;
+  config_file.write_all(config.as_bytes()).await?;
+  config_file.flush().await?;
+
+  let sock_dir = TempDir::new().await?;
+  let sock_path = sock_dir.join("bird.sock");
+
+  let mut bird = Command::new(&*BIRD_PATH)
+    .arg("-d")
+    .args(["-c".as_ref(), config_file.file_path().as_os_str()])
+    .args(["-s".as_ref(), sock_path.as_os_str()])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()?;
+
+  let mut bird_stderr = BufReader::new(bird.stderr.take().unwrap());
+  tokio::spawn(async move {
+    let mut buf = String::new();
+    while bird_stderr.read_line(&mut buf).await? != 0 {
+      eprint!("{buf}");
+      buf.clear();
+    }
+    anyhow::Ok(())
+  });
+
+  Ok((bird, (config_file, sock_dir)))
 }

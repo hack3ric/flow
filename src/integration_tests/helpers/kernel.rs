@@ -1,6 +1,26 @@
 use anyhow::bail;
 use nix::unistd::Uid;
 
+#[cfg(rtnetlink_supported)]
+pub async fn ensure_loopback_up() -> anyhow::Result<()> {
+  use rtnetlink::{LinkMessageBuilder, LinkUnspec};
+
+  if !Uid::effective().is_root() {
+    return Ok(());
+  }
+  let (conn, handle, _) = rtnetlink::new_connection()?;
+  tokio::spawn(conn);
+  handle
+    .link()
+    .set(LinkMessageBuilder::<LinkUnspec>::new().index(1).up().build())
+    .execute()
+    .await?;
+  Ok(())
+}
+
+#[cfg(not(rtnetlink_supported))]
+pub async fn ensure_loopback_up() -> anyhow::Result<()> {}
+
 #[test]
 fn check_root() -> anyhow::Result<()> {
   if !Uid::effective().is_root() {

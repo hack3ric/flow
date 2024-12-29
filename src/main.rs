@@ -15,8 +15,6 @@ use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::{Session, StateView};
 use clap::Parser;
 use env_logger::fmt::Formatter;
-use futures::future::select;
-use futures::FutureExt;
 use ipc::{get_sock_path, IpcServer};
 use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
@@ -28,9 +26,18 @@ use std::path::Path;
 use std::process::ExitCode;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::{pin, select};
+use tokio::select;
 use util::{BOLD, FG_GREEN_BOLD, RESET};
+
+#[cfg(test)]
+use std::future::pending;
+
+#[cfg(not(test))]
+use {
+  futures::future::{select, FutureExt},
+  tokio::pin,
+  tokio::signal::unix::{signal, SignalKind},
+};
 
 async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
   if let Some(file) = args.file {
@@ -63,15 +70,23 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
 
   info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
-  let mut sigint = signal(SignalKind::interrupt()).context("failed to register signal handler")?;
-  let mut sigterm = signal(SignalKind::terminate()).context("failed to register signal handler")?;
+  #[cfg(not(test))]
+  let (mut sigint, mut sigterm) = (
+    signal(SignalKind::interrupt()).context("failed to register signal handler")?,
+    signal(SignalKind::terminate()).context("failed to register signal handler")?,
+  );
 
   loop {
     let select = async {
+      #[cfg(not(test))]
       pin! {
         let sigint = sigint.recv().map(|_| "SIGINT");
         let sigterm = sigterm.recv().map(|_| "SIGTERM");
+        let signal_select = select(sigint, sigterm);
       }
+      #[cfg(test)]
+      let signal_select = pending();
+
       select! {
         result = listener.accept(), if matches!(bgp.state(), bgp::State::Active) => {
           let (stream, mut addr) = result.context("failed to accept TCP connection")?;
@@ -88,10 +103,14 @@ async fn run(mut args: RunArgs, sock_path: &str) -> anyhow::Result<ExitCode> {
           let mut stream = result.context("failed to accept IPC connection")?;
           bgp.write_states(&mut stream).await.context("failed to write to IPC channel")?;
         },
-        signal = select(sigint, sigterm) => {
-          let (signal, _) = signal.factor_first();
-          warn!("{signal} received, exiting");
-          return Ok(Some(ExitCode::SUCCESS))
+
+        _signal = signal_select => {
+          #[cfg(not(test))]
+          {
+            let (signal, _) = _signal.factor_first();
+            warn!("{signal} received, exiting");
+            return Ok(Some(ExitCode::SUCCESS))
+          }
         }
       }
       anyhow::Ok(None)
@@ -176,11 +195,14 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
 
 pub async fn cli_entry(cli: Cli) -> ExitCode {
   let sock_path = get_sock_path(&cli.run_dir).unwrap();
-  env_logger::builder()
+  let mut builder = env_logger::builder();
+  builder
     .filter_level(cli.verbosity.log_level_filter())
     .format(format_log)
-    .filter_module("netlink", LevelFilter::Off)
-    .init();
+    .filter_module("netlink", LevelFilter::Off);
+  #[cfg(test)]
+  builder.is_test(true);
+  builder.init();
   match cli.command {
     Command::Run(args) => match run(args, &sock_path).await {
       Ok(x) => x,
