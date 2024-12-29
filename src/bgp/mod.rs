@@ -141,7 +141,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
           if !remote_open.supports_4b_asn {
             error!("remote does not support 4-octet AS number");
             Unspecific.send_and_return(stream).await?;
-          } else if self.config.remote_as.map_or(false, |x| remote_open.my_as != x) {
+          } else if self.config.remote_as.is_some_and(|x| remote_open.my_as != x) {
             BadPeerAs.send_and_return(stream).await?;
           } else if remote_open.hold_time == 1 || remote_open.hold_time == 2 {
             UnacceptableHoldTime.send_and_return(stream).await?;
