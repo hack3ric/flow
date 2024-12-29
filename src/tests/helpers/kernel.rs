@@ -6,6 +6,7 @@ use std::io::BufRead;
 use std::{env, future::Future};
 use unshare::{GidMap, Namespace, UidMap};
 
+#[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub(crate) fn run_unshare_internal(test_name: &str, f: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
   const ENV_UNSHARE: &str = "FLOW_UNSHARE__INTERNAL";
@@ -41,6 +42,13 @@ pub(crate) fn run_unshare_internal(test_name: &str, f: impl FnOnce() -> anyhow::
     bail!("subprocess does not exit successfully")
   }
   Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[doc(hidden)]
+pub(crate) fn run_unshare_internal(_test_name: &str, _f: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+  // We may use `jail(3)` on FreeBSD in the future
+  panic!("unshare on other platforms are not implemented")
 }
 
 #[expect(unused)]
@@ -95,7 +103,8 @@ fn test_unshare_subprocess() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "no tests requiring root; for now we use unshare only"]
+#[cfg_attr(target_os = "linux", ignore = "no tests requiring root; for now we use unshare only")]
+#[cfg_attr(not(target_os = "linux"), ignore = "no tests requiring root")]
 fn check_root() -> anyhow::Result<()> {
   if !Uid::effective().is_root() {
     bail!(
