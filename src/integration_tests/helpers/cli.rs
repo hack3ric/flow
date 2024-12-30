@@ -3,12 +3,11 @@ use crate::args::Cli;
 use crate::cli_entry;
 use async_tempfile::TempDir;
 use std::path::Path;
-use std::process::ExitCode;
 use tokio::process::Child;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-pub type CliChild = JoinHandle<anyhow::Result<ExitCode>>;
+pub type CliChild = JoinHandle<anyhow::Result<u8>>;
 
 fn run_cli(options: Cli, event_tx: mpsc::Sender<()>) -> CliChild {
   tokio::task::spawn_local(async {
@@ -27,6 +26,5 @@ pub async fn run_cli_with_bird(
 
   let (event_tx, event_rx) = mpsc::channel(127);
   let cli = run_cli(cli_opt, event_tx);
-
   Ok((cli, bird, event_rx, sock_dir))
 }

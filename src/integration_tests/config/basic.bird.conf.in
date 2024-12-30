@@ -10,7 +10,10 @@ protocol static f4 {
     dst 10.0.0.0/8;
     length > 1024;
   } {
-    bgp_ext_community.add((unknown 0x810c, 1.1.1.1, 0));
+    bgp_ext_community.add((
+      unknown 0x810c, # redirect-to-ip
+      1.1.1.1, 0
+    ));
   };
 }
 
@@ -31,13 +34,12 @@ protocol static f6 {
 
 protocol bgp flow_test {
   debug all;
+  connect delay time 1;
 
   local ::1 port @@BIRD_PORT@@ as 65000;
   neighbor ::1 port @@FLOW_PORT@@ as 65000;
   multihop;
 
-  ipv4 { import none; export all; };
-  ipv6 { import none; export all; };
   flow4 { table myflow4; import none; export all; };
   flow6 { table myflow6; import none; export all; };
 }
