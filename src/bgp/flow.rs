@@ -15,7 +15,7 @@ use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Flowspec {
   afi: Afi,
   inner: BTreeSet<ComponentStore>,
@@ -143,8 +143,34 @@ impl Display for Flowspec {
   }
 }
 
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-#[allow(clippy::derived_hash_with_manual_eq)]
+impl PartialEq for Flowspec {
+  fn eq(&self, other: &Self) -> bool {
+    // ComponentStore's PartialEq only compares kind, so manually implement instead
+    self.afi == other.afi
+      && self.inner.len() == other.inner.len()
+      && self.inner.iter().zip(other.inner.iter()).all(|(a, b)| a.0 == b.0)
+  }
+}
+
+impl Eq for Flowspec {}
+
+impl PartialOrd for Flowspec {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for Flowspec {
+  fn cmp(&self, other: &Self) -> Ordering {
+    match self.afi.cmp(&other.afi) {
+      Ordering::Equal => {}
+      ord => return ord,
+    }
+    self.inner.iter().map(|x| &x.0).cmp(other.inner.iter().map(|x| &x.0))
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentStore(pub Component);
 
 impl PartialEq for ComponentStore {
