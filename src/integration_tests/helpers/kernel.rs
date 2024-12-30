@@ -2,6 +2,19 @@ use anyhow::bail;
 use nix::unistd::Uid;
 use tokio::net::TcpListener;
 
+#[expect(unused)]
+pub fn ensure_root() -> anyhow::Result<()> {
+  if !Uid::effective().is_root() {
+    bail!(
+      "effective user not root\n\
+        This test needs root (or an isolated namespace acting like root) to access \
+        kernel network interface (rtnetlink, nftables, etc.). Please run the tests with \
+        root, unshare(1) or jail(8) to test them.",
+    )
+  }
+  Ok(())
+}
+
 #[cfg(rtnetlink_supported)]
 pub async fn ensure_loopback_up() -> anyhow::Result<()> {
   use rtnetlink::{LinkMessageBuilder, LinkUnspec};
@@ -25,20 +38,4 @@ pub async fn ensure_loopback_up() -> anyhow::Result<()> {}
 pub async fn pick_port() -> anyhow::Result<u16> {
   let sock = TcpListener::bind("127.0.0.1:0").await?;
   Ok(sock.local_addr()?.port())
-}
-
-#[test]
-fn check_root() -> anyhow::Result<()> {
-  if !Uid::effective().is_root() {
-    bail!(
-      "effective user not root\n\
-        \n  \
-        Some tests need root to access kernel interface (rtnetlink, nftables, etc.), and\n  \
-        are skipped when run with normal users.\n\
-        \n  \
-        Please run the tests (again) with root or unshare to test them, or suppress this\n  \
-        message by skipping this particular test.",
-    )
-  }
-  Ok(())
 }

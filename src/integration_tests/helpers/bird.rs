@@ -44,47 +44,12 @@ fn bird_ver_ge(min_ver: &str) -> anyhow::Result<Option<bool>> {
     .map_err(|()| anyhow::Error::msg("invalid version number"))
 }
 
-#[doc(hidden)]
-pub(crate) fn ensure_bird_ver_ge_internal(min_ver: &str) -> anyhow::Result<bool> {
-  match bird_ver_ge(min_ver) {
-    Ok(None) => {
-      eprintln!(
-        "executable '{}' missing, skipping this test",
-        BIRD_PATH.to_string_lossy(),
-      );
-      Ok(false)
-    }
-    Ok(Some(false)) => {
-      eprintln!("BIRD version less than {min_ver}, skipping this test");
-      Ok(false)
-    }
-    Ok(Some(true)) => Ok(true),
-    Err(e) => Err(e),
-  }
-}
-
-macro_rules! ensure_bird_ver_ge {
-  ($min_ver:expr) => {
-    $crate::integration_tests::helpers::bird::ensure_bird_ver_ge!($min_ver, ())
-  };
-  ($min_ver:expr,$ret:expr) => {
-    if !$crate::integration_tests::helpers::bird::ensure_bird_ver_ge_internal($min_ver)? {
-      return Ok($ret);
-    }
-  };
-}
-
-pub(crate) use ensure_bird_ver_ge;
-
-fn check_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
+fn ensure_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
   match bird_ver_ge(ver) {
     Ok(None) => bail!(
-      "BIRD not found, some tests will not run\n
-        \n  \
-        Do one of the following to suppress this warning:\n    \
-          - Install BIRD under PATH\n    \
-          - Specify FLOW_BIRD_PATH to point to BIRD executable\n    \
-          - Skip this particular test (only when absolutely necessary)",
+      "BIRD not found\n\
+        Please install BIRD under PATH, or specify FLOW_BIRD_PATH to point to \
+        BIRD executable.",
     ),
     Ok(Some(false)) => Err(anyhow::Error::msg(msg)),
     Ok(Some(true)) => Ok(()),
@@ -92,30 +57,29 @@ fn check_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
   }
 }
 
-#[test]
-fn check_bird_2() -> anyhow::Result<()> {
-  check_bird_ver(
+pub fn ensure_bird_2() -> anyhow::Result<()> {
+  ensure_bird_ver(
     "2",
-    "the BIRD in your system is the outdated 1.x version\n\
-      \n  \
-      Please update to BIRD 2.x to run the tests.",
+    "outdated BIRD version\n\
+      The BIRD in your system is the outdated 1.x version. Please update to BIRD 2.x \
+      to run the tests.",
   )
 }
 
-#[test]
-#[ignore = "no BIRD 2.16 tests for now"]
-fn check_bird_2_16() -> anyhow::Result<()> {
-  check_bird_ver(
-    "2.16",
-    "the BIRD in your system is below the version of 2.16\n\
-      \n  \
-      BIRD version below 2.16 incorrectly implements Flowspec's IPv6 offset. Upgrade\n  \
-      to BIRD 2.16, 3.x, or above to allow respective tests to run, or skip this\n  \
-      particular test if such versions are not available.\n\
-      \n  \
-      See https://gitlab.nic.cz/labs/bird/-/commit/072821e55e2a3bd0fb3ffee309937592\n  \
+#[expect(unused)]
+pub fn ensure_bird_2_16() -> anyhow::Result<()> {
+  if env::var_os("FLOW_SKIP_BIRD_2_16_TESTS").is_some() {
+    Ok(())
+  } else {
+    ensure_bird_ver(
+      "2.16",
+      "BIRD version below 2.16\n\
+      BIRD version below 2.16 incorrectly implements Flowspec's IPv6 offset. Upgrade \
+      to BIRD 2.16, 3.x, or above to allow respective tests to run.\n\
+      See https://gitlab.nic.cz/labs/bird/-/commit/072821e55e2a3bd0fb3ffee309937592 \
       for more information.",
-  )
+    )
+  }
 }
 
 pub async fn run_bird(config_path: impl AsRef<Path>, sock_path: impl AsRef<Path>) -> anyhow::Result<Child> {
