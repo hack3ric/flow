@@ -4,24 +4,22 @@ version = "0.2.0"
 edition = "2021"
 default-run = "flow"
 
-[[bin]]
-name = "DONTSHIPIT-flow-gen"
-path = "src/gen.rs"
-test = false
-
 [workspace]
 members = [".", "xtask"]
 
 [workspace.dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
 
+[features]
+__gen = ["dep:clap_complete", "dep:clap_mangen"]
+
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
 clap = { workspace = true }
 clap-verbosity-flag = "3.0.0"
-clap_complete = "4.5.38"
-clap_mangen = "0.2.24"
+clap_complete = { version = "4.5.38", optional = true }
+clap_mangen = { version = "0.2.24", optional = true }
 either = "1.13.0"
 env_logger = { version = "0.11.5", default-features = false }
 futures = "0.3.30"

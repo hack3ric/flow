@@ -234,9 +234,33 @@ pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> u8 
   }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "__gen")))]
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+async fn main() -> std::process::ExitCode {
   let cli = Cli::parse();
   cli_entry(cli).await.into()
+}
+
+/// Manpage and autocompletion generator.
+///
+/// The `args` module links to all parts of the program and not possible to
+/// include it only, so we can only generate manpage right inside `main.rs`,
+/// gated by `__gen` feature.
+#[cfg(feature = "__gen")]
+fn main() {
+  use clap::{CommandFactory, ValueEnum};
+
+  let target_dir = "target/assets";
+  std::fs::create_dir_all(target_dir).unwrap();
+  let mut cli = Cli::command();
+
+  // We generate manpages first since clap_complete will call `cli.build()`, and
+  // the manpages generated after that will contain thing like "flow-help-help".
+  clap_mangen::generate_to(cli.clone(), target_dir).unwrap();
+
+  for &shell in clap_complete::Shell::value_variants() {
+    clap_complete::generate_to(shell, &mut cli, env!("CARGO_PKG_NAME"), target_dir).unwrap();
+  }
+
+  eprintln!("Manpages and autocompletions successfully generated to {target_dir}.");
 }

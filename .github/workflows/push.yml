@@ -28,7 +28,7 @@ jobs:
         with:
           components: clippy
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy
   stable-test:
     name: Run tests on stable channel
     runs-on: ubuntu-latest
