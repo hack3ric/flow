@@ -34,6 +34,9 @@ use tokio::select;
 use tokio::time::{interval, Duration, Instant, Interval};
 use State::*;
 
+#[cfg(test)]
+use tokio::sync::mpsc;
+
 /// A (currently passive only) BGP session.
 ///
 /// Implemented RFCs:
@@ -56,20 +59,28 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
   config: RunArgs,
   state: State<S>,
   routes: Routes,
+  #[cfg(test)]
+  event_tx: mpsc::Sender<()>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
-  pub async fn new(c: RunArgs) -> Result<Self> {
-    let kernel = if c.dry_run {
+  pub async fn new(config: RunArgs, #[cfg(test)] event_tx: mpsc::Sender<()>) -> Result<Self> {
+    let kernel = if config.dry_run {
       KernelAdapter::Noop
     } else {
       #[cfg(linux)]
-      let result = KernelAdapter::linux(c.kernel.clone()).await?;
+      let result = KernelAdapter::linux(config.kernel.clone()).await?;
       #[cfg(not(kernel_supported))]
       let result = KernelAdapter::Noop;
       result
     };
-    Ok(Self { config: c, state: Active, routes: Routes::new(kernel) })
+    Ok(Self {
+      config,
+      state: Active,
+      routes: Routes::new(kernel),
+      #[cfg(test)]
+      event_tx,
+    })
   }
 
   pub fn start(&mut self) {
@@ -180,6 +191,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
           match msg {
             Ok(Message::Update(msg)) => if let Some((afi, safi)) = msg.is_end_of_rib() {
               debug!("received End-of-RIB of ({afi}, {safi:?})");
+              #[cfg(test)]
+              let _ = self.event_tx.send(()).await;
             } else {
               debug!("received update: {msg:?}");
               if msg.nlri.is_some() || msg.old_nlri.is_some() {

@@ -23,7 +23,6 @@ use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::process::ExitCode;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::select;
@@ -35,15 +34,12 @@ use {std::future::pending, tokio::sync::mpsc};
 #[cfg(not(test))]
 use {
   futures::future::{select, FutureExt},
+  std::process::ExitCode,
   tokio::pin,
   tokio::signal::unix::{signal, SignalKind},
 };
 
-async fn run(
-  mut args: RunArgs,
-  sock_path: &Path,
-  #[cfg(test)] _event_tx: mpsc::Sender<()>,
-) -> anyhow::Result<ExitCode> {
+async fn run(mut args: RunArgs, sock_path: &Path, #[cfg(test)] event_tx: mpsc::Sender<()>) -> anyhow::Result<u8> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
     args = RunArgs::parse_from(
@@ -67,7 +63,10 @@ async fn run(
   let local_as = args.local_as;
   let router_id = args.router_id;
 
+  #[cfg(not(test))]
   let mut bgp = Session::new(args).await?;
+  #[cfg(test)]
+  let mut bgp = Session::new(args, event_tx).await?;
 
   create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
   let mut ipc =
@@ -114,7 +113,7 @@ async fn run(
           {
             let (signal, _) = _signal.factor_first();
             warn!("{signal} received, exiting");
-            return Ok(Some(ExitCode::SUCCESS))
+            return Ok(Some(0))
           }
         }
       }
@@ -122,6 +121,7 @@ async fn run(
     };
     match select.await {
       Ok(Some(x)) => {
+        // TODO: return read-only state
         bgp.terminate().await;
         return Ok(x);
       }
@@ -198,7 +198,7 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   }
 }
 
-pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> ExitCode {
+pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> u8 {
   let mut builder = env_logger::builder();
   builder
     .filter_level(cli.verbosity.log_level_filter())
@@ -220,15 +220,15 @@ pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> Exi
         Ok(x) => x,
         Err(error) => {
           error!("fatal error: {error:?}");
-          ExitCode::FAILURE
+          1
         }
       }
     }
     Command::Show(args) => match show(args, cli.verbosity.log_level_filter(), &sock_path).await {
-      Ok(()) => ExitCode::SUCCESS,
+      Ok(()) => 0,
       Err(error) => {
         error!("{error:?}");
-        ExitCode::FAILURE
+        1
       }
     },
   }
@@ -238,5 +238,5 @@ pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> Exi
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();
-  cli_entry(cli).await
+  cli_entry(cli).await.into()
 }
