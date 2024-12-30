@@ -72,7 +72,7 @@ impl<T: Ord> Intersect for RangeInclusive<T> {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TruthTable {
   pub mask: u64,
   pub inv: bool,
@@ -80,11 +80,30 @@ pub struct TruthTable {
 }
 
 impl TruthTable {
-  pub fn always_true() -> Self {
-    Self { mask: 0, inv: false, truth: BTreeSet::new() }
+  pub fn new(mask: u64, inv: bool, truth: impl IntoIterator<Item = u64>) -> Self {
+    let truth = truth.into_iter().map(|x| x & mask).collect();
+    let mut result = Self { mask, inv, truth };
+    result.optimize();
+    result
   }
 
-  pub fn always_false() -> Self {
+  fn optimize(&mut self) {
+    if self.truth.len() > (1 << (self.mask.count_ones() - 1)) {
+      if self.inv {
+        self.truth = self.possible_values_masked().into_owned();
+        self.inv = false;
+      } else {
+        self.inv = true;
+        self.truth = self.possible_values_masked().into_owned();
+      }
+    }
+  }
+
+  pub const fn always_true() -> Self {
+    Self { mask: 0, inv: true, truth: BTreeSet::new() }
+  }
+
+  pub const fn always_false() -> Self {
     Self { mask: 0, inv: false, truth: BTreeSet::new() }
   }
 
@@ -201,6 +220,14 @@ impl TruthTable {
   }
 }
 
+impl PartialEq for TruthTable {
+  fn eq(&self, other: &Self) -> bool {
+    self.mask == other.mask && self.possible_values_masked() == other.possible_values_masked()
+  }
+}
+
+impl Eq for TruthTable {}
+
 fn pos_of_set_bits(mut mask: u64) -> SmallVec<[u8; 6]> {
   let mut pos = SmallVec::with_capacity(mask.count_ones().try_into().unwrap());
   while mask.trailing_zeros() < 64 {
@@ -266,9 +293,22 @@ mod tests {
 
   #[test]
   fn test_truth_table() {
+    assert!(TruthTable::always_true().is_always_true());
+    assert!(TruthTable::always_false().is_always_false());
+    assert!(Op::not_any(0b0000).to_truth_table().is_always_true());
+
     let op1 = Op::all(0b0100);
     let op2 = Op::not_all(0b1010);
     let tt = op1.to_truth_table().or(op2.to_truth_table());
-    println!("{}", tt);
+    assert_eq!(tt, TruthTable::new(0b1110, true, [0b1010]));
+
+    assert_eq!(
+      tt,
+      dbg!(TruthTable::new(
+        0b1110,
+        false,
+        [0b0000, 0b0010, 0b0100, 0b0110, 0b1000, 0b1100, 0b1110]
+      )),
+    );
   }
 }
