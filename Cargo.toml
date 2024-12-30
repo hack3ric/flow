@@ -18,7 +18,6 @@ clap = { version = "4.5.20", features = ["derive"] }
 [dependencies]
 anstyle = "1.0.8"
 anyhow = "1.0.86"
-async-tempfile = "0.6.0"
 clap = { workspace = true }
 clap-verbosity-flag = "3.0.0"
 clap_complete = "4.5.38"
@@ -52,6 +51,7 @@ tokio = { version = "1.38.0", features = [
   "macros",
   "io-util",
   "signal",
+  "sync",
 ] }
 tokio-util = "0.7.11"
 
@@ -67,9 +67,11 @@ rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-
 cfg_aliases = "0.2.1"
 
 [dev-dependencies]
+async-tempfile = "0.6.0"
 test-case = "3.3.1"
 version-compare = "0.2.0"
-tokio = { version = "1.38.0", features = ["io-std"] }
+tokio = { version = "1.38.0", features = ["time"] }
+macro_rules_attribute = "0.2.0"
 
 [profile.release]
 opt-level = "z"

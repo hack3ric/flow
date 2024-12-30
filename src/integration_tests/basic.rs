@@ -2,12 +2,14 @@ use super::helpers::bird::ensure_bird_2;
 use super::helpers::cli::run_cli_with_bird;
 use super::helpers::kernel::{ensure_loopback_up, pick_port};
 use super::helpers::str_to_file;
+use super::test_local;
 use crate::args::Cli;
 use clap::Parser;
+use macro_rules_attribute::apply;
 use std::time::Duration;
 use tokio::time::sleep;
 
-#[tokio::test]
+#[apply(test_local!)]
 async fn test_basic() -> anyhow::Result<()> {
   ensure_bird_2()?;
   ensure_loopback_up().await?;
@@ -19,10 +21,7 @@ async fn test_basic() -> anyhow::Result<()> {
     .replace("@@FLOW_PORT@@", &flow_port);
   let bird = str_to_file(bird.as_bytes()).await?;
 
-  let fut = run_cli_with_bird(cli, bird.file_path(), |_cli, _bird, _ls| async {
-    sleep(Duration::from_secs(7)).await;
-    Ok(())
-  });
-
-  fut.await
+  let (_cli, _bird, _event, _temp_dir) = run_cli_with_bird(cli, bird.file_path()).await?;
+  sleep(Duration::from_secs(7)).await;
+  Ok(())
 }

@@ -30,7 +30,7 @@ use tokio::select;
 use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
-use std::future::pending;
+use {std::future::pending, tokio::sync::mpsc};
 
 #[cfg(not(test))]
 use {
@@ -39,7 +39,11 @@ use {
   tokio::signal::unix::{signal, SignalKind},
 };
 
-async fn run(mut args: RunArgs, sock_path: &Path) -> anyhow::Result<ExitCode> {
+async fn run(
+  mut args: RunArgs,
+  sock_path: &Path,
+  #[cfg(test)] _event_tx: mpsc::Sender<()>,
+) -> anyhow::Result<ExitCode> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
     args = RunArgs::parse_from(
@@ -194,8 +198,7 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   }
 }
 
-pub async fn cli_entry(cli: Cli) -> ExitCode {
-  let sock_path = get_sock_path(&cli.run_dir).unwrap();
+pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> ExitCode {
   let mut builder = env_logger::builder();
   builder
     .filter_level(cli.verbosity.log_level_filter())
@@ -204,14 +207,23 @@ pub async fn cli_entry(cli: Cli) -> ExitCode {
   #[cfg(test)]
   builder.is_test(true);
   builder.init();
+
+  let sock_path = get_sock_path(&cli.run_dir).unwrap();
+
   match cli.command {
-    Command::Run(args) => match run(args, &sock_path).await {
-      Ok(x) => x,
-      Err(error) => {
-        error!("fatal error: {error:?}");
-        ExitCode::FAILURE
+    Command::Run(args) => {
+      #[cfg(test)]
+      let result = run(args, &sock_path, event_tx).await;
+      #[cfg(not(test))]
+      let result = run(args, &sock_path).await;
+      match result {
+        Ok(x) => x,
+        Err(error) => {
+          error!("fatal error: {error:?}");
+          ExitCode::FAILURE
+        }
       }
-    },
+    }
     Command::Show(args) => match show(args, cli.verbosity.log_level_filter(), &sock_path).await {
       Ok(()) => ExitCode::SUCCESS,
       Err(error) => {
@@ -222,6 +234,7 @@ pub async fn cli_entry(cli: Cli) -> ExitCode {
   }
 }
 
+#[cfg(not(test))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
   let cli = Cli::parse();

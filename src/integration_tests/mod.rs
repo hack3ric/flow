@@ -4,3 +4,19 @@
 mod helpers;
 
 mod basic;
+
+macro_rules! test_local {
+  (
+    $(#[$post_attr:meta])*
+    async fn $name:ident ($($pname:ident : $pty:ty),* $(,)?)
+    $(-> $ret:ty)? $bl:block
+  ) => {
+    $(#[$post_attr])*
+    #[tokio::test]
+    async fn $name($($pname: $pty),*) $(-> $ret)? {
+      tokio::task::LocalSet::new().run_until(async move $bl).await
+    }
+  };
+}
+
+pub(crate) use test_local;
