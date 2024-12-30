@@ -96,13 +96,13 @@ $ cargo xtask gen
 Intergration tests involve exchanging information with BIRD and modifying kernel network interface. For example, on Linux, install BIRD (version 2.x or above) and use [`unshare(1)`](https://www.man7.org/linux/man-pages/man1/unshare.1.html) to run the full sets of tests:
 
 ```console
-$ cargo --config "runner='unshare -rn'" test
+$ cargo --config "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'" test
 ```
 
 If `unshare` or similar unprivileged isolation methods are unavailable, be careful when running tests with root, since modifications to host network may not be completely reverted in test code:
 
 ```console
-$ cargo --config "runner='sudo -E'" test
+$ cargo --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo -E'" test
 ```
 
 Or, skip integration tests and run only unit tests:
