@@ -688,7 +688,7 @@ impl Op<Bitmask> {
     Self::bit(BitmaskFlags::NotAny, value)
   }
   pub fn all(value: u64) -> Self {
-    Self::bit(BitmaskFlags::Any, value)
+    Self::bit(BitmaskFlags::All, value)
   }
   pub fn not_all(value: u64) -> Self {
     Self::bit(BitmaskFlags::NotAll, value)
@@ -867,7 +867,7 @@ mod tests {
       18,
       CK::DstPrefix as u8, 0x68, 0x3f, 0x89, 0x1a, 0x2b, 0x3c, 0x4c, 0x00,
       CK::DstPort as u8, 0x03, 0x50, 0xd5, 0x01, 0xbb,
-      CK::TcpFlags as u8, 0x80, (Op::SYN | Op::ACK).try_into().unwrap(),
+      CK::TcpFlags as u8, 0x81, (Op::SYN | Op::ACK).try_into().unwrap(),
     ];
 
     println!("{f}");
