@@ -42,6 +42,7 @@ async fn run(
   mut args: RunArgs,
   sock_path: &Path,
   #[cfg(test)] event_tx: mpsc::Sender<TestEvent>,
+  // TODO: close_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<u8> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
@@ -69,7 +70,7 @@ async fn run(
   #[cfg(not(test))]
   let mut bgp = Session::new(args).await?;
   #[cfg(test)]
-  let mut bgp = Session::new(args, event_tx).await?;
+  let mut bgp = Session::new(args, event_tx.clone()).await?;
 
   create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
   let mut ipc =
@@ -124,8 +125,9 @@ async fn run(
     };
     match select.await {
       Ok(Some(x)) => {
-        // TODO: return read-only state
         bgp.terminate().await;
+        #[cfg(test)]
+        let _ = event_tx.send(TestEvent::Exit(bgp));
         return Ok(x);
       }
       Ok(None) => {}
