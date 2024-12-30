@@ -304,11 +304,9 @@ mod tests {
 
     assert_eq!(
       tt,
-      dbg!(TruthTable::new(
-        0b1110,
-        false,
-        [0b0000, 0b0010, 0b0100, 0b0110, 0b1000, 0b1100, 0b1110]
-      )),
+      dbg!(TruthTable::new(0b1110, false, [
+        0b0000, 0b0010, 0b0100, 0b0110, 0b1000, 0b1100, 0b1110
+      ])),
     );
   }
 }

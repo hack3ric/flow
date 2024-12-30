@@ -3,7 +3,15 @@
 
 mod helpers;
 
-mod basic;
+use crate::bgp::msg::UpdateMessage;
+use crate::bgp::nlri::NlriKind;
+use crate::net::Afi;
+
+#[derive(Debug, Clone)]
+pub enum TestEvent {
+  EndOfRib(Afi, NlriKind),
+  Update(UpdateMessage<'static>),
+}
 
 macro_rules! test_local {
   (
@@ -20,3 +28,6 @@ macro_rules! test_local {
 }
 
 pub(crate) use test_local;
+
+// Test files
+mod basic;

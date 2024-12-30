@@ -54,8 +54,12 @@ impl Nlri {
     Ok(Self { afi, content: NlriContent::Flow { specs } })
   }
 
-  pub fn kind(&self) -> &NlriContent {
+  pub fn content(&self) -> &NlriContent {
     &self.content
+  }
+
+  pub fn into_content(self) -> NlriContent {
+    self.content
   }
 
   pub fn write_mp_reach(&self, buf: &mut Vec<u8>) {
@@ -74,7 +78,7 @@ impl Nlri {
       } as u8,
     ]);
     buf.extend(u16::to_be_bytes(self.afi as _));
-    match self.kind() {
+    match self.content() {
       NlriContent::Unicast { prefixes, next_hop } => {
         extend_with_u16_len(buf, |buf| {
           buf.push(NlriKind::Unicast as u8);

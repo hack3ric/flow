@@ -1,42 +1,126 @@
 use super::helpers::bird::ensure_bird_2;
 use super::helpers::cli::run_cli_with_bird;
 use super::helpers::kernel::{ensure_loopback_up, pick_port};
-use super::helpers::str_to_file;
-use super::test_local;
+use super::{test_local, TestEvent};
 use crate::args::Cli;
+use crate::bgp::flow::Component::*;
+use crate::bgp::flow::{Flowspec, Op, Ops};
+use crate::bgp::nlri::NlriContent;
 use anyhow::bail;
 use clap::Parser;
 use macro_rules_attribute::apply;
+use map_macro::btree_map;
+use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::sleep;
 
+const BIRD_FILE: &str = "\
+router id 10.234.56.78;
+
+flow4 table myflow4;
+flow6 table myflow6;
+
+protocol static f4 {
+  flow4 { table myflow4; };
+  @@FLOW4@@;
+}
+
+protocol static f6 {
+  flow6 { table myflow6; };
+  @@FLOW6@@;
+}
+
+protocol bgp flow_test {
+  debug all;
+  connect delay time 1;
+
+  local ::1 port @@BIRD_PORT@@ as 65000;
+  neighbor ::1 port @@FLOW_PORT@@ as 65000;
+  multihop;
+
+  flow4 { table myflow4; import none; export all; };
+  flow6 { table myflow6; import none; export all; };
+}";
+
 #[apply(test_local!)]
-async fn test_basic() -> anyhow::Result<()> {
+async fn test_routes() -> anyhow::Result<()> {
   ensure_bird_2()?;
   ensure_loopback_up().await?;
 
+  let flows = btree_map! {
+    Flowspec::new_v4()
+      .with(DstPrefix("10.0.0.0/8".parse()?, 0))?
+      .with(PacketLen(Ops::new(Op::gt(1024))))? => "flow4 { dst 10.0.0.0/8; length > 1024; }",
+    Flowspec::new_v4()
+      .with(SrcPrefix("123.45.67.192/26".parse()?, 0))? => "flow4 { src 123.45.67.192/26; }",
+    dbg!(Flowspec::new_v6()
+      .with(DstPrefix("fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128".parse()?, 0))?
+      .with(TcpFlags(Op::all(0x3).and(Op::not_any(0xc)).and(Op::any(0xff)).or(Op::all(0x33))))?
+      .with(DstPort(Ops::new(Op::eq(6000))))?
+      .with(Fragment(Op::not_any(0b10).or(Op::not_any(0b100))))?) => "flow6 { \
+        dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128; \
+        tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33; \
+        dport = 6000; \
+        fragment !is_fragment || !first_fragment; }"
+  };
+
+  let (flow4, flow6) = flows.iter().fold((String::new(), String::new()), |(v4, v6), (k, v)| {
+    if k.is_ipv4() {
+      (v4 + "route " + v + ";", v6)
+    } else {
+      (v4, v6 + "route " + v + ";")
+    }
+  });
+
   let flow_port = pick_port().await?.to_string();
   let cli = Cli::try_parse_from(["flow", "run", "-v", "--dry-run", &format!("--bind=[::1]:{flow_port}")])?;
-  let bird = include_str!("config/basic.bird.conf.in")
+  let bird = BIRD_FILE
     .replace("@@BIRD_PORT@@", &pick_port().await?.to_string())
-    .replace("@@FLOW_PORT@@", &flow_port);
-  let bird = str_to_file(bird.as_bytes()).await?;
-  let (mut cli, mut bird, mut events, _temp_dir) = run_cli_with_bird(cli, bird.file_path()).await?;
+    .replace("@@FLOW_PORT@@", &flow_port)
+    .replace("@@FLOW4@@", &flow4)
+    .replace("@@FLOW6@@", &flow6);
+
+  let (mut cli, mut bird, mut events, _g) = run_cli_with_bird(cli, &bird).await?;
 
   let mut end_of_rib_count = 0;
+  let mut visited = BTreeSet::new();
   loop {
     select! {
-      Some(()) = events.recv(), if !events.is_closed() => {
-        end_of_rib_count += 1;
-        if end_of_rib_count >= 2 {
-          break;
+      Some(event) = events.recv(), if !events.is_closed() => match event {
+        TestEvent::EndOfRib(_afi, _safi) => {
+          end_of_rib_count += 1;
+          if end_of_rib_count >= 2 {
+            break;
+          }
         }
-      }
+        TestEvent::Update(msg) => {
+          for nlri in msg.nlri.into_iter().chain(msg.old_nlri) {
+            let NlriContent::Flow { specs } = nlri.into_content() else {
+              bail!("received NLRI other than flowspec");
+            };
+            for spec in specs {
+              if flows.contains_key(&spec) {
+                if !visited.insert(spec.clone()) {
+                  bail!("received duplicate flowspec: {spec}");
+                }
+              } else {
+                bail!("received unknown flowspec: {spec}");
+              }
+            }
+          }
+        }
+      },
       _ = sleep(Duration::from_secs(10)) => bail!("timed out"),
       code = &mut cli => bail!("CLI exited early with code {}", code??),
       status = bird.wait() => bail!("BIRD exited early with {}", status?),
     }
+  }
+
+  if flows.len() != visited.len() {
+    let orig_set = flows.into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
+    let diff = orig_set.difference(&visited).collect::<BTreeSet<_>>();
+    bail!("some flowspecs not received: {diff:?}");
   }
 
   Ok(())

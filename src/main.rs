@@ -7,7 +7,7 @@ pub mod util;
 mod args;
 
 #[cfg(test)]
-mod integration_tests;
+pub mod integration_tests;
 
 use anstyle::{Reset, Style};
 use anyhow::Context;
@@ -29,17 +29,20 @@ use tokio::select;
 use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
-use {std::future::pending, tokio::sync::mpsc};
+use {integration_tests::TestEvent, std::future::pending, tokio::sync::mpsc};
 
 #[cfg(not(test))]
 use {
   futures::future::{select, FutureExt},
-  std::process::ExitCode,
   tokio::pin,
   tokio::signal::unix::{signal, SignalKind},
 };
 
-async fn run(mut args: RunArgs, sock_path: &Path, #[cfg(test)] event_tx: mpsc::Sender<()>) -> anyhow::Result<u8> {
+async fn run(
+  mut args: RunArgs,
+  sock_path: &Path,
+  #[cfg(test)] event_tx: mpsc::Sender<TestEvent>,
+) -> anyhow::Result<u8> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
     args = RunArgs::parse_from(
@@ -198,7 +201,7 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   }
 }
 
-pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<()>) -> u8 {
+pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<TestEvent>) -> u8 {
   let mut builder = env_logger::builder();
   builder
     .filter_level(cli.verbosity.log_level_filter())
