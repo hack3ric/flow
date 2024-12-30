@@ -4,9 +4,8 @@ use super::helpers::kernel::{ensure_loopback_up, pick_port};
 use super::{test_local, TestEvent};
 use crate::args::Cli;
 use crate::bgp::flow::Component::*;
-use crate::bgp::flow::{Flowspec, Op, Ops};
-use crate::bgp::nlri::NlriContent;
-use anyhow::bail;
+use crate::bgp::flow::{Flowspec, Op};
+use anyhow::{bail, Context};
 use clap::Parser;
 use macro_rules_attribute::apply;
 use map_macro::btree_map;
@@ -48,21 +47,27 @@ async fn test_routes() -> anyhow::Result<()> {
   ensure_bird_2()?;
   ensure_loopback_up().await?;
 
-  let flows = btree_map! {
+  let mut flows = btree_map! {
     Flowspec::new_v4()
       .with(DstPrefix("10.0.0.0/8".parse()?, 0))?
-      .with(PacketLen(Ops::new(Op::gt(1024))))? => "flow4 { dst 10.0.0.0/8; length > 1024; }",
+      .with(PacketLen(Op::gt(1024).into()))?
+    => "flow4 { dst 10.0.0.0/8; length > 1024; }",
+
     Flowspec::new_v4()
-      .with(SrcPrefix("123.45.67.192/26".parse()?, 0))? => "flow4 { src 123.45.67.192/26; }",
-    dbg!(Flowspec::new_v6()
+      .with(SrcPrefix("123.45.67.192/26".parse()?, 0))?
+      .with(IcmpType(Op::eq(3).into()))?
+      .with(IcmpCode(Op::ge(2).and(Op::lt(13))))?
+    => "flow4 { src 123.45.67.192/26; icmp type 3; icmp code >= 2 && < 13; }",
+
+    Flowspec::new_v6()
       .with(DstPrefix("fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128".parse()?, 0))?
       .with(TcpFlags(Op::all(0x3).and(Op::not_any(0xc)).and(Op::any(0xff)).or(Op::all(0x33))))?
-      .with(DstPort(Ops::new(Op::eq(6000))))?
-      .with(Fragment(Op::not_any(0b10).or(Op::not_any(0b100))))?) => "flow6 { \
-        dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128; \
-        tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33; \
-        dport = 6000; \
-        fragment !is_fragment || !first_fragment; }"
+      .with(DstPort(Op::eq(6000).into()))?
+      .with(Fragment(Op::not_any(0b10).or(Op::not_any(0b100))))?
+    => "flow6 { dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128; \
+                tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33; \
+                dport = 6000; \
+                fragment !is_fragment || !first_fragment; }"
   };
 
   let (flow4, flow6) = flows.iter().fold((String::new(), String::new()), |(v4, v6), (k, v)| {
@@ -96,14 +101,12 @@ async fn test_routes() -> anyhow::Result<()> {
         }
         TestEvent::Update(msg) => {
           for nlri in msg.nlri.into_iter().chain(msg.old_nlri) {
-            let NlriContent::Flow { specs } = nlri.into_content() else {
-              bail!("received NLRI other than flowspec");
-            };
+            let specs = nlri.into_flow().context("received NLRI other than flowspec")?;
             for spec in specs {
-              if flows.contains_key(&spec) {
-                if !visited.insert(spec.clone()) {
-                  bail!("received duplicate flowspec: {spec}");
-                }
+              if let Some((spec1, _)) = flows.remove_entry(&spec) {
+                visited.insert(spec1);
+              } else if visited.contains(&spec) {
+                bail!("received duplicate flowspec: {spec}");
               } else {
                 bail!("received unknown flowspec: {spec}");
               }
@@ -117,11 +120,8 @@ async fn test_routes() -> anyhow::Result<()> {
     }
   }
 
-  if flows.len() != visited.len() {
-    let orig_set = flows.into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
-    let diff = orig_set.difference(&visited).collect::<BTreeSet<_>>();
-    bail!("some flowspecs not received: {diff:?}");
+  if flows.len() != 0 {
+    bail!("some flowspecs not received: {flows:?}");
   }
-
   Ok(())
 }

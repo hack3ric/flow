@@ -721,7 +721,7 @@ impl MessageSend for UpdateMessage<'_> {
   /// test the correctness of the deserialization logic. With that said, it is
   /// important to make this function correct as well.
   fn write_data(&self, buf: &mut Vec<u8>) {
-    let old_nlri = match &self.old_nlri.as_ref().map(Nlri::content) {
+    let old_nlri = match &self.old_nlri.as_ref().map(|x| &x.content) {
       Some(NlriContent::Unicast { prefixes, next_hop: NextHop::V4(next_hop), .. }) => Some((prefixes, next_hop)),
       Some(_) => panic!("BGP-4 NLRI supports IPv4 only"),
       None => None,
@@ -731,7 +731,7 @@ impl MessageSend for UpdateMessage<'_> {
 
     // BGP-4 withdrawn routes
     extend_with_u16_len(buf, |buf| {
-      let Some(NlriContent::Unicast { prefixes, .. }) = &self.old_withdrawn.as_ref().map(Nlri::content) else {
+      let Some(NlriContent::Unicast { prefixes, .. }) = &self.old_withdrawn.as_ref().map(|x| &x.content) else {
         panic!("BGP-4 withdrawn routes support IPv4 only");
       };
       prefixes.iter().for_each(|p| {

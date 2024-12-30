@@ -54,12 +54,18 @@ impl Nlri {
     Ok(Self { afi, content: NlriContent::Flow { specs } })
   }
 
-  pub fn content(&self) -> &NlriContent {
-    &self.content
+  pub fn into_unicast(self) -> Option<(BTreeSet<IpPrefix>, NextHop)> {
+    match self.content {
+      NlriContent::Unicast { prefixes, next_hop } => Some((prefixes, next_hop)),
+      _ => None,
+    }
   }
 
-  pub fn into_content(self) -> NlriContent {
-    self.content
+  pub fn into_flow(self) -> Option<SmallVec<[Flowspec; 4]>> {
+    match self.content {
+      NlriContent::Flow { specs } => Some(specs),
+      _ => None,
+    }
   }
 
   pub fn write_mp_reach(&self, buf: &mut Vec<u8>) {
@@ -78,7 +84,7 @@ impl Nlri {
       } as u8,
     ]);
     buf.extend(u16::to_be_bytes(self.afi as _));
-    match self.content() {
+    match &self.content {
       NlriContent::Unicast { prefixes, next_hop } => {
         extend_with_u16_len(buf, |buf| {
           buf.push(NlriKind::Unicast as u8);
