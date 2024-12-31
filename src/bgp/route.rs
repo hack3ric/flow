@@ -150,8 +150,10 @@ impl Routes {
     }
   }
 
-  pub async fn terminate(self) {
-    self.kernel.terminate().await;
+  pub async fn terminate(&mut self) {
+    let mut kernel = KernelAdapter::Noop;
+    std::mem::swap(&mut kernel, &mut self.kernel);
+    kernel.terminate().await;
   }
 }
 

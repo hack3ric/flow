@@ -230,7 +230,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     Ok(())
   }
 
-  pub async fn terminate(self) {
+  pub async fn terminate(&mut self) {
     self.routes.terminate().await;
   }
 }
