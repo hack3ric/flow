@@ -31,10 +31,11 @@ use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
 use {
+  futures::SinkExt,
+  futures_channel::{mpsc, oneshot},
   integration_tests::TestEvent,
   std::sync::atomic::AtomicBool,
   std::sync::atomic::Ordering::SeqCst,
-  tokio::sync::{mpsc, oneshot},
 };
 
 #[cfg(not(test))]
@@ -47,7 +48,7 @@ use {
 async fn run(
   mut args: RunArgs,
   sock_path: &Path,
-  #[cfg(test)] event_tx: mpsc::Sender<TestEvent>,
+  #[cfg(test)] mut event_tx: mpsc::Sender<TestEvent>,
   #[cfg(test)] mut close_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<u8> {
   if let Some(file) = args.file {

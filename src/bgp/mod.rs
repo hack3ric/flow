@@ -36,7 +36,7 @@ use State::*;
 use futures::FutureExt;
 use futures_concurrency::future::Race;
 #[cfg(test)]
-use {crate::integration_tests::TestEvent, tokio::sync::mpsc};
+use {crate::integration_tests::TestEvent, futures::SinkExt, futures_channel::mpsc};
 
 /// A (currently passive only) BGP session.
 ///

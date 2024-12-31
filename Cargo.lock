@@ -314,6 +314,7 @@ dependencies = [
  "either",
  "env_logger",
  "futures",
+ "futures-channel",
  "futures-concurrency",
  "itertools",
  "libc",

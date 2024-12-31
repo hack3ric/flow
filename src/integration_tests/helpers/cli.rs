@@ -5,7 +5,7 @@ use crate::cli_entry;
 use crate::integration_tests::TestEvent;
 use async_tempfile::{TempDir, TempFile};
 use tokio::process::Child;
-use tokio::sync::{mpsc, oneshot};
+use futures_channel::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub type CliChild = JoinHandle<anyhow::Result<u8>>;

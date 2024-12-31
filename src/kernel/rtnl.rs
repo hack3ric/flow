@@ -2,7 +2,7 @@ use super::Result;
 use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
 use clap::Args;
-use futures::channel::mpsc::UnboundedReceiver;
+use futures_channel::mpsc::UnboundedReceiver;
 use futures::{try_join, FutureExt, StreamExt, TryStreamExt};
 use futures_concurrency::future::Race;
 use libc::{RTA_GATEWAY, RTA_OIF};
