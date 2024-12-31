@@ -4,6 +4,8 @@ use super::flow::Flowspec;
 use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
 use super::{extend_with_u16_len, Result};
 use crate::net::{Afi, IpPrefix};
+use crate::util::AsyncReadBytes;
+use futures::AsyncRead;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
@@ -11,7 +13,6 @@ use std::fmt::{self, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Network Layer Reachability Information (NLRI).
 #[derive(Debug, Clone, PartialEq, Eq)]

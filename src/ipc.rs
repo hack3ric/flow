@@ -1,10 +1,11 @@
 use crate::args::RunArgs;
 use crate::bgp::route::Routes;
 use crate::bgp::{Session, StateView};
+use futures::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use smol::net::unix::{UnixListener, UnixStream};
+use smol::net::TcpStream;
 use std::io;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 pub struct IpcServer {
   path: PathBuf,

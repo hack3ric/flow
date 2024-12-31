@@ -1,5 +1,7 @@
 use super::Result;
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
+use crate::util::AsyncReadBytes;
+use futures::{AsyncRead, AsyncReadExt};
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::borrow::Borrow;
@@ -13,7 +15,6 @@ use std::marker::PhantomData;
 use std::net::IpAddr;
 use strum::{EnumDiscriminants, FromRepr};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Flowspec {
@@ -844,9 +845,11 @@ pub enum FlowError {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use macro_rules_attribute::apply;
+  use smol_macros::test;
   use test_case::test_case;
 
-  #[tokio::test]
+  #[apply(test!)]
   async fn test_flowspec() -> anyhow::Result<()> {
     use Component::*;
     use ComponentKind as CK;
@@ -883,7 +886,7 @@ mod tests {
 
   #[test_case(OP_NUM, &[0b00000011, 114, 0b01010100, 2, 2, 0b10000001, 1], &[1, 114, 200], &[0, 2, 514]; "n ge 114 AND n lt 514 OR n eq 1")]
   #[test_case(OP_BIT, &[0b10000001, 0b101], &[85, 1365, 65525, 65535], &[0, 1, 2, 114, 514]; "n bitand 0b101 eq 0b101")]
-  #[tokio::test]
+  #[apply(test!)]
   async fn test_ops<K: OpKind>(_op: PhantomData<K>, mut seq: &[u8], aye: &[u64], nay: &[u64]) -> anyhow::Result<()> {
     let ops = Ops::<K>::read(&mut seq).await?;
     aye.iter().for_each(|&n| assert!(ops.op(n), "!ops.op({n})"));

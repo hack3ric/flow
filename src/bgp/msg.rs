@@ -4,6 +4,7 @@ use super::{extend_with_u16_len, Result};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Take};
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -13,10 +14,10 @@ use std::future::Future;
 use std::io;
 use strum::{Display, EnumDiscriminants, FromRepr};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Take};
 use HeaderError::*;
 use OpenError::*;
 use UpdateError::*;
+use crate::util::AsyncReadBytes;
 
 pub const AS_TRANS: u16 = 23456;
 
@@ -133,7 +134,7 @@ async fn get_pattr_buf(
 }
 
 async fn discard(mut reader: impl AsyncRead + Unpin) -> io::Result<()> {
-  tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
+  futures::io::copy(&mut reader, &mut futures::io::sink()).await?;
   Ok(())
 }
 

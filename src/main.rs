@@ -15,24 +15,25 @@ use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::{Session, StateView};
 use clap::Parser;
 use env_logger::fmt::Formatter;
+use futures::io::BufReader;
 use futures::FutureExt;
 use futures_concurrency::future::Race;
 use ipc::{get_sock_path, IpcServer};
 use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
+use smol::net::unix::UnixStream;
+use smol::net::{TcpListener, TcpStream};
 use std::fs::{create_dir_all, File};
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use tokio::io::BufReader;
-use tokio::net::{TcpListener, TcpStream, UnixStream};
 use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
 use {
-  futures::SinkExt,
-  futures_channel::{mpsc, oneshot},
+  futures::channel::{mpsc, oneshot},
+  futures::sink::SinkExt,
   integration_tests::TestEvent,
   std::sync::atomic::AtomicBool,
   std::sync::atomic::Ordering::SeqCst,
@@ -40,9 +41,10 @@ use {
 
 #[cfg(not(test))]
 use {
-  futures::future::select,
-  tokio::pin,
-  tokio::signal::unix::{signal, SignalKind},
+  futures::StreamExt,
+  async_signal::{Signal, Signals},
+  macro_rules_attribute::apply,
+  smol_macros::main,
 };
 
 async fn run(
@@ -86,10 +88,7 @@ async fn run(
   info!("Flow listening to {bind:?} as AS{local_as}, router ID {router_id}");
 
   #[cfg(not(test))]
-  let (mut sigint, mut sigterm) = (
-    signal(SignalKind::interrupt()).context("failed to register signal handler")?,
-    signal(SignalKind::terminate()).context("failed to register signal handler")?,
-  );
+  let mut signals = Signals::new([Signal::Int, Signal::Term])?;
 
   loop {
     let select = async {
@@ -98,17 +97,13 @@ async fn run(
         BgpProcess(bgp::Result<()>),
         IpcAccept(anyhow::Result<UnixStream>),
         #[cfg(not(test))]
-        Signal(&'static str),
+        Signal(io::Result<Signal>),
         #[cfg(test)]
         Signal,
       }
 
       #[cfg(not(test))]
-      pin! {
-        let sigint = sigint.recv().map(|_| "SIGINT");
-        let sigterm = sigterm.recv().map(|_| "SIGTERM");
-        let signal_select = select(sigint, sigterm);
-      }
+      let signal_select = signals.next();
       #[cfg(test)]
       let signal_select = &mut close_rx;
 
@@ -116,7 +111,7 @@ async fn run(
       let bgp_process = bgp.process().map(Br::BgpProcess);
       let ipc_accept = ipc.accept().map(Br::IpcAccept);
       #[cfg(not(test))]
-      let signal = signal_select.map(|x| Br::Signal(x.factor_first().0));
+      let signal = signal_select.map(|x| Br::Signal(x.expect("Signals stream should never end")));
       #[cfg(test)]
       let signal = signal_select.map(|_| Br::Signal);
 
@@ -148,7 +143,12 @@ async fn run(
         }
         #[cfg(not(test))]
         Br::Signal(signal) => {
-          warn!("{signal} received, exiting");
+          let signal_name = match signal? {
+            Signal::Int => "SIGINT",
+            Signal::Term => "SIGTERM",
+            _ => unreachable!(),
+          };
+          warn!("{signal_name} received, exiting");
           return Ok(Some(0));
         }
         #[cfg(test)]
@@ -285,7 +285,7 @@ pub async fn cli_entry(
 }
 
 #[cfg(not(any(test, feature = "__gen")))]
-#[tokio::main(flavor = "current_thread")]
+#[apply(main!)]
 async fn main() -> std::process::ExitCode {
   let cli = Cli::parse();
   cli_entry(cli).await.into()

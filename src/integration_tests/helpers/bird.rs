@@ -4,8 +4,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::{env, io};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use futures::io::{AsyncBufReadExt, BufReader};
+use async_process::{Child, Command};
 use version_compare::compare_to;
 
 static BIRD_PATH: LazyLock<Cow<'static, OsStr>> = LazyLock::new(|| {
@@ -86,7 +86,7 @@ pub async fn run_bird(config_path: impl AsRef<Path>, sock_path: impl AsRef<Path>
     .spawn()?;
 
   let mut bird_stderr = BufReader::new(bird.stderr.take().unwrap());
-  tokio::spawn(async move {
+  smol::spawn(async move {
     let mut buf = String::new();
     while bird_stderr.read_line(&mut buf).await? != 0 {
       eprint!("{buf}");

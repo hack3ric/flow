@@ -8,6 +8,8 @@ use crate::kernel::{self, KernelAdapter};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
 use either::Either;
 use flow::FlowError;
+use futures::io::{AsyncRead, AsyncWrite, BufReader};
+use futures::StreamExt;
 use itertools::Itertools;
 use log::{debug, error, info, warn};
 use msg::HeaderError::*;
@@ -19,6 +21,8 @@ use replace_with::replace_with_or_abort;
 use route::Routes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use smol::net::TcpStream;
+use smol::Timer;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::fmt::Display;
@@ -28,15 +32,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use strum::EnumDiscriminants;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, BufReader};
-use tokio::net::TcpStream;
-use tokio::time::{interval, Duration, Instant, Interval};
 use State::*;
 
 use futures::FutureExt;
 use futures_concurrency::future::Race;
+use std::time::{Duration, Instant};
 #[cfg(test)]
-use {crate::integration_tests::TestEvent, futures::SinkExt, futures_channel::mpsc};
+use {crate::integration_tests::TestEvent, futures::channel::mpsc, futures::SinkExt};
 
 /// A (currently passive only) BGP session.
 ///
@@ -305,7 +307,7 @@ impl State<BufReader<TcpStream>> {
 
 #[derive(Debug)]
 pub struct Timers {
-  clock: Interval,
+  clock: Timer,
   hold_timer: (Duration, Instant),
   keepalive_timer: (Duration, Instant),
 }
@@ -318,7 +320,7 @@ impl Timers {
       let hold = Duration::from_secs(hold_time.into());
       let keepalive = Duration::from_secs(keepalive_time.into());
       Self {
-        clock: interval(Duration::from_secs(u64::from(gcd(hold_time, keepalive_time) / 2))),
+        clock: Timer::interval(Duration::from_secs(u64::from(gcd(hold_time, keepalive_time) / 2))),
         hold_timer: (hold, now + hold),
         keepalive_timer: (keepalive, now + keepalive),
       }
@@ -331,7 +333,7 @@ impl Timers {
   }
 
   pub async fn tick(&mut self) -> Instant {
-    self.clock.tick().await
+    self.clock.next().await.expect("interval timer should never end")
   }
 
   pub async fn process_tick(&mut self, inst: Instant, stream: &mut (impl AsyncWrite + Unpin)) -> Result<()> {

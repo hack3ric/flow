@@ -1,3 +1,5 @@
+use crate::util::AsyncReadBytes;
+use futures::{AsyncRead, AsyncReadExt};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
@@ -8,7 +10,6 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 use strum::FromRepr;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// <https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FromRepr, Serialize, Deserialize)]

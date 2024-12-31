@@ -1,10 +1,13 @@
 use anstyle::{AnsiColor, Color, Reset, Style};
+use futures::io::{AsyncRead, AsyncReadExt};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter, Write};
+use std::future::Future;
+use std::io;
 use std::ops::{Add, Deref, RangeInclusive};
 use std::rc::Rc;
 
@@ -275,6 +278,46 @@ impl Display for TruthTable {
       }
     }
     f.write_char('}')
+  }
+}
+
+pub trait AsyncReadBytes: AsyncRead + Unpin {
+  fn read_u8(&mut self) -> impl Future<Output = io::Result<u8>>;
+  fn read_u16(&mut self) -> impl Future<Output = io::Result<u16>>;
+  fn read_u32(&mut self) -> impl Future<Output = io::Result<u32>>;
+  fn read_u64(&mut self) -> impl Future<Output = io::Result<u64>>;
+  fn read_u128(&mut self) -> impl Future<Output = io::Result<u128>>;
+}
+
+impl<R: AsyncRead + Unpin> AsyncReadBytes for R {
+  async fn read_u8(&mut self) -> io::Result<u8> {
+    let mut buf = [0; 1];
+    self.read_exact(&mut buf).await?;
+    Ok(buf[0])
+  }
+
+  async fn read_u16(&mut self) -> io::Result<u16> {
+    let mut buf = [0; 2];
+    self.read_exact(&mut buf).await?;
+    Ok(u16::from_be_bytes(buf))
+  }
+
+  async fn read_u32(&mut self) -> io::Result<u32> {
+    let mut buf = [0; 4];
+    self.read_exact(&mut buf).await?;
+    Ok(u32::from_be_bytes(buf))
+  }
+
+  async fn read_u64(&mut self) -> io::Result<u64> {
+    let mut buf = [0; 8];
+    self.read_exact(&mut buf).await?;
+    Ok(u64::from_be_bytes(buf))
+  }
+
+  async fn read_u128(&mut self) -> io::Result<u128> {
+    let mut buf = [0; 16];
+    self.read_exact(&mut buf).await?;
+    Ok(u128::from_be_bytes(buf))
   }
 }
 

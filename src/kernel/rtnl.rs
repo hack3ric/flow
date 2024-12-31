@@ -2,7 +2,7 @@ use super::Result;
 use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
 use clap::Args;
-use futures_channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc;
 use futures::{try_join, FutureExt, StreamExt, TryStreamExt};
 use futures_concurrency::future::Race;
 use libc::{RTA_GATEWAY, RTA_OIF};
@@ -19,30 +19,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::time::{interval, Interval};
+use smol::Timer;
+use rtnetlink::sys::SmolSocket;
 
 #[derive(Debug)]
 pub struct RtNetlink {
   args: RtNetlinkArgs,
   handle: Handle,
-  msgs: UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>,
+  msgs: mpsc::UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>,
   routes: BTreeMap<u64, (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
   rules: BTreeMap<u32, BTreeSet<IpPrefix>>,
-  timer: Interval,
+  timer: Timer
 }
 
 impl RtNetlink {
   pub fn new(args: RtNetlinkArgs) -> io::Result<Self> {
-    let (conn, handle, msgs) = rtnetlink::new_connection()?;
+    let (conn, handle, msgs) = rtnetlink::new_connection_with_socket::<SmolSocket>()?;
     let scan_time = args.route_scan_time;
-    tokio::spawn(conn);
+    smol::spawn(conn).detach();
     Ok(Self {
       args,
       handle,
       msgs,
       routes: BTreeMap::new(),
       rules: BTreeMap::new(),
-      timer: interval(Duration::from_secs(scan_time)),
+      timer: Timer::interval(Duration::from_secs(scan_time)),
     })
   }
 
@@ -197,7 +198,7 @@ impl RtNetlink {
       MsgRecv(Option<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>),
     }
 
-    let timer_tick = self.timer.tick().map(|_| Br::TimerTick);
+    let timer_tick = self.timer.next().map(|_| Br::TimerTick);
     let msg_recv = self.msgs.next().map(Br::MsgRecv);
 
     match (timer_tick, msg_recv).race().await {
