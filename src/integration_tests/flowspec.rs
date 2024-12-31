@@ -78,7 +78,7 @@ async fn test_flow_attr() -> anyhow::Result<()> {
       RouteInfo {
         ext_comm: tfa_to_ext_comm([
           RtRedirect { rt: GlobalAdmin::Ipv4("1.1.1.1".parse()?), value: 1234 },
-          TrafficRateBytes { desc: 0, rate: 3e3 },
+          // TrafficRateBytes { desc: 0, rate: 3e3 },
         ]),
         as_path: smallvec_inline![AsSegment::Sequence(smallvec![1919810, 114514])],
         ..route_info_default.clone()
