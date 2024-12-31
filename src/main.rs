@@ -29,7 +29,12 @@ use tokio::select;
 use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
-use {integration_tests::TestEvent, std::future::pending, tokio::sync::mpsc};
+use {
+  integration_tests::TestEvent,
+  std::sync::atomic::AtomicBool,
+  std::sync::atomic::Ordering::SeqCst,
+  tokio::sync::{mpsc, oneshot},
+};
 
 #[cfg(not(test))]
 use {
@@ -42,6 +47,7 @@ async fn run(
   mut args: RunArgs,
   sock_path: &Path,
   #[cfg(test)] event_tx: mpsc::Sender<TestEvent>,
+  #[cfg(test)] mut close_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<u8> {
   if let Some(file) = args.file {
     let cmd = std::env::args().next().unwrap();
@@ -69,7 +75,7 @@ async fn run(
   #[cfg(not(test))]
   let mut bgp = Session::new(args).await?;
   #[cfg(test)]
-  let mut bgp = Session::new(args, event_tx).await?;
+  let mut bgp = Session::new(args, event_tx.clone()).await?;
 
   create_dir_all(Path::new(sock_path).parent().unwrap_or(Path::new("/")))?;
   let mut ipc =
@@ -92,7 +98,7 @@ async fn run(
         let signal_select = select(sigint, sigterm);
       }
       #[cfg(test)]
-      let signal_select = pending();
+      let signal_select = &mut close_rx;
 
       select! {
         result = listener.accept(), if matches!(bgp.state(), bgp::State::Active) => {
@@ -116,16 +122,17 @@ async fn run(
           {
             let (signal, _) = _signal.factor_first();
             warn!("{signal} received, exiting");
-            return Ok(Some(0))
           }
+          return Ok(Some(0))
         }
       }
       anyhow::Ok(None)
     };
     match select.await {
       Ok(Some(x)) => {
-        // TODO: return read-only state
         bgp.terminate().await;
+        #[cfg(test)]
+        let _ = event_tx.send(TestEvent::Exit(bgp)).await;
         return Ok(x);
       }
       Ok(None) => {}
@@ -201,7 +208,11 @@ fn format_log(f: &mut Formatter, record: &Record<'_>) -> io::Result<()> {
   }
 }
 
-pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<TestEvent>) -> u8 {
+pub async fn cli_entry(
+  cli: Cli,
+  #[cfg(test)] event_tx: mpsc::Sender<TestEvent>,
+  #[cfg(test)] close_rx: oneshot::Receiver<()>,
+) -> u8 {
   let mut builder = env_logger::builder();
   builder
     .filter_level(cli.verbosity.log_level_filter())
@@ -209,14 +220,22 @@ pub async fn cli_entry(cli: Cli, #[cfg(test)] event_tx: mpsc::Sender<TestEvent>)
     .filter_module("netlink", LevelFilter::Off);
   #[cfg(test)]
   builder.is_test(true);
+  #[cfg(not(test))]
   builder.init();
+  #[cfg(test)]
+  {
+    static BUILDER_INITED: AtomicBool = AtomicBool::new(false);
+    if !BUILDER_INITED.swap(true, SeqCst) {
+      builder.init();
+    }
+  }
 
   let sock_path = get_sock_path(&cli.run_dir).unwrap();
 
   match cli.command {
     Command::Run(args) => {
       #[cfg(test)]
-      let result = run(args, &sock_path, event_tx).await;
+      let result = run(args, &sock_path, event_tx, close_rx).await;
       #[cfg(not(test))]
       let result = run(args, &sock_path).await;
       match result {
