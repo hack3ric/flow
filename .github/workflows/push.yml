@@ -36,7 +36,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
-        run: sudo apt install bird2
+        run: |
+          wget https://bird.network.cz/download/bird-3.0.0.tar.gz
+          tar xf bird-3.0.0.tar.gz
+          cd bird-3.0.0
+          ./configure
+          make -j$(nproc)
+          sudo make install
       - name: Build
         run: cargo build --verbose
       - name: Run tests
@@ -55,7 +61,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install dependencies
-        run: sudo apt install bird2
+        run: |
+          wget https://bird.network.cz/download/bird-3.0.0.tar.gz
+          tar xf bird-3.0.0.tar.gz
+          cd bird-3.0.0
+          ./configure
+          make -j$(nproc)
+          sudo make install
       - name: Build
         run: cargo build --verbose
       - name: Run tests
