@@ -294,7 +294,7 @@ impl IpPrefix {
     let inner = IpWithPrefix { addr: ctor(buf.into()), prefix_len: len };
     let result = inner.prefix();
     if result.inner == inner {
-      Ok(Some((result, prefix_bytes)))
+      Ok(Some((result, prefix_bytes + 1)))
     } else {
       Err(IpPrefixError { kind: IpPrefixErrorKind::TrailingBitsNonZero, value: None })
     }
