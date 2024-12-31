@@ -1,4 +1,3 @@
-use anyhow::bail;
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -44,42 +43,35 @@ fn bird_ver_ge(min_ver: &str) -> anyhow::Result<Option<bool>> {
     .map_err(|()| anyhow::Error::msg("invalid version number"))
 }
 
-fn ensure_bird_ver(ver: &str, msg: &'static str) -> anyhow::Result<()> {
+fn ensure_bird_ver(ver: &str, msg: &'static str) {
   match bird_ver_ge(ver) {
-    Ok(None) => bail!(
-      "BIRD not found\n\
-        Please install BIRD under PATH, or specify FLOW_BIRD_PATH to point to \
-        BIRD executable.",
+    Ok(None) => panic!(
+      "BIRD not found; please install BIRD under PATH, or specify FLOW_BIRD_PATH to \
+        point to BIRD executable.",
     ),
-    Ok(Some(false)) => Err(anyhow::Error::msg(msg)),
-    Ok(Some(true)) => Ok(()),
-    Err(e) => Err(e.context("failed to get BIRD version")),
+    Ok(Some(false)) => panic!("{msg}"),
+    Ok(Some(true)) => {}
+    Err(e) => panic!("{}", e.context("failed to get BIRD version")),
   }
 }
 
-pub fn ensure_bird_2() -> anyhow::Result<()> {
+pub fn ensure_bird_2() {
   ensure_bird_ver(
     "2",
-    "outdated BIRD version\n\
-      The BIRD in your system is the outdated 1.x version. Please update to BIRD 2.x \
+    "The BIRD in your system is the outdated 1.x version. Please update to BIRD 2.x \
       to run the tests.",
-  )
+  );
 }
 
-#[expect(unused)]
-pub fn ensure_bird_2_16() -> anyhow::Result<()> {
-  if env::var_os("FLOW_SKIP_BIRD_2_16_TESTS").is_some() {
-    Ok(())
-  } else {
-    ensure_bird_ver(
-      "2.16",
-      "BIRD version below 2.16\n\
-      BIRD version below 2.16 incorrectly implements Flowspec's IPv6 offset. Upgrade \
-      to BIRD 2.16, 3.x, or above to allow respective tests to run.\n\
+pub fn ensure_bird_2_16() {
+  ensure_bird_ver(
+    "2.16",
+    "BIRD version below 2.16 incorrectly implements Flowspec's IPv6 offset. Upgrade \
+      to BIRD 2.16, 3.x, or above to allow respective tests to run, or skip them by \
+      passing `--skip bird_2_16` to the test binary.\n\
       See https://gitlab.nic.cz/labs/bird/-/commit/072821e55e2a3bd0fb3ffee309937592 \
       for more information.",
-    )
-  }
+  );
 }
 
 pub async fn run_bird(config_path: impl AsRef<Path>, sock_path: impl AsRef<Path>) -> anyhow::Result<Child> {

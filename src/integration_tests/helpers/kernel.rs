@@ -1,18 +1,14 @@
-use anyhow::bail;
 use nix::unistd::Uid;
 use tokio::net::TcpListener;
 
 #[expect(unused)]
-pub fn ensure_root() -> anyhow::Result<()> {
-  if !Uid::effective().is_root() {
-    bail!(
-      "effective user not root\n\
-        This test needs root (or an isolated namespace acting like root) to access \
-        kernel network interface (rtnetlink, nftables, etc.). Please run the tests with \
-        root, unshare(1) or jail(8) to test them.",
-    )
-  }
-  Ok(())
+pub fn ensure_root() {
+  assert!(
+    Uid::effective().is_root(),
+    "This test needs root (or an isolated namespace acting like root) to access \
+      kernel network interface (rtnetlink, nftables, etc.). Please run the tests with \
+      root, unshare(1) or jail(8) to test them.",
+  );
 }
 
 #[cfg(rtnetlink_supported)]

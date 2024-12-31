@@ -157,7 +157,7 @@ impl Routes {
   }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteInfo<'a> {
   pub origin: Origin,
 
@@ -213,7 +213,7 @@ impl Default for Origin {
   }
 }
 
-#[derive(Debug, Clone, EnumDiscriminants, Serialize, Deserialize)]
+#[derive(Debug, Clone, EnumDiscriminants, PartialEq, Eq, Serialize, Deserialize)]
 #[strum_discriminants(name(AsSegmentKind), derive(FromRepr))]
 #[repr(u8)]
 pub enum AsSegment {

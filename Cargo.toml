@@ -70,7 +70,6 @@ test-case = "3.3.1"
 version-compare = "0.2.0"
 tokio = { version = "1.38.0", features = ["time"] }
 macro_rules_attribute = "0.2.0"
-map-macro = "0.3.0"
 
 [profile.release]
 opt-level = "z"

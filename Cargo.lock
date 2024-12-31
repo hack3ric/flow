@@ -269,7 +269,6 @@ dependencies = [
  "libc",
  "log",
  "macro_rules_attribute",
- "map-macro",
  "nftables",
  "nix",
  "num",
@@ -437,12 +436,6 @@ name = "macro_rules_attribute-proc_macro"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8dd856d451cc0da70e2ef2ce95a18e39a93b7558bedf10201ad28503f918568"
-
-[[package]]
-name = "map-macro"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb950a42259642e5a3483115aca87eebed2a64886993463af9c9739c205b8d3a"
 
 [[package]]
 name = "memchr"
