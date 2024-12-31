@@ -15,17 +15,18 @@ use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::{Session, StateView};
 use clap::Parser;
 use env_logger::fmt::Formatter;
+use futures::FutureExt;
+use futures_concurrency::future::Race;
 use ipc::{get_sock_path, IpcServer};
 use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
 use std::fs::{create_dir_all, File};
 use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, Write};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::BufReader;
-use tokio::net::TcpListener;
-use tokio::select;
+use tokio::net::{TcpListener, TcpStream, UnixStream};
 use util::{BOLD, FG_GREEN_BOLD, RESET};
 
 #[cfg(test)]
@@ -38,7 +39,7 @@ use {
 
 #[cfg(not(test))]
 use {
-  futures::future::{select, FutureExt},
+  futures::future::select,
   tokio::pin,
   tokio::signal::unix::{signal, SignalKind},
 };
@@ -91,6 +92,16 @@ async fn run(
 
   loop {
     let select = async {
+      enum Br {
+        BgpAccept(io::Result<(TcpStream, SocketAddr)>),
+        BgpProcess(bgp::Result<()>),
+        IpcAccept(anyhow::Result<UnixStream>),
+        #[cfg(not(test))]
+        Signal(&'static str),
+        #[cfg(test)]
+        Signal,
+      }
+
       #[cfg(not(test))]
       pin! {
         let sigint = sigint.recv().map(|_| "SIGINT");
@@ -100,31 +111,47 @@ async fn run(
       #[cfg(test)]
       let signal_select = &mut close_rx;
 
-      select! {
-        result = listener.accept(), if matches!(bgp.state(), bgp::State::Active) => {
+      let bgp_is_active = matches!(bgp.state(), bgp::State::Active);
+      let bgp_process = bgp.process().map(Br::BgpProcess);
+      let ipc_accept = ipc.accept().map(Br::IpcAccept);
+      #[cfg(not(test))]
+      let signal = signal_select.map(|x| Br::Signal(x.factor_first().0));
+      #[cfg(test)]
+      let signal = signal_select.map(|_| Br::Signal);
+
+      let result = if bgp_is_active {
+        let bgp_accept = listener.accept().map(Br::BgpAccept);
+        (bgp_accept, bgp_process, ipc_accept, signal).race().await
+      } else {
+        (bgp_process, ipc_accept, signal).race().await
+      };
+
+      match result {
+        Br::BgpAccept(result) => {
           let (stream, mut addr) = result.context("failed to accept TCP connection")?;
           addr.set_ip(addr.ip().to_canonical());
-          bgp.accept(BufReader::new(stream), addr).await.context("failed to accept BGP connection")?;
+          bgp
+            .accept(BufReader::new(stream), addr)
+            .await
+            .context("failed to accept BGP connection")?;
         }
-        result = bgp.process() => match result {
+        Br::BgpProcess(result) => match result {
           Ok(()) => {}
           Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
           Err(e @ (bgp::Error::Notification(_) | bgp::Error::Remote(_))) => error!("BGP error: {e}"),
           Err(_) => result.context("failed to process BGP")?,
         },
-        result = ipc.accept() => {
+        Br::IpcAccept(result) => {
           let mut stream = result.context("failed to accept IPC connection")?;
           bgp.write_states(&mut stream).await.context("failed to write to IPC channel")?;
-        },
-
-        _signal = signal_select => {
-          #[cfg(not(test))]
-          {
-            let (signal, _) = _signal.factor_first();
-            warn!("{signal} received, exiting");
-          }
-          return Ok(Some(0))
         }
+        #[cfg(not(test))]
+        Br::Signal(signal) => {
+          warn!("{signal} received, exiting");
+          return Ok(Some(0));
+        }
+        #[cfg(test)]
+        Br::Signal => return Ok(Some(0)),
       }
       anyhow::Ok(None)
     };

@@ -8,11 +8,14 @@ use crate::bgp::flow::{Flowspec, Op};
 use crate::bgp::route::{AsSegment, ExtCommunity, GlobalAdmin, Origin, RouteInfo, TrafficFilterAction};
 use anyhow::Context;
 use clap::Parser;
+use futures::FutureExt;
+use futures_concurrency::future::Race;
 use macro_rules_attribute::apply;
 use smallvec::{smallvec, smallvec_inline};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::process::ExitStatus;
 use std::time::Duration;
-use tokio::select;
 use tokio::time::sleep;
 
 #[apply(test_local!)]
@@ -177,8 +180,26 @@ protocol bgp flow_test {
   let mut end_of_rib_count = 0;
   let mut visited = BTreeSet::new();
   let _state = 'outer: loop {
-    select! {
-      Some(event) = events.recv(), if !events.is_closed() => match event {
+    enum Br {
+      Event(Option<TestEvent>),
+      TimedOut,
+      CliExit(anyhow::Result<u8>),
+      BirdExit(io::Result<ExitStatus>),
+    }
+
+    let timed_out = sleep(Duration::from_secs(10)).map(|_| Br::TimedOut);
+    let cli_exit = (&mut cli).map(|x| x?).map(Br::CliExit);
+    let bird_exit = bird.wait().map(Br::BirdExit);
+
+    let result = if events.is_closed() {
+      (timed_out, cli_exit, bird_exit).race().await
+    } else {
+      let event = events.recv().map(Br::Event);
+      (event, timed_out, cli_exit, bird_exit).race().await
+    };
+
+    match result {
+      Br::Event(Some(event)) => match event {
         TestEvent::EndOfRib(_afi, _safi) => {
           end_of_rib_count += 1;
           if end_of_rib_count >= 2 {
@@ -197,7 +218,7 @@ protocol bgp flow_test {
             for spec in specs {
               if let Some((spec1, (_, info))) = flows.remove_entry(&spec) {
                 visited.insert(spec1);
-                assert_eq!(info, msg.route_info, "route info does not match for {spec}" );
+                assert_eq!(info, msg.route_info, "route info does not match for {spec}");
               } else {
                 assert!(visited.contains(&spec), "received duplicate flowspec: {spec}");
                 panic!("received unknown flowspec: {spec}");
@@ -207,9 +228,10 @@ protocol bgp flow_test {
         }
         TestEvent::Exit(_) => panic!("unexpected CLI exit event"),
       },
-      _ = sleep(Duration::from_secs(10)) => panic!("timed out"),
-      code = &mut cli => panic!("CLI exited early with code {}", code??),
-      status = bird.wait() => panic!("BIRD exited early with {}", status?),
+      Br::Event(None) => continue,
+      Br::TimedOut => panic!("timed out"),
+      Br::CliExit(code) => panic!("CLI exited early with code {}", code?),
+      Br::BirdExit(status) => panic!("BIRD exited early with {}", status?),
     }
   };
 

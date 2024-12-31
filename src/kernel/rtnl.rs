@@ -3,7 +3,8 @@ use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::{try_join, StreamExt, TryStreamExt};
+use futures::{try_join, FutureExt, StreamExt, TryStreamExt};
+use futures_concurrency::future::Race;
 use libc::{RTA_GATEWAY, RTA_OIF};
 use log::warn;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
@@ -18,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::select;
 use tokio::time::{interval, Interval};
 
 #[derive(Debug)]
@@ -192,9 +192,17 @@ impl RtNetlink {
         .unwrap_or_else(|| af_to_wildcard(msg.header.family))
     }
 
-    select! {
-      _ = self.timer.tick() => self.process_all().await,
-      Some((msg, _)) = self.msgs.next() => match msg.payload {
+    enum Br {
+      TimerTick,
+      MsgRecv(Option<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>),
+    }
+
+    let timer_tick = self.timer.tick().map(|_| Br::TimerTick);
+    let msg_recv = self.msgs.next().map(Br::MsgRecv);
+
+    match (timer_tick, msg_recv).race().await {
+      Br::TimerTick => self.process_all().await,
+      Br::MsgRecv(Some((msg, _))) => match msg.payload {
         InnerMessage(msg) => match msg {
           NewRoute(msg) | DelRoute(msg) => self.process_prefix(route_msg_dst_prefix(msg)).await,
           NewAddress(msg) | DelAddress(msg) => self.process_prefix(addr_msg_dst_prefix(msg)).await,
@@ -204,6 +212,7 @@ impl RtNetlink {
         },
         _ => Ok(()),
       },
+      Br::MsgRecv(None) => Ok(()), // TODO: is this correct?
     }
   }
 

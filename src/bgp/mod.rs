@@ -30,10 +30,11 @@ use strum::EnumDiscriminants;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
-use tokio::select;
 use tokio::time::{interval, Duration, Instant, Interval};
 use State::*;
 
+use futures::FutureExt;
+use futures_concurrency::future::Race;
 #[cfg(test)]
 use {crate::integration_tests::TestEvent, tokio::sync::mpsc};
 
@@ -140,8 +141,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
       BadType(msg.kind() as u8).send_and_return(stream)
     }
 
+    enum Br {
+      MsgRecv(Result<Message<'static>>),
+      Tick(Instant),
+    }
+
     match &mut self.state {
       Idle | Connect | Active => pending().await,
+
       OpenSent { stream } => match Message::read(stream).await? {
         Message::Open(remote_open) => {
           if !remote_open.bgp_mp.contains(&(Afi::Ipv4 as _, NlriKind::Flow as _))
@@ -168,64 +175,81 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         }
         other => bad_type(other, stream).await?,
       },
-      OpenConfirm { stream, timers, .. } => select! {
-        msg = Message::read(stream) => match msg? {
-          Message::Keepalive => {
-            replace_with_or_abort(&mut self.state, |this| {
-              let OpenConfirm { stream, remote_open, mut timers } = this else {
-                unreachable!()
-              };
-              timers.as_mut().map(Timers::update_hold);
-              Established { stream, remote_open, timers }
-            });
-            info!("established");
-          }
-          other => bad_type(other, stream).await?,
-        },
-        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
-          timers.as_mut().unwrap().process_tick(inst, stream).await?;
+
+      OpenConfirm { stream, timers, .. } => {
+        let msg_recv = Message::read(stream).map(Br::MsgRecv);
+        let result = if timers.is_some() {
+          let tick = timers.as_mut().unwrap().tick().map(Br::Tick);
+          (msg_recv, tick).race().await
+        } else {
+          msg_recv.await
+        };
+
+        match result {
+          Br::MsgRecv(msg) => match msg? {
+            Message::Keepalive => {
+              replace_with_or_abort(&mut self.state, |this| {
+                let OpenConfirm { stream, remote_open, mut timers } = this else {
+                  unreachable!()
+                };
+                timers.as_mut().map(Timers::update_hold);
+                Established { stream, remote_open, timers }
+              });
+              info!("established");
+            }
+            other => bad_type(other, stream).await?,
+          },
+          Br::Tick(inst) => timers.as_mut().unwrap().process_tick(inst, stream).await?,
         }
-      },
-      Established { stream, timers, .. } => select! {
-        msg = Message::read(stream) => {
-          match msg {
-            Ok(Message::Update(msg)) => if let Some((afi, safi)) = msg.is_end_of_rib() {
-              debug!("received End-of-RIB of ({afi}, {safi:?})");
-              #[cfg(test)]
-              let _ = self.event_tx.send(TestEvent::EndOfRib(afi, safi)).await;
+      }
 
-            } else {
-              debug!("received update: {msg:?}");
-              #[cfg(test)]
-              let _ = self.event_tx.send(TestEvent::Update(msg.clone())).await;
+      Established { stream, timers, .. } => {
+        let msg_recv = Message::read(stream).map(Br::MsgRecv);
+        let result = if timers.is_some() {
+          let tick = timers.as_mut().unwrap().tick().map(Br::Tick);
+          (msg_recv, tick).race().await
+        } else {
+          msg_recv.await
+        };
 
-              // here `msg` is partially moved
-              if msg.nlri.is_some() || msg.old_nlri.is_some() {
-                let route_info = Rc::new(msg.route_info);
-                for n in msg.nlri.into_iter().chain(msg.old_nlri) {
-                  self.routes.commit(n, route_info.clone()).await?;
+        match result {
+          Br::MsgRecv(msg) => match msg {
+            Ok(Message::Update(msg)) => {
+              if let Some((afi, safi)) = msg.is_end_of_rib() {
+                debug!("received End-of-RIB of ({afi}, {safi:?})");
+                #[cfg(test)]
+                let _ = self.event_tx.send(TestEvent::EndOfRib(afi, safi)).await;
+              } else {
+                debug!("received update: {msg:?}");
+                #[cfg(test)]
+                let _ = self.event_tx.send(TestEvent::Update(msg.clone())).await;
+
+                // here `msg` is partially moved
+                if msg.nlri.is_some() || msg.old_nlri.is_some() {
+                  let route_info = Rc::new(msg.route_info);
+                  for n in msg.nlri.into_iter().chain(msg.old_nlri) {
+                    self.routes.commit(n, route_info.clone()).await?;
+                  }
+                }
+                if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
+                  for n in msg.withdrawn.into_iter().chain(msg.old_withdrawn) {
+                    self.routes.withdraw(n).await?;
+                  }
                 }
               }
-              if msg.withdrawn.is_some() || msg.old_withdrawn.is_some() {
-                for n in msg.withdrawn.into_iter().chain(msg.old_withdrawn) {
-                  self.routes.withdraw(n).await?;
-                }
-              }
-            },
+            }
             Err(Error::Withdraw(error, nlris)) => {
               error!("{error}");
               for n in nlris {
                 self.routes.withdraw(n).await?;
               }
-            },
+            }
             Ok(Message::Keepalive) => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
             other => bad_type(other?, stream).await?,
-          };
+          },
+          Br::Tick(inst) => timers.as_mut().unwrap().process_tick(inst, stream).await?,
         }
-        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
-          timers.as_mut().unwrap().process_tick(inst, stream).await?;
-        }
-      },
+      }
     }
     Ok(())
   }
