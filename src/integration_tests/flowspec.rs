@@ -5,10 +5,11 @@ use super::{test_local, TestEvent};
 use crate::args::Cli;
 use crate::bgp::flow::Component::*;
 use crate::bgp::flow::{Flowspec, Op};
-use crate::bgp::route::{Origin, RouteInfo};
+use crate::bgp::route::{AsSegment, ExtCommunity, GlobalAdmin, Origin, RouteInfo, TrafficFilterAction};
 use anyhow::Context;
 use clap::Parser;
 use macro_rules_attribute::apply;
+use smallvec::{smallvec, smallvec_inline};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio::select;
@@ -18,7 +19,7 @@ use tokio::time::sleep;
 async fn test_flow() -> anyhow::Result<()> {
   run_flowspec_route_test([
     (
-      "flow4 { dst 10.0.0.0/8; length > 1024; } { bgp_ext_community.add((rt, 1.1.1.1, 1234)); }",
+      "flow4 { dst 10.0.0.0/8; length > 1024; }",
       Flowspec::new_v4()
         .with(DstPrefix("10.0.0.0/8".parse()?, 0))?
         .with(PacketLen(Op::gt(1024).into()))?,
@@ -32,8 +33,8 @@ async fn test_flow() -> anyhow::Result<()> {
     ),
     ("flow4 {}", Flowspec::new_v4()),
     (
-      "flow6 { dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128; \
-               tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33; \
+      "flow6 { dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128;
+               tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33;
                dport = 6000; \
                fragment !is_fragment || !first_fragment; }",
       Flowspec::new_v6()
@@ -51,6 +52,39 @@ async fn test_flow() -> anyhow::Result<()> {
         .with(FlowLabel(Op::eq(0x8e5).or(Op::eq(0x8e6))))?,
     ),
     ("flow6 {}", Flowspec::new_v6()),
+  ])
+  .await
+}
+
+#[apply(test_local!)]
+async fn test_flow_attr() -> anyhow::Result<()> {
+  use TrafficFilterAction::*;
+
+  fn tfa_to_ext_comm(iter: impl IntoIterator<Item = TrafficFilterAction>) -> BTreeSet<ExtCommunity> {
+    iter.into_iter().map(|x| x.into_ext_comm().left().unwrap()).collect()
+  }
+
+  let route_info_default = RouteInfo { origin: Origin::Igp, local_pref: Some(100), ..Default::default() };
+  run_flowspec_test([
+    (
+      "flow4 { dst 10.0.0.0/8; length > 1024; } {
+        bgp_path.prepend(114514);
+        bgp_path.prepend(1919810);
+        bgp_ext_community.add((unknown 0x8108, 1.1.1.1, 1234));
+      }",
+      Flowspec::new_v4()
+        .with(DstPrefix("10.0.0.0/8".parse()?, 0))?
+        .with(PacketLen(Op::gt(1024).into()))?,
+      RouteInfo {
+        ext_comm: tfa_to_ext_comm([
+          RtRedirect { rt: GlobalAdmin::Ipv4("1.1.1.1".parse()?), value: 1234 },
+          TrafficRateBytes { desc: 0, rate: 3e3 },
+        ]),
+        as_path: smallvec_inline![AsSegment::Sequence(smallvec![1919810, 114514])],
+        ..route_info_default.clone()
+      },
+    ),
+    // (todo!(), todo!(), todo!()),
   ])
   .await
 }
@@ -77,7 +111,6 @@ async fn run_flowspec_route_test(flows: impl IntoIterator<Item = (&str, Flowspec
   run_flowspec_test_inner(flows).await
 }
 
-#[expect(unused)]
 async fn run_flowspec_test(flows: impl IntoIterator<Item = (&str, Flowspec, RouteInfo<'_>)>) -> anyhow::Result<()> {
   let flows = flows.into_iter().map(|(u, k, v)| (k, (u, v))).collect();
   run_flowspec_test_inner(flows).await

@@ -297,7 +297,7 @@ impl ExtCommunity {
     Self(bytes)
   }
 
-  pub fn new_as_specific(transitive: bool, sub_kind: u8, asn: u32, local_admin: u32) -> Self {
+  pub fn new_as(transitive: bool, sub_kind: u8, asn: u32, local_admin: u32) -> Self {
     let mut bytes = [0; 8];
     bytes[1] = sub_kind;
     if asn > u16::MAX.into() {
@@ -312,15 +312,16 @@ impl ExtCommunity {
       bytes[2..4].copy_from_slice(&u16::to_be_bytes(asn as _));
       bytes[4..8].copy_from_slice(&u32::to_be_bytes(local_admin));
     }
+    bytes[0] |= 1 << 7;
     if !transitive {
       bytes[0] |= 1 << 6;
     }
     Self(bytes)
   }
 
-  pub fn new_ipv4_specific(transitive: bool, sub_kind: u8, ipv4: Ipv4Addr, local_admin: u16) -> Self {
+  pub fn new_ipv4(transitive: bool, sub_kind: u8, ipv4: Ipv4Addr, local_admin: u16) -> Self {
     let mut bytes = [0; 8];
-    bytes[0] = 1;
+    bytes[0] = 1 | (1 << 7);
     bytes[1] = sub_kind;
     bytes[2..6].copy_from_slice(&ipv4.octets());
     bytes[6..8].copy_from_slice(&u16::to_be_bytes(local_admin));
@@ -529,6 +530,27 @@ impl TrafficFilterAction {
   pub fn kind(self) -> TrafficFilterActionKind {
     self.into()
   }
+
+  pub fn into_ext_comm(self) -> Either<ExtCommunity, Ipv6ExtCommunity> {
+    use Either::*;
+    use TrafficFilterAction::*;
+    match self {
+      TrafficRateBytes { desc, rate } => Left(ExtCommunity::new_as(true, 0x06, desc.into(), rate.to_bits())),
+      TrafficRatePackets { desc, rate } => Left(ExtCommunity::new_as(true, 0x0c, desc.into(), rate.to_bits())),
+      TrafficAction { terminal: t, sample: s } => {
+        Left(ExtCommunity::new_as(true, 0x07, 0, (!t as u32) | ((s as u32) << 1)))
+      }
+      RtRedirect { rt: GlobalAdmin::As(rt), value } => Left(ExtCommunity::new_as(true, 0x08, rt, value)),
+      RtRedirect { rt: GlobalAdmin::Ipv4(rt), value } => {
+        let value = value.try_into().expect("it should fit in u16");
+        Left(ExtCommunity::new_ipv4(true, 0x08, rt, value))
+      }
+      RtRedirectIpv6 { rt, value } => Right(Ipv6ExtCommunity::new(true, 0x0d, rt, value)),
+      TrafficMarking { dscp } => Left(ExtCommunity::new_as(true, 0x09, 0, (dscp & 0b111111).into())),
+      RedirectToIp { ip: IpAddr::V4(ip), copy } => Left(ExtCommunity::new_ipv4(true, 0x0c, ip, copy.into())),
+      RedirectToIp { ip: IpAddr::V6(ip), copy } => Right(Ipv6ExtCommunity::new(true, 0x0c, ip, copy.into())),
+    }
+  }
 }
 
 impl Display for TrafficFilterAction {
@@ -590,7 +612,7 @@ mod tests {
 
   #[test]
   fn test_ext_comm() {
-    println!("{:?}", ExtCommunity::new_as_specific(true, 3, 207268, 12345));
+    println!("{:?}", ExtCommunity::new_as(true, 3, 207268, 12345));
     println!("{:?}", ExtCommunity::from_bytes((1145141919810000000u64).to_be_bytes()));
     println!(
       "{:?}",
