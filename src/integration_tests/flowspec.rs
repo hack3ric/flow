@@ -35,7 +35,7 @@ async fn test_flow() -> anyhow::Result<()> {
     (
       "flow6 { dst fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128;
                tcp flags 0x03/0x0f && !0/0xff || 0x33/0x33;
-               dport = 6000; \
+               dport = 6000;
                fragment !is_fragment || !first_fragment; }",
       Flowspec::new_v6()
         .with(DstPrefix("fec0:1122:3344:5566:7788:99aa:bbcc:ddee/128".parse()?, 0))?
@@ -71,20 +71,34 @@ async fn test_flow_attr() -> anyhow::Result<()> {
         bgp_path.prepend(114514);
         bgp_path.prepend(1919810);
         bgp_ext_community.add((unknown 0x8108, 1.1.1.1, 1234));
+        bgp_ext_community.add((unknown 0x8006, 0, 0x453b8000));
+        bgp_ext_community.add((unknown 0x800c, 172.20.0.1, 0));
       }",
       Flowspec::new_v4()
         .with(DstPrefix("10.0.0.0/8".parse()?, 0))?
         .with(PacketLen(Op::gt(1024).into()))?,
       RouteInfo {
+        as_path: smallvec_inline![AsSegment::Sequence(smallvec![1919810, 114514])],
         ext_comm: tfa_to_ext_comm([
           RtRedirect { rt: GlobalAdmin::Ipv4("1.1.1.1".parse()?), value: 1234 },
-          // TrafficRateBytes { desc: 0, rate: 3e3 },
+          TrafficRateBytes { desc: 0, rate: 3e3 },
+          RedirectToIp { ip: "172.20.0.1".parse()?, copy: false },
         ]),
-        as_path: smallvec_inline![AsSegment::Sequence(smallvec![1919810, 114514])],
         ..route_info_default.clone()
       },
     ),
-    // (todo!(), todo!(), todo!()),
+    (
+      "flow6 { dst ::1.1.1.1/128 offset 96; next header 17; } {
+        bgp_ext_community.add((unknown 0x8007, 0, 3));
+      }",
+      Flowspec::new_v6()
+        .with(DstPrefix("::1.1.1.1/128".parse()?, 96))?
+        .with(Protocol(Op::eq(17).into()))?,
+      RouteInfo {
+        ext_comm: tfa_to_ext_comm([TrafficAction { terminal: false, sample: true }]),
+        ..route_info_default
+      },
+    ),
   ])
   .await
 }
