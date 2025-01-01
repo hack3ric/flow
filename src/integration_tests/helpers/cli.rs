@@ -10,13 +10,6 @@ use tokio::task::JoinHandle;
 
 pub type CliChild = JoinHandle<anyhow::Result<u8>>;
 
-fn run_cli(options: Cli, event_tx: mpsc::Sender<TestEvent>, close_rx: oneshot::Receiver<()>) -> CliChild {
-  tokio::task::spawn_local(async {
-    let exit_code = cli_entry(options, event_tx, close_rx).await;
-    anyhow::Ok(exit_code)
-  })
-}
-
 pub async fn run_cli_with_bird(
   mut cli_opt: Cli,
   bird_conf: &str,
@@ -35,6 +28,9 @@ pub async fn run_cli_with_bird(
 
   let (event_tx, event_rx) = mpsc::channel(127);
   let (close_tx, close_rx) = oneshot::channel();
-  let cli = run_cli(cli_opt, event_tx, close_rx);
+  let cli = tokio::task::spawn_local(async {
+    let exit_code = cli_entry(cli_opt, event_tx, close_rx).await;
+    anyhow::Ok(exit_code)
+  });
   Ok((cli, bird, event_rx, close_tx, (bird_conf_file, sock_dir)))
 }
