@@ -1,12 +1,11 @@
 use super::helpers::bird::{ensure_bird_2, ensure_bird_2_16};
 use super::helpers::cli::run_cli_with_bird;
 use super::helpers::kernel::{ensure_loopback_up, pick_port};
-use super::{test_local, TestEvent};
+use super::{test_local, TestEvent, BIRD_CONFIG_1};
 use crate::args::Cli;
 use crate::bgp::flow::Component::*;
 use crate::bgp::flow::{Flowspec, Op};
 use crate::bgp::route::{AsSegment, ExtCommunity, GlobalAdmin, Origin, RouteInfo, TrafficFilterAction};
-use crate::integration_tests::BIRD_CONFIG_1;
 use anyhow::Context;
 use clap::Parser;
 use macro_rules_attribute::apply;

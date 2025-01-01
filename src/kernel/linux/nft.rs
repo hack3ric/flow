@@ -13,7 +13,7 @@ use num::Integer;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
-use std::cmp::Ordering;
+use std::cmp::{min, Ordering};
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::mem::replace;
@@ -360,41 +360,41 @@ impl TrafficFilterAction {
   }
 }
 
-const ACCEPT: stmt::Statement = stmt::Statement::Accept(Some(stmt::Accept {}));
-const DROP: stmt::Statement = stmt::Statement::Drop(Some(stmt::Drop {}));
+const ACCEPT: stmt::Statement = stmt::Statement::Accept(None);
+const DROP: stmt::Statement = stmt::Statement::Drop(None);
 
-fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
+pub(crate) fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
   stmt::Statement::Match(stmt::Match { left, right, op })
 }
 
-fn make_limit(over: bool, rate: f32, unit: &'static str, per: &'static str) -> stmt::Statement {
+pub(crate) fn make_limit(over: bool, rate: f32, unit: &'static str, per: &'static str) -> stmt::Statement {
   stmt::Statement::Limit(stmt::Limit {
     rate: rate.round() as u32,
     rate_unit: Some(unit.into()),
     per: Some(per.into()),
-    burst: None,
-    burst_unit: None,
+    burst: Some(0),
+    burst_unit: Some("bytes".into()),
     inv: Some(over),
   })
 }
 
-fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression {
+pub(crate) fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression {
   expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
     expr::PayloadRaw { base, offset, len },
   )))
 }
 
-fn make_payload_field(protocol: &'static str, field: &'static str) -> expr::Expression {
+pub(crate) fn make_payload_field(protocol: &'static str, field: &'static str) -> expr::Expression {
   expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
     expr::PayloadField { protocol: protocol.into(), field: field.into() },
   )))
 }
 
-fn make_meta(key: expr::MetaKey) -> expr::Expression {
+pub(crate) fn make_meta(key: expr::MetaKey) -> expr::Expression {
   expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key }))
 }
 
-fn make_exthdr(name: &'static str, field: &'static str, offset: u32) -> expr::Expression {
+pub(crate) fn make_exthdr(name: &'static str, field: &'static str, offset: u32) -> expr::Expression {
   expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
     name: name.into(),
     field: field.into(),
@@ -402,20 +402,24 @@ fn make_exthdr(name: &'static str, field: &'static str, offset: u32) -> expr::Ex
   }))
 }
 
-fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt::Statement> {
+pub(crate) fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt::Statement> {
   (prefix.len() != 0).then(|| {
     make_match(
       stmt::Operator::EQ,
       make_payload_field(if prefix.afi() == Afi::Ipv4 { "ip" } else { "ip6" }, field),
-      expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
-        addr: Box::new(STRING(format!("{}", prefix.prefix()).into())),
-        len: prefix.len().into(),
-      })),
+      if prefix.is_single() {
+        STRING(format!("{}", prefix.prefix()).into())
+      } else {
+        expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
+          addr: Box::new(STRING(format!("{}", prefix.prefix()).into())),
+          len: prefix.len().into(),
+        }))
+      },
     )
   })
 }
 
-fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlock> {
+pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlock> {
   if pattern.len() == 0 {
     return None;
   }
@@ -478,35 +482,39 @@ fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlo
   Some(buf)
 }
 
-fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>> {
+pub(crate) fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>> {
   let ranges = ops.to_ranges();
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
   } else if ranges.is_empty() {
     return Err(Error::MatchNothing);
   }
-  let allowed = ranges
-    .into_iter()
-    .map(RangeInclusive::into_inner)
-    .filter_map(|(a, b)| (a <= max).then_some(if b <= max { a..=b } else { a..=max }))
-    .map(|x| {
-      let (start, end) = x.into_inner();
-      // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
-      // But most of the matching expressions is smaller than 32 bits anyway.
-      let expr = (start == end).then_some(NUM(start as u32)).unwrap_or_else(|| {
-        expr::Expression::Range(Box::new(expr::Range { range: [NUM(start as u32), NUM(end as u32)] }))
-      });
-      expr::SetItem::Element(expr)
-    })
-    .collect();
-  Ok(Some(make_match(
-    stmt::Operator::EQ,
-    left,
-    expr::Expression::Named(expr::NamedExpression::Set(allowed)),
-  )))
+  let right = if ranges.len() == 1 {
+    let (start, end) = ranges.into_iter().next().unwrap().into_inner();
+    expr::Expression::Range(Box::new(expr::Range {
+      range: [NUM(start as u32), NUM(min(end, max) as u32)],
+    }))
+  } else {
+    let allowed = ranges
+      .into_iter()
+      .map(RangeInclusive::into_inner)
+      .filter_map(|(a, b)| (a <= max).then_some(if b <= max { a..=b } else { a..=max }))
+      .map(|x| {
+        let (start, end) = x.into_inner();
+        // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
+        // But most of the matching expressions is smaller than 32 bits anyway.
+        let expr = (start == end).then_some(NUM(start as u32)).unwrap_or_else(|| {
+          expr::Expression::Range(Box::new(expr::Range { range: [NUM(start as u32), NUM(end as u32)] }))
+        });
+        expr::SetItem::Element(expr)
+      })
+      .collect();
+    expr::Expression::Named(expr::NamedExpression::Set(allowed))
+  };
+  Ok(Some(make_match(stmt::Operator::EQ, left, right)))
 }
 
-fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch> {
+pub(crate) fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch> {
   range_stmt(left, ops, max).map(|x| x.into_iter().map(|x| smallvec_inline![x]).collect())
 }
 

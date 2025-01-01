@@ -1,4 +1,4 @@
-mod nft;
+pub(crate) mod nft;
 
 use super::rtnl::{RtNetlink, RtNetlinkArgs};
 use super::{Kernel, Result};
