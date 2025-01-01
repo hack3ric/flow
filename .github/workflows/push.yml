@@ -47,7 +47,7 @@ jobs:
       - name: Build
         run: cargo build --verbose
       - name: Run tests
-        run: cargo test --verbose  # TODO: skip tests requiring root
+        run: cargo test --verbose -- --skip integration_tests::kernel
       - name: Run tests with unshare
         run: |
           sudo sh -c 'echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns'
