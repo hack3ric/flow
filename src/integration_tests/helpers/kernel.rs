@@ -1,7 +1,6 @@
 use nix::unistd::Uid;
 use tokio::net::TcpListener;
 
-#[expect(unused)]
 pub fn ensure_root() {
   assert!(
     Uid::effective().is_root(),

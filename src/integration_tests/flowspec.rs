@@ -6,6 +6,7 @@ use crate::args::Cli;
 use crate::bgp::flow::Component::*;
 use crate::bgp::flow::{Flowspec, Op};
 use crate::bgp::route::{AsSegment, ExtCommunity, GlobalAdmin, Origin, RouteInfo, TrafficFilterAction};
+use crate::integration_tests::BIRD_CONFIG_1;
 use anyhow::Context;
 use clap::Parser;
 use macro_rules_attribute::apply;
@@ -131,34 +132,6 @@ async fn run_flowspec_test(flows: impl IntoIterator<Item = (&str, Flowspec, Rout
 }
 
 async fn run_flowspec_test_inner(mut flows: BTreeMap<Flowspec, (&str, RouteInfo<'_>)>) -> anyhow::Result<()> {
-  const BIRD_FILE: &str = "\
-router id 10.234.56.78;
-
-flow4 table myflow4;
-flow6 table myflow6;
-
-protocol static f4 {
-  flow4 { table myflow4; };
-  @@FLOW4@@;
-}
-
-protocol static f6 {
-  flow6 { table myflow6; };
-  @@FLOW6@@;
-}
-
-protocol bgp flow_test {
-  debug all;
-  connect delay time 1;
-
-  local ::1 port @@BIRD_PORT@@ as 65000;
-  neighbor ::1 port @@FLOW_PORT@@ as 65000;
-  multihop;
-
-  flow4 { table myflow4; import none; export all; };
-  flow6 { table myflow6; import none; export all; };
-}";
-
   ensure_bird_2();
   ensure_loopback_up().await?;
 
@@ -180,20 +153,19 @@ protocol bgp flow_test {
     "--local-as=65000",
     "--remote-as=65000",
   ])?;
-  let bird = BIRD_FILE
+  let bird = BIRD_CONFIG_1
     .replace("@@BIRD_PORT@@", &pick_port().await?.to_string())
     .replace("@@FLOW_PORT@@", &flow_port)
     .replace("@@FLOW4@@", &flow4)
     .replace("@@FLOW6@@", &flow6);
 
   let (mut cli, mut bird, mut events, close, _g) = run_cli_with_bird(cli, &bird).await?;
-
   let mut end_of_rib_count = 0;
   let mut visited = BTreeSet::new();
   let _state = 'outer: loop {
     select! {
       Some(event) = events.recv(), if !events.is_closed() => match event {
-        TestEvent::EndOfRib(_afi, _safi) => {
+        TestEvent::EndOfRib(..) => {
           end_of_rib_count += 1;
           if end_of_rib_count >= 2 {
             let _ = close.send(());

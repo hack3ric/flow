@@ -35,3 +35,32 @@ pub(crate) use test_local;
 
 // Test files
 mod flowspec;
+mod kernel;
+
+const BIRD_CONFIG_1: &str = "\
+router id 10.234.56.78;
+
+flow4 table myflow4;
+flow6 table myflow6;
+
+protocol static f4 {
+  flow4 { table myflow4; };
+  @@FLOW4@@
+}
+
+protocol static f6 {
+  flow6 { table myflow6; };
+  @@FLOW6@@
+}
+
+protocol bgp flow_test {
+  debug all;
+  connect delay time 1;
+
+  local ::1 port @@BIRD_PORT@@ as 65000;
+  neighbor ::1 port @@FLOW_PORT@@ as 65000;
+  multihop;
+
+  flow4 { table myflow4; import none; export all; };
+  flow6 { table myflow6; import none; export all; };
+}";
