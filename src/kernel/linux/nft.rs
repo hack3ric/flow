@@ -6,7 +6,7 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::{Intersect, TruthTable};
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::helper::{apply_ruleset_async, get_current_ruleset_raw_async};
+use nftables::helper::{apply_ruleset_async, get_current_ruleset_raw_async, DEFAULT_NFT};
 use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
@@ -50,7 +50,7 @@ impl Nftables {
       prio: hooked.then_some(priority),
       ..Default::default()
     }));
-    apply_ruleset_async(&batch.to_nftables(), None, None).await?;
+    apply_ruleset_async(&batch.to_nftables()).await?;
     Ok(Self { table, chain })
   }
 
@@ -58,7 +58,7 @@ impl Nftables {
     &self,
     stmts: Cow<'static, [stmt::Statement]>,
     comment: Option<impl ToString>,
-  ) -> schema::NfListObject {
+  ) -> schema::NfListObject<'static> {
     schema::NfListObject::Rule(schema::Rule {
       family: types::NfFamily::INet,
       table: self.table.clone(),
@@ -81,11 +81,11 @@ impl Nftables {
 
   pub async fn get_current_ruleset_raw(&self) -> Result<String> {
     let args = ["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
-    Ok(get_current_ruleset_raw_async(None, Some(&args)).await?)
+    Ok(get_current_ruleset_raw_async(DEFAULT_NFT, args).await?)
   }
 
-  pub async fn apply_ruleset(&self, n: &NftablesReq) -> Result<()> {
-    Ok(apply_ruleset_async(n, None, None).await?)
+  pub async fn apply_ruleset(&self, n: &NftablesReq<'_>) -> Result<()> {
+    Ok(apply_ruleset_async(n).await?)
   }
 
   pub async fn terminate(self) {
@@ -96,7 +96,7 @@ impl Nftables {
       name: self.chain.clone(),
       ..Default::default()
     }));
-    _ = apply_ruleset_async(&batch.to_nftables(), None, None).await;
+    _ = apply_ruleset_async(&batch.to_nftables()).await;
   }
 }
 
@@ -109,11 +109,11 @@ enum Transport {
   Unknown,
 }
 
-type StatementBlock = SmallVec<[stmt::Statement; 1]>;
-type StatementBranch = SmallVec<[StatementBlock; 1]>;
+type StatementBlock<'a> = SmallVec<[stmt::Statement<'a>; 1]>;
+type StatementBranch<'a> = SmallVec<[StatementBlock<'a>; 1]>;
 
 impl Flowspec {
-  pub(super) fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch>> + '_> {
+  pub(super) fn to_nft_stmts(&self) -> Result<impl Iterator<Item = Result<StatementBranch<'static>>> + '_> {
     use ComponentKind as CK;
 
     let set = self.component_set();
@@ -140,7 +140,7 @@ impl Flowspec {
 }
 
 impl Component {
-  fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch> {
+  fn to_nft_stmts(&self, afi: Afi, tp: Transport) -> Result<StatementBranch<'static>> {
     use Component::*;
     use Transport::*;
 
@@ -275,7 +275,7 @@ impl RouteInfo<'_> {
     afi: Afi,
     rtnl: &mut Option<RtNetlink>,
     rtnl_args: &RtNetlinkArgs,
-  ) -> Option<(StatementBranch, Option<(IpAddr, u32)>)> {
+  ) -> Option<(StatementBranch<'static>, Option<(IpAddr, u32)>)> {
     let set = (self.ext_comm.iter().copied())
       .filter_map(ExtCommunity::action)
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
@@ -322,7 +322,7 @@ impl TrafficFilterAction {
     afi: Afi,
     rtnl: &mut Option<RtNetlink>,
     rtnl_args: &RtNetlinkArgs,
-  ) -> (StatementBlock, Option<(IpAddr, u32)>, bool) {
+  ) -> (StatementBlock<'static>, Option<(IpAddr, u32)>, bool) {
     use TrafficFilterAction::*;
     let action = match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
@@ -363,11 +363,15 @@ impl TrafficFilterAction {
 const ACCEPT: stmt::Statement = stmt::Statement::Accept(None);
 const DROP: stmt::Statement = stmt::Statement::Drop(None);
 
-pub(crate) fn make_match(op: stmt::Operator, left: expr::Expression, right: expr::Expression) -> stmt::Statement {
+pub(crate) fn make_match<'a>(
+  op: stmt::Operator,
+  left: expr::Expression<'a>,
+  right: expr::Expression<'a>,
+) -> stmt::Statement<'a> {
   stmt::Statement::Match(stmt::Match { left, right, op })
 }
 
-pub(crate) fn make_limit(over: bool, rate: f32, unit: &'static str, per: &'static str) -> stmt::Statement {
+pub(crate) fn make_limit<'a>(over: bool, rate: f32, unit: &'a str, per: &'a str) -> stmt::Statement<'a> {
   stmt::Statement::Limit(stmt::Limit {
     rate: rate.round() as u32,
     rate_unit: Some(unit.into()),
@@ -378,23 +382,23 @@ pub(crate) fn make_limit(over: bool, rate: f32, unit: &'static str, per: &'stati
   })
 }
 
-pub(crate) fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression {
+pub(crate) fn make_payload_raw(base: expr::PayloadBase, offset: u32, len: u32) -> expr::Expression<'static> {
   expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadRaw(
     expr::PayloadRaw { base, offset, len },
   )))
 }
 
-pub(crate) fn make_payload_field(protocol: &'static str, field: &'static str) -> expr::Expression {
+pub(crate) fn make_payload_field<'a>(protocol: &'a str, field: &'a str) -> expr::Expression<'a> {
   expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
     expr::PayloadField { protocol: protocol.into(), field: field.into() },
   )))
 }
 
-pub(crate) fn make_meta(key: expr::MetaKey) -> expr::Expression {
+pub(crate) fn make_meta(key: expr::MetaKey) -> expr::Expression<'static> {
   expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta { key }))
 }
 
-pub(crate) fn make_exthdr(name: &'static str, field: &'static str, offset: u32) -> expr::Expression {
+pub(crate) fn make_exthdr<'a>(name: &'a str, field: &'a str, offset: u32) -> expr::Expression<'a> {
   expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
     name: name.into(),
     field: field.into(),
@@ -402,7 +406,7 @@ pub(crate) fn make_exthdr(name: &'static str, field: &'static str, offset: u32) 
   }))
 }
 
-pub(crate) fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt::Statement> {
+pub(crate) fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt::Statement<'static>> {
   (prefix.len() != 0).then(|| {
     make_match(
       stmt::Operator::EQ,
@@ -419,7 +423,7 @@ pub(crate) fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt:
   })
 }
 
-pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlock> {
+pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<StatementBlock<'static>> {
   if pattern.len() == 0 {
     return None;
   }
@@ -482,7 +486,11 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
   Some(buf)
 }
 
-pub(crate) fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<Option<stmt::Statement>> {
+pub(crate) fn range_stmt<'a>(
+  left: expr::Expression<'a>,
+  ops: &Ops<Numeric>,
+  max: u64,
+) -> Result<Option<stmt::Statement<'a>>> {
   let ranges = ops.to_ranges();
   if is_sorted_ranges_always_true(&ranges) {
     return Ok(None);
@@ -514,7 +522,11 @@ pub(crate) fn range_stmt(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -
   Ok(Some(make_match(stmt::Operator::EQ, left, right)))
 }
 
-pub(crate) fn range_stmt_branch(left: expr::Expression, ops: &Ops<Numeric>, max: u64) -> Result<StatementBranch> {
+pub(crate) fn range_stmt_branch<'a>(
+  left: expr::Expression<'a>,
+  ops: &Ops<Numeric>,
+  max: u64,
+) -> Result<StatementBranch<'a>> {
   range_stmt(left, ops, max).map(|x| x.into_iter().map(|x| smallvec_inline![x]).collect())
 }
 

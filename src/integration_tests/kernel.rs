@@ -9,6 +9,7 @@ use async_tempfile::{TempDir, TempFile};
 use clap::Parser;
 use macro_rules_attribute::apply;
 use nftables::expr::MetaKey;
+use nftables::helper::DEFAULT_NFT;
 use nftables::schema::{NfListObject, NfObject};
 use nftables::stmt::Statement;
 use nftables::types::NfFamily;
@@ -29,7 +30,7 @@ async fn test_nftables() -> anyhow::Result<()> {
   .await?;
 
   let args = ["-ns", "list", "chain", "inet", &name, &name];
-  let chain = nftables::helper::get_current_ruleset_async(None, Some(&args))
+  let chain = nftables::helper::get_current_ruleset_with_args_async(DEFAULT_NFT, args)
     .await?
     .objects
     .into_owned();

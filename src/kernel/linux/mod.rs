@@ -40,6 +40,7 @@ impl Linux {
 impl Kernel for Linux {
   type Handle = u64;
 
+  // TODO: order
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
     let mut total = 1usize;
     let (info_stmts, rt_info) = info
