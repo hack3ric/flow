@@ -3,11 +3,14 @@ use std::process::Command;
 
 #[derive(Debug, Parser)]
 enum Cli {
+  /// Generate manpages and shell autocompletions into target/assets.
   Gen,
+  /// Run tests with `unshare -rn`
   UnshareTest {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     _args: Vec<String>,
   },
+  /// Run tests with `sudo -E`
   SudoTest {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     _args: Vec<String>,
