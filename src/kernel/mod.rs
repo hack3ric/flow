@@ -21,7 +21,7 @@ use thiserror::Error;
 /// Interface between BGP flowspec and the OS.
 pub trait Kernel: Sized {
   /// Type representing a flowspec's counterpart in kernel.
-  type Handle;
+  type Handle: Eq + Ord;
 
   /// Apply a flowspec to kernel.
   fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> impl Future<Output = Result<Self::Handle>>;
@@ -96,13 +96,13 @@ impl Kernel for KernelAdapter {
   }
 }
 
-#[derive(Debug, Display, Clone, Serialize, Deserialize)]
+#[derive(Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KernelHandle {
   #[strum(to_string = "()")]
   Noop,
 
   #[cfg(linux)]
-  #[strum(to_string = "{0}")]
+  #[strum(to_string = "{0:?}")]
   Linux(<Linux as Kernel>::Handle),
 }
 

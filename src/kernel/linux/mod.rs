@@ -10,19 +10,18 @@ use futures::join;
 use itertools::Itertools;
 use nft::Nftables;
 use nftables::batch::Batch;
-use nftables::helper::NftablesError;
-use nftables::schema::{NfCmd, NfObject, Nftables as NftablesReq};
+use nftables::schema::{NfCmd, NfListObject, NfObject, Nftables as NftablesReq};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::future::pending;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Linux {
   nft: Nftables,
   #[serde(skip)]
-  rtnl: Option<RtNetlink>,
+  rtnl: Option<RtNetlink<Self>>,
   rtnl_args: RtNetlinkArgs,
-  counter: u64,
 }
 
 impl Linux {
@@ -32,13 +31,12 @@ impl Linux {
       nft: Nftables::new(table, chain, hooked, hook_priority).await?,
       rtnl: None,
       rtnl_args: rtnl,
-      counter: 0,
     })
   }
 }
 
 impl Kernel for Linux {
-  type Handle = u64;
+  type Handle = BTreeSet<u32>;
 
   // TODO: order
   async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
@@ -63,19 +61,27 @@ impl Kernel for Linux {
         .collect::<Vec<_>>()
     });
 
-    let handle = self.counter;
-    self.counter += 1;
     let nftables = NftablesReq {
       objects: rules
         .into_iter()
-        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x.into(), Some(handle)))))
+        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x.into()))))
         .collect(),
     };
+    let result = self.nft.apply_and_return_ruleset(&nftables).await?;
 
-    self.nft.apply_ruleset(&nftables).await?;
+    let handle: Self::Handle = (result.objects.iter())
+      .filter_map(|x| {
+        if let NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(rule))) = x {
+          Some(rule.handle.unwrap())
+        } else {
+          None
+        }
+      })
+      .collect();
+
     if let Some((next_hop, table_id)) = rt_info {
       let rtnl = self.rtnl.as_mut().expect("RtNetlink should be initialized");
-      let real_table_id = rtnl.add(handle, spec, next_hop).await?;
+      let real_table_id = rtnl.add(handle.clone(), spec, next_hop).await?;
       assert_eq!(table_id, real_table_id, "table ID mismatch");
     }
 
@@ -83,36 +89,17 @@ impl Kernel for Linux {
   }
 
   async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
-    #[derive(Debug, Deserialize)]
-    struct MyNftables {
-      nftables: Vec<MyNftObject>,
-    }
-    #[derive(Debug, Deserialize)]
-    struct MyNftObject {
-      rule: Option<MyNftRule>,
-    }
-    #[derive(Debug, Deserialize)]
-    struct MyNftRule {
-      comment: Option<String>,
-      handle: u32,
-    }
     let mut batch = Batch::new();
-    let s = self.nft.get_current_ruleset_raw().await?;
-    let MyNftables { nftables } = serde_json::from_str(&s).map_err(NftablesError::NftInvalidJson)?;
-    nftables
-      .into_iter()
-      .filter_map(|x| x.rule)
-      .filter(|x| x.comment.as_ref().is_some_and(|y| y == &handle.to_string()))
-      .for_each(|x| batch.delete(self.nft.make_rule_handle(x.handle)));
+    for h in handle.iter().copied() {
+      batch.delete(self.nft.make_rule_handle(h));
+    }
     self.nft.apply_ruleset(&batch.to_nftables()).await?;
-
     if let Some(rtnl) = &mut self.rtnl {
       rtnl.del(handle).await?;
       if rtnl.is_empty() {
         self.rtnl = None;
       }
     }
-
     Ok(())
   }
 

@@ -1,4 +1,4 @@
-use super::Result;
+use super::{Kernel, Result};
 use crate::bgp::flow::{Component, ComponentKind, Flowspec};
 use crate::net::{Afi, IpPrefix};
 use clap::Args;
@@ -22,16 +22,16 @@ use tokio::select;
 use tokio::time::{interval, Interval};
 
 #[derive(Debug)]
-pub struct RtNetlink {
+pub struct RtNetlink<K: Kernel> {
   args: RtNetlinkArgs,
   handle: Handle,
   msgs: UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>,
-  routes: BTreeMap<u64, (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
+  routes: BTreeMap<K::Handle, (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
   rules: BTreeMap<u32, BTreeSet<IpPrefix>>,
   timer: Interval,
 }
 
-impl RtNetlink {
+impl<K: Kernel> RtNetlink<K> {
   pub fn new(args: RtNetlinkArgs) -> io::Result<Self> {
     let (conn, handle, msgs) = rtnetlink::new_connection()?;
     let scan_time = args.route_scan_time;
@@ -46,7 +46,7 @@ impl RtNetlink {
     })
   }
 
-  pub async fn add(&mut self, id: u64, spec: &Flowspec, next_hop: IpAddr) -> Result<u32> {
+  pub async fn add(&mut self, id: K::Handle, spec: &Flowspec, next_hop: IpAddr) -> Result<u32> {
     let prefix = spec
       .component_set()
       .get(&ComponentKind::DstPrefix)
@@ -102,7 +102,7 @@ impl RtNetlink {
       .unwrap_or(self.args.init_table_id)
   }
 
-  pub async fn del(&mut self, id: u64) -> Result<()> {
+  pub async fn del(&mut self, id: K::Handle) -> Result<()> {
     let Some((prefix, _, table_id, _)) = self.routes.remove(&id) else {
       return Ok(());
     };

@@ -1,3 +1,4 @@
+use super::Linux;
 use crate::bgp::flow::{Bitmask, BitmaskFlags, Component, ComponentKind, Flowspec, Numeric, NumericFlags, Op, Ops};
 use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilterAction, TrafficFilterActionKind};
 use crate::kernel::rtnl::{RtNetlink, RtNetlinkArgs};
@@ -6,7 +7,9 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::{Intersect, TruthTable};
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
-use nftables::helper::{apply_ruleset_async, get_current_ruleset_raw_async, DEFAULT_NFT};
+use nftables::helper::{
+  apply_and_return_ruleset_async, apply_ruleset_async, get_current_ruleset_raw_async, DEFAULT_NFT,
+};
 use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
 use num::Integer;
@@ -57,14 +60,14 @@ impl Nftables {
   pub fn make_new_rule(
     &self,
     stmts: Cow<'static, [stmt::Statement]>,
-    comment: Option<impl ToString>,
+    // comment: Option<impl ToString>,
   ) -> schema::NfListObject<'static> {
     schema::NfListObject::Rule(schema::Rule {
       family: types::NfFamily::INet,
       table: self.table.clone(),
       chain: self.chain.clone(),
       expr: stmts,
-      comment: comment.map(|x| x.to_string().into()),
+      // comment: comment.map(|x| x.to_string().into()),
       ..Default::default()
     })
   }
@@ -79,6 +82,7 @@ impl Nftables {
     })
   }
 
+  #[expect(unused)]
   pub async fn get_current_ruleset_raw(&self) -> Result<String> {
     let args = ["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
     Ok(get_current_ruleset_raw_async(DEFAULT_NFT, args).await?)
@@ -86,6 +90,10 @@ impl Nftables {
 
   pub async fn apply_ruleset(&self, n: &NftablesReq<'_>) -> Result<()> {
     Ok(apply_ruleset_async(n).await?)
+  }
+
+  pub async fn apply_and_return_ruleset(&self, n: &NftablesReq<'_>) -> Result<NftablesReq<'static>> {
+    Ok(apply_and_return_ruleset_async(n).await?)
   }
 
   pub async fn terminate(self) {
@@ -273,7 +281,7 @@ impl RouteInfo<'_> {
   pub(super) fn to_nft_stmts(
     &self,
     afi: Afi,
-    rtnl: &mut Option<RtNetlink>,
+    rtnl: &mut Option<RtNetlink<Linux>>,
     rtnl_args: &RtNetlinkArgs,
   ) -> Option<(StatementBranch<'static>, Option<(IpAddr, u32)>)> {
     let set = (self.ext_comm.iter().copied())
@@ -320,7 +328,7 @@ impl TrafficFilterAction {
   fn to_nft_stmts(
     self,
     afi: Afi,
-    rtnl: &mut Option<RtNetlink>,
+    rtnl: &mut Option<RtNetlink<Linux>>,
     rtnl_args: &RtNetlinkArgs,
   ) -> (StatementBlock<'static>, Option<(IpAddr, u32)>, bool) {
     use TrafficFilterAction::*;
