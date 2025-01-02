@@ -140,7 +140,7 @@ impl Routes {
       println!("{FG_GREEN_BOLD}Flowspec{RESET} {spec}");
       if verbosity >= Level::Debug {
         println!("  {BOLD}Kernel Rule ID:{RESET} {index}");
-        print!("  {BOLD}Binary Representation:{RESET} ");
+        print!("  {BOLD}Hex Representation:{RESET} ");
         let mut buf = Vec::new();
         spec.write(&mut buf);
         println!("{:02x}", buf.iter().format(""));
