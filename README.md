@@ -83,6 +83,8 @@ Just use your general Cargo workflow:
 ```console
 $ cargo build
 $ cargo run
+$ cargo xtask sudo run -- run  # short for:
+$ cargo --config "target.'cfg(target_os = \"<your OS>\")'.runner = 'sudo -E'" run -- run
 ```
 
 To generate manpages and shell autocompletions into target/assets directory, run:
@@ -96,15 +98,15 @@ $ cargo xtask gen
 Intergration tests involve exchanging information with BIRD and modifying kernel network interface. For example, on Linux, install BIRD (version 2.x or above) and use [`unshare(1)`](https://www.man7.org/linux/man-pages/man1/unshare.1.html) to run the full sets of tests:
 
 ```console
-$ cargo xtask unshare-test  # shortcut for:
+$ cargo xtask unshare test  # shortcut for:
 $ cargo --config "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'" test
 ```
 
 If `unshare` or similar unprivileged isolation methods are unavailable, be careful when running tests with root, since modifications to host network may not be completely reverted in test code:
 
 ```console
-$ cargo xtask sudo-test  # shortcut for:
-$ cargo --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo -E'" test
+$ cargo xtask sudo test  # shortcut for:
+$ cargo --config "target.'cfg(target_os = \"<your OS>\")'.runner = 'sudo -E'" test
 ```
 
 Or, skip integration tests and run only unit tests:

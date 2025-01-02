@@ -51,7 +51,7 @@ jobs:
       - name: Run tests with unshare
         run: |
           sudo sh -c 'echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns'
-          cargo xtask unshare-test --verbose
+          cargo xtask unshare test --verbose
   cross-test:
     name: Build for ${{ matrix.target }}
     runs-on: ubuntu-latest
