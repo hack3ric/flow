@@ -12,7 +12,7 @@ use nftables::helper::{
 };
 use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
-use num::Integer;
+use num_integer::Integer;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, smallvec_inline, SmallVec};
 use std::borrow::Cow;
@@ -378,8 +378,8 @@ impl TrafficFilterAction {
   }
 }
 
-const ACCEPT: stmt::Statement = stmt::Statement::Accept(None);
-const DROP: stmt::Statement = stmt::Statement::Drop(None);
+pub(crate) const ACCEPT: stmt::Statement = stmt::Statement::Accept(None);
+pub(crate) const DROP: stmt::Statement = stmt::Statement::Drop(None);
 
 pub(crate) fn make_match<'a>(
   op: stmt::Operator,

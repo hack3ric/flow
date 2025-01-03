@@ -14,7 +14,7 @@ use msg::HeaderError::*;
 use msg::OpenError::*;
 use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn, UpdateError};
 use nlri::{Nlri, NlriContent, NlriError, NlriKind};
-use num::integer::gcd;
+use num_integer::gcd;
 use replace_with::replace_with_or_abort;
 use route::Routes;
 use serde::{Deserialize, Serialize};
