@@ -345,7 +345,8 @@ impl Ord for IpPrefix {
   fn cmp(&self, other: &Self) -> Ordering {
     match self.inner.prefix_len.cmp(&other.inner.prefix_len) {
       Ordering::Equal => self.inner.addr.cmp(&other.inner.addr),
-      ord => ord,
+      Ordering::Greater => Ordering::Less,
+      Ordering::Less => Ordering::Greater,
     }
   }
 }
