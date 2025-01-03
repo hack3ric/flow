@@ -24,10 +24,16 @@ use tokio::time::sleep;
 #[apply(test_local!)]
 async fn test_nftables() -> anyhow::Result<()> {
   let (name, _g) = run_kernel_test([
-    "flow4 { dst 10.0.0.0/9; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0x4c97a25c)); }",
+    "flow4 { dst 10.0.0.0/9; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0)); }",
+    "flow4 { dst 10.0.0.0/10; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0x4c97a25c)); }",
     "flow6 { src fdfd::/128; next header 17; } { bgp_ext_community.add((unknown 0x800c, 0, 0)); }",
   ])
   .await?;
+
+  // tokio::process::Command::new("nft")
+  //   .args(["-a", "list", "ruleset"])
+  //   .status()
+  //   .await?;
 
   let args = ["-ns", "list", "chain", "inet", &name, &name];
   let chain = nftables::helper::get_current_ruleset_with_args_async(DEFAULT_NFT, args)
@@ -51,22 +57,27 @@ async fn test_nftables() -> anyhow::Result<()> {
   let stmts: Vec<_> = stmts.iter().map(|x| &x[..]).collect();
   assert_eq!(stmts, [
     &[
-      prefix_stmt("daddr", "10.0.0.0/9".parse()?).unwrap(),
+      prefix_stmt("daddr", "10.0.0.0/10".parse()?).unwrap(),
       range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
       make_limit(true, 79500000., "bytes", "second"),
       Statement::Drop(None),
     ][..],
     &[
-      prefix_stmt("daddr", "10.0.0.0/9".parse()?).unwrap(),
+      prefix_stmt("daddr", "10.0.0.0/10".parse()?).unwrap(),
       range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
       Statement::Accept(None),
+    ][..],
+    &[
+      prefix_stmt("daddr", "10.0.0.0/9".parse()?).unwrap(),
+      range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
+      Statement::Drop(None),
     ][..],
     &[
       prefix_stmt("saddr", "fdfd::/128".parse()?).unwrap(),
       range_stmt(make_meta(MetaKey::L4proto), &Op::eq(17).into(), 0xff)?.unwrap(),
       Statement::Drop(None),
     ][..],
-  ],);
+  ]);
   Ok(())
 }
 
