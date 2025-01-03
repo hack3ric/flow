@@ -136,7 +136,13 @@ async fn run(
         return Ok(x);
       }
       Ok(None) => {}
+      #[cfg(not(test))]
       Err(error) => error!("{error:?}"),
+      #[cfg(test)]
+      Err(error) => {
+        let _ = event_tx.send(TestEvent::Exit(bgp)).await;
+        return Err(error);
+      }
     }
   }
 }
