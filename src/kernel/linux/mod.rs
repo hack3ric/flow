@@ -38,8 +38,12 @@ impl Linux {
 impl Kernel for Linux {
   type Handle = BTreeSet<u32>;
 
-  // TODO: order
-  async fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> Result<Self::Handle> {
+  async fn apply(
+    &mut self,
+    spec: &Flowspec,
+    before: Option<&Self::Handle>,
+    info: &RouteInfo<'_>,
+  ) -> Result<Self::Handle> {
     let mut total = 1usize;
     let (info_stmts, rt_info) = info
       .to_nft_stmts(spec.afi(), &mut self.rtnl, &self.rtnl_args)
@@ -64,7 +68,14 @@ impl Kernel for Linux {
     let nftables = NftablesReq {
       objects: rules
         .into_iter()
-        .map(|x| NfObject::CmdObject(NfCmd::Add(self.nft.make_new_rule(x.into()))))
+        .map(|x| {
+          let cmd = if let Some(before) = before {
+            NfCmd::Insert(self.nft.make_new_rule_with_index(x.into(), *before.first().unwrap()))
+          } else {
+            NfCmd::Add(self.nft.make_new_rule(x.into()))
+          };
+          NfObject::CmdObject(cmd)
+        })
         .collect(),
     };
     let result = self.nft.apply_and_return_ruleset(&nftables).await?;
@@ -88,7 +99,7 @@ impl Kernel for Linux {
     Ok(handle)
   }
 
-  async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
+  async fn remove(&mut self, handle: &Self::Handle) -> Result<()> {
     let mut batch = Batch::new();
     for h in handle.iter().copied() {
       batch.delete(self.nft.make_rule_handle(h));

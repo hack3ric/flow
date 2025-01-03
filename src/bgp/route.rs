@@ -37,7 +37,8 @@ impl Routes {
         .extend(prefixes.into_iter().map(|p| (p, (next_hop, MaybeRc::Rc(info.clone()))))),
       NlriContent::Flow { specs } => {
         for spec in specs {
-          let id = match self.kernel.apply(&spec, &info).await {
+          let before = self.flow.range(&spec..).next().map(|(_, (handle, _))| handle);
+          let id = match self.kernel.apply(&spec, before, &info).await {
             Ok(id) => id,
             Err(e @ kernel::Error::MatchNothing) => {
               warn!("flowspec {spec} rejected: {e}");
@@ -53,7 +54,7 @@ impl Routes {
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              self.kernel.remove(id).await?;
+              self.kernel.remove(&id).await?;
             }
           }
         }
@@ -81,7 +82,7 @@ impl Routes {
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
     for (_, (id, _)) in flow {
-      self.kernel.remove(id).await?;
+      self.kernel.remove(&id).await?;
     }
     Ok(())
   }
@@ -90,7 +91,7 @@ impl Routes {
     let Some((id, _)) = self.flow.remove(&spec) else {
       return Ok(());
     };
-    self.kernel.remove(id).await?;
+    self.kernel.remove(&id).await?;
     Ok(())
   }
 

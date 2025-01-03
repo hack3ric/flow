@@ -24,10 +24,15 @@ pub trait Kernel: Sized {
   type Handle: Eq + Ord;
 
   /// Apply a flowspec to kernel.
-  fn apply(&mut self, spec: &Flowspec, info: &RouteInfo<'_>) -> impl Future<Output = Result<Self::Handle>>;
+  fn apply(
+    &mut self,
+    spec: &Flowspec,
+    before: Option<&Self::Handle>,
+    info: &RouteInfo<'_>,
+  ) -> impl Future<Output = Result<Self::Handle>>;
 
   /// Remove a flowspec from kernel using previously returned handle.
-  fn remove(&mut self, handle: Self::Handle) -> impl Future<Output = Result<()>>;
+  fn remove(&mut self, handle: &Self::Handle) -> impl Future<Output = Result<()>>;
 
   /// Process notifications from kernel, timers, etc.
   fn process(&mut self) -> impl Future<Output = Result<()>> {
@@ -61,15 +66,22 @@ impl KernelAdapter {
 impl Kernel for KernelAdapter {
   type Handle = KernelHandle;
 
-  async fn apply(&mut self, _spec: &Flowspec, _info: &RouteInfo<'_>) -> Result<Self::Handle> {
+  async fn apply(
+    &mut self,
+    _spec: &Flowspec,
+    _before: Option<&Self::Handle>,
+    _info: &RouteInfo<'_>,
+  ) -> Result<Self::Handle> {
     match self {
       Self::Noop => Ok(KernelHandle::Noop),
       #[cfg(linux)]
-      Self::Linux(linux) => Ok(KernelHandle::Linux(linux.apply(_spec, _info).await?)),
+      Self::Linux(linux) => Ok(KernelHandle::Linux(
+        linux.apply(_spec, _before.map(|l| l.as_linux().unwrap()), _info).await?,
+      )),
     }
   }
 
-  async fn remove(&mut self, handle: Self::Handle) -> Result<()> {
+  async fn remove(&mut self, handle: &Self::Handle) -> Result<()> {
     match (self, handle) {
       (Self::Noop, KernelHandle::Noop) => Ok(()),
       #[cfg(linux)]
@@ -104,6 +116,16 @@ pub enum KernelHandle {
   #[cfg(linux)]
   #[strum(to_string = "{0:?}")]
   Linux(<Linux as Kernel>::Handle),
+}
+
+impl KernelHandle {
+  #[cfg(linux)]
+  pub fn as_linux(&self) -> Option<&<Linux as Kernel>::Handle> {
+    match self {
+      KernelHandle::Linux(linux) => Some(linux),
+      _ => None,
+    }
+  }
 }
 
 #[derive(Debug, Error)]

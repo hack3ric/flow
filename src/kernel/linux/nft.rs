@@ -57,17 +57,27 @@ impl Nftables {
     Ok(Self { table, chain })
   }
 
-  pub fn make_new_rule(
+  pub fn make_new_rule(&self, stmts: Cow<'static, [stmt::Statement]>) -> schema::NfListObject<'static> {
+    schema::NfListObject::Rule(schema::Rule {
+      family: types::NfFamily::INet,
+      table: self.table.clone(),
+      chain: self.chain.clone(),
+      expr: stmts,
+      ..Default::default()
+    })
+  }
+
+  pub fn make_new_rule_with_index(
     &self,
     stmts: Cow<'static, [stmt::Statement]>,
-    // comment: Option<impl ToString>,
+    index: u32,
   ) -> schema::NfListObject<'static> {
     schema::NfListObject::Rule(schema::Rule {
       family: types::NfFamily::INet,
       table: self.table.clone(),
       chain: self.chain.clone(),
       expr: stmts,
-      // comment: comment.map(|x| x.to_string().into()),
+      handle: Some(index), // `index` seems not working, and `handle` works fine
       ..Default::default()
     })
   }

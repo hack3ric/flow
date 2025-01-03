@@ -102,8 +102,8 @@ impl<K: Kernel> RtNetlink<K> {
       .unwrap_or(self.args.init_table_id)
   }
 
-  pub async fn del(&mut self, id: K::Handle) -> Result<()> {
-    let Some((prefix, _, table_id, _)) = self.routes.remove(&id) else {
+  pub async fn del(&mut self, id: &K::Handle) -> Result<()> {
+    let Some((prefix, _, table_id, _)) = self.routes.remove(id) else {
       return Ok(());
     };
     self.del_route(table_id, prefix).await?;
