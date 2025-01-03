@@ -1,18 +1,14 @@
 use super::helpers::bird::ensure_bird_2;
 use super::helpers::cli::{run_cli_with_bird, CliChild};
-use super::helpers::kernel::{ensure_loopback_up, ensure_root, pick_port};
+use super::helpers::kernel::{ensure_loopback_up, ensure_root, get_nft_stmts, pick_port, print_nft_chain};
 use super::{TestEvent, BIRD_CONFIG_1};
 use crate::args::Cli;
 use crate::bgp::flow::Op;
-use crate::kernel::nft::{make_limit, make_meta, make_payload_field, prefix_stmt, range_stmt};
+use crate::kernel::nft::{make_limit, make_meta, make_payload_field, prefix_stmt, range_stmt, ACCEPT, DROP};
 use async_tempfile::{TempDir, TempFile};
 use clap::Parser;
 use macro_rules_attribute::apply;
 use nftables::expr::MetaKey;
-use nftables::helper::DEFAULT_NFT;
-use nftables::schema::{NfListObject, NfObject};
-use nftables::stmt::Statement;
-use nftables::types::NfFamily;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::time::Duration;
@@ -30,53 +26,30 @@ async fn test_nftables() -> anyhow::Result<()> {
   ])
   .await?;
 
-  // tokio::process::Command::new("nft")
-  //   .args(["-a", "list", "ruleset"])
-  //   .status()
-  //   .await?;
+  print_nft_chain(&name, &name).await?;
 
-  let args = ["-ns", "list", "chain", "inet", &name, &name];
-  let chain = nftables::helper::get_current_ruleset_with_args_async(DEFAULT_NFT, args)
-    .await?
-    .objects
-    .into_owned();
-
-  let rules = chain.into_iter().filter_map(|x| {
-    if let NfObject::ListObject(NfListObject::Rule(mut rule)) = x {
-      rule.handle = None;
-      Some(rule)
-    } else {
-      None
-    }
-  });
-  assert!(rules
-    .clone()
-    .all(|r| r.family == NfFamily::INet && r.table == name && r.chain == name));
-
-  let stmts: Vec<_> = rules.map(|r| r.expr).collect();
-  let stmts: Vec<_> = stmts.iter().map(|x| &x[..]).collect();
-  assert_eq!(stmts, [
-    &[
+  assert_eq!(get_nft_stmts(&name, &name).await?, [
+    vec![
       prefix_stmt("daddr", "10.0.0.0/10".parse()?).unwrap(),
       range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
       make_limit(true, 79500000., "bytes", "second"),
-      Statement::Drop(None),
-    ][..],
-    &[
+      DROP,
+    ],
+    vec![
       prefix_stmt("daddr", "10.0.0.0/10".parse()?).unwrap(),
       range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
-      Statement::Accept(None),
-    ][..],
-    &[
+      ACCEPT,
+    ],
+    vec![
       prefix_stmt("daddr", "10.0.0.0/9".parse()?).unwrap(),
       range_stmt(make_payload_field("ip", "length"), &Op::gt(1024).into(), 0xffff)?.unwrap(),
-      Statement::Drop(None),
-    ][..],
-    &[
+      DROP,
+    ],
+    vec![
       prefix_stmt("saddr", "fdfd::/128".parse()?).unwrap(),
       range_stmt(make_meta(MetaKey::L4proto), &Op::eq(17).into(), 0xff)?.unwrap(),
-      Statement::Drop(None),
-    ][..],
+      DROP,
+    ],
   ]);
   Ok(())
 }

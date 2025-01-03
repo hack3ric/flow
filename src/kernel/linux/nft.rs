@@ -324,7 +324,7 @@ impl RouteInfo<'_> {
       .collect::<StatementBranch>();
     if terminal {
       let ll = result.last().and_then(|x| x.last());
-      if ll.is_some_and(|x| *x == ACCEPT || *x == DROP) || ll.is_none() {
+      if dbg!(ll).is_some_and(|x| *x == ACCEPT || *x == DROP) || ll.is_none() {
         result.push(smallvec_inline![ACCEPT]);
       } else {
         result.last_mut().unwrap().push(ACCEPT);
@@ -517,9 +517,13 @@ pub(crate) fn range_stmt<'a>(
   }
   let right = if ranges.len() == 1 {
     let (start, end) = ranges.into_iter().next().unwrap().into_inner();
-    expr::Expression::Range(Box::new(expr::Range {
-      range: [NUM(start as u32), NUM(min(end, max) as u32)],
-    }))
+    if start == end {
+      expr::Expression::Number(start as u32)
+    } else {
+      expr::Expression::Range(Box::new(expr::Range {
+        range: [NUM(start as u32), NUM(min(end, max) as u32)],
+      }))
+    }
   } else {
     let allowed = ranges
       .into_iter()
