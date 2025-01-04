@@ -82,14 +82,14 @@ impl<K: Kernel> RtNetlink<K> {
     };
 
     let attrs = self.get_route(next_hop).await?.collect::<Vec<_>>();
-    self.routes.insert(id, (prefix, next_hop, table_id, attrs.clone()));
     let mut msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
-    msg.attributes.extend(attrs);
+    msg.attributes.extend(attrs.iter().cloned());
     self.handle.route().add(msg).execute().await?;
+    self.routes.insert(id, (prefix, next_hop, table_id, attrs));
 
     Ok(table_id)
   }
