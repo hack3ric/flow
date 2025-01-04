@@ -140,6 +140,7 @@ async fn run(
       Err(error) => error!("{error:?}"),
       #[cfg(test)]
       Err(error) => {
+        bgp.terminate().await;
         let _ = event_tx.send(TestEvent::Exit(bgp)).await;
         return Err(error);
       }
