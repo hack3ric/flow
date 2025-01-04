@@ -324,7 +324,7 @@ impl RouteInfo<'_> {
       .collect::<StatementBranch>();
     if terminal {
       let ll = result.last().and_then(|x| x.last());
-      if dbg!(ll).is_some_and(|x| *x == ACCEPT || *x == DROP) || ll.is_none() {
+      if ll.is_some_and(|x| *x == ACCEPT || *x == DROP) || ll.is_none() {
         result.push(smallvec_inline![ACCEPT]);
       } else {
         result.last_mut().unwrap().push(ACCEPT);
