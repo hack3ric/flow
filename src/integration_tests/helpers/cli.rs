@@ -9,17 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 pub type CliChild = JoinHandle<anyhow::Result<u8>>;
-
-pub async fn run_cli_with_bird(
-  mut cli_opt: Cli,
-  bird_conf: &str,
-) -> anyhow::Result<(
+pub type CliGuard = (
   CliChild,
   Child,
-  mpsc::Receiver<TestEvent>,
-  oneshot::Sender<()>,
+  (mpsc::Receiver<TestEvent>, oneshot::Sender<()>),
   (TempFile, TempDir),
-)> {
+);
+
+pub async fn run_cli_with_bird(mut cli_opt: Cli, bird_conf: &str) -> anyhow::Result<CliGuard> {
   let bird_conf_file = str_to_file(bird_conf.as_bytes()).await?;
 
   let sock_dir = TempDir::new().await?;
@@ -32,5 +29,15 @@ pub async fn run_cli_with_bird(
     let exit_code = cli_entry(cli_opt, event_tx, close_rx).await;
     anyhow::Ok(exit_code)
   });
-  Ok((cli, bird, event_rx, close_tx, (bird_conf_file, sock_dir)))
+  Ok((cli, bird, (event_rx, close_tx), (bird_conf_file, sock_dir)))
+}
+
+pub async fn close_cli(chans: (mpsc::Receiver<TestEvent>, oneshot::Sender<()>)) {
+  let (mut events, close) = chans;
+  let _ = close.send(());
+  while let Some(event) = events.recv().await {
+    if let TestEvent::Exit(_) = event {
+      break;
+    }
+  }
 }

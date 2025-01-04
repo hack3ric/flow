@@ -158,7 +158,7 @@ async fn run_flowspec_test_inner(mut flows: BTreeMap<Flowspec, (&str, RouteInfo<
     .replace("@@FLOW4@@", &flow4)
     .replace("@@FLOW6@@", &flow6);
 
-  let (mut cli, mut bird, mut events, close, _g) = run_cli_with_bird(cli, &bird).await?;
+  let (mut cli, mut bird, (mut events, close), _g) = run_cli_with_bird(cli, &bird).await?;
   let mut end_of_rib_count = 0;
   let mut visited = BTreeSet::new();
   let _state = 'outer: loop {

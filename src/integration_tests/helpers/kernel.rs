@@ -69,3 +69,18 @@ pub async fn print_nft_chain(table: &str, chain: &str) -> anyhow::Result<()> {
   println!("{}", String::from_utf8(output.stdout)?);
   Ok(())
 }
+
+pub async fn print_ip_rule() -> anyhow::Result<()> {
+  let output = tokio::process::Command::new("ip").arg("rule").output().await?;
+  println!("{}", String::from_utf8(output.stdout)?);
+  Ok(())
+}
+
+pub async fn print_ip_route(table: u32) -> anyhow::Result<()> {
+  let output = tokio::process::Command::new("ip")
+    .args(["route", "show", "table", &table.to_string()])
+    .output()
+    .await?;
+  println!("{}", String::from_utf8(output.stdout)?);
+  Ok(())
+}
