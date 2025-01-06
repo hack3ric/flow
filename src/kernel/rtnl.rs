@@ -21,6 +21,10 @@ use std::time::Duration;
 use tokio::select;
 use tokio::time::{interval, Interval};
 
+// TODO: maintain device info similar to BIRD's "device" protocol, and use it to
+// ensure only direct traffic to neighbours
+// For now, we allow any address by `ip route get`.
+
 #[derive(Debug)]
 pub struct RtNetlink<K: Kernel> {
   args: RtNetlinkArgs,
@@ -108,7 +112,7 @@ impl<K: Kernel> RtNetlink<K> {
     };
     self.del_route(table_id, prefix).await?;
 
-    let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existant table??");
+    let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existent table??");
     prefixes.remove(&prefix);
     if prefixes.is_empty() {
       self.rules.remove(&table_id);
@@ -252,6 +256,7 @@ impl<K: Kernel> RtNetlink<K> {
       unreachable!();
     };
     let attrs = rt.attributes.into_iter().filter(|x| [RTA_GATEWAY, RTA_OIF].contains(&x.kind()));
+    // TODO: if no gateway then use dest
     Ok(attrs)
   }
 

@@ -35,7 +35,8 @@ pub(crate) use test_local;
 
 // Test files
 mod flowspec;
-mod kernel;
+#[cfg(linux)]
+mod kernel_linux;
 
 const BIRD_CONFIG_1: &str = "\
 router id 10.234.56.78;

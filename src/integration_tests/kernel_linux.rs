@@ -1,11 +1,12 @@
 use super::helpers::bird::ensure_bird_2;
 use super::helpers::cli::{close_cli, run_cli_with_bird, CliGuard};
-use super::helpers::kernel::{
-  ensure_loopback_up, ensure_root, get_nft_stmts, pick_port, print_ip_route, print_ip_rule, print_nft_chain,
-};
+use super::helpers::kernel::rtnl::{create_dummy_link, get_ip_route, get_ip_rule};
+use super::helpers::kernel::{ensure_loopback_up, ensure_root, pick_port};
 use super::{TestEvent, BIRD_CONFIG_1};
 use crate::args::Cli;
 use crate::bgp::flow::Op;
+use crate::integration_tests::helpers::kernel::linux::{get_nft_stmts, print_ip_route, print_ip_rule, print_nft_chain};
+use crate::integration_tests::helpers::kernel::rtnl::make_ip_rule_mark;
 use crate::kernel::nft::{make_limit, make_meta, make_payload_field, prefix_stmt, range_stmt, ACCEPT, DROP};
 use clap::Parser;
 use macro_rules_attribute::apply;
@@ -14,6 +15,7 @@ use nftables::expr::{self, MetaKey};
 use nftables::stmt;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
+use rtnetlink::IpVersion;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::sleep;
@@ -62,18 +64,31 @@ async fn test_order() -> anyhow::Result<()> {
 
 #[apply(test_local!)]
 async fn test_redirect_to_ip() -> anyhow::Result<()> {
+  let (conn, handle, _) = rtnetlink::new_connection()?;
+  tokio::spawn(conn);
+  create_dummy_link(&handle, "dummy_flow", "10.128.128.254/24".parse()?).await?;
+
   let (name, (_g1, _g2, chans, _g3)) =
-    run_kernel_test(["flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 172.20.128.1, 0)); }"])
-      .await?;
+    run_kernel_test(["flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 1.1.1.1, 0)); }"]).await?;
 
   print_nft_chain(&name, &name).await?;
   print_ip_rule().await?;
   print_ip_route(10000).await?;
 
-  let result = get_nft_stmts(&name, &name).await?;
+  let ip_rule = get_ip_rule(&handle, IpVersion::V4).await?;
+  let ip_route = get_ip_route(&handle, IpVersion::V4, 10000).await?;
+  let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
 
-  assert_eq!(result, [vec![
+  let ip_rule_exp = make_ip_rule_mark(IpVersion::V4, 100, 10000, 10000);
+  println!("ip rule = {ip_rule:?}");
+  println!("exp = {ip_rule_exp:?}");
+  assert!(ip_rule.contains(&ip_rule_exp));
+
+  // let ip_route_exp =
+  println!("ip route show table 10000 = {ip_route:?}");
+
+  assert_eq!(nft_stmts, [vec![
     prefix_stmt("daddr", "172.20.0.0/16".parse()?).unwrap(),
     stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(10000) }),
     ACCEPT,
