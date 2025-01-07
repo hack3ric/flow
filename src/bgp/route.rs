@@ -40,14 +40,12 @@ impl Routes {
           let before = self.flow.range(&spec..).next().map(|(_, (handle, _))| handle);
           let id = match self.kernel.apply(&spec, before, &info).await {
             Ok(id) => id,
-            Err(e @ kernel::Error::MatchNothing) => {
-              warn!("flowspec {spec} rejected: {e}");
+            Err(error) => {
+              warn!("flowspec {spec} rejected: {error}");
               self.withdraw_spec(spec).await?;
               continue;
             }
-            Err(e) => return Err(e),
           };
-
           match self.flow.entry(spec) {
             Entry::Vacant(e) => {
               e.insert((id, MaybeRc::Rc(info.clone())));
