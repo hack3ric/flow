@@ -2,7 +2,7 @@ use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::kernel::{self, Kernel, KernelAdapter, KernelHandle};
 use crate::net::IpPrefix;
-use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
+use crate::util::{grace, MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use either::Either;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
@@ -30,7 +30,7 @@ impl Routes {
     Self { unicast: BTreeMap::new(), flow: BTreeMap::new(), kernel }
   }
 
-  pub async fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) -> kernel::Result<()> {
+  pub async fn commit(&mut self, nlri: Nlri, info: Rc<RouteInfo<'static>>) {
     match nlri.content {
       NlriContent::Unicast { prefixes, next_hop } => self
         .unicast
@@ -42,7 +42,7 @@ impl Routes {
             Ok(id) => id,
             Err(error) => {
               warn!("flowspec {spec} rejected: {error}");
-              self.withdraw_spec(spec).await?;
+              self.withdraw_spec(spec).await;
               continue;
             }
           };
@@ -52,45 +52,41 @@ impl Routes {
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              self.kernel.remove(&id).await?;
+              grace(self.kernel.remove(&id).await, "error removing old flowspec from kernel");
             }
           }
         }
       }
     }
-    Ok(())
   }
 
-  pub async fn withdraw(&mut self, nlri: Nlri) -> kernel::Result<()> {
+  pub async fn withdraw(&mut self, nlri: Nlri) {
     match nlri.content {
       NlriContent::Unicast { prefixes, .. } => prefixes
         .into_iter()
         .for_each(|p| self.unicast.remove(&p).map(|_| ()).unwrap_or(())),
       NlriContent::Flow { specs } => {
         for s in specs {
-          self.withdraw_spec(s).await?;
+          self.withdraw_spec(s).await;
         }
       }
     }
-    Ok(())
   }
 
-  pub async fn withdraw_all(&mut self) -> kernel::Result<()> {
+  pub async fn withdraw_all(&mut self) {
     self.unicast.clear();
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
-    for (_, (id, _)) in flow {
-      self.kernel.remove(&id).await?;
+    for (_, (handle, _)) in flow {
+      grace(self.kernel.remove(&handle).await, "error removing handle from kernel");
     }
-    Ok(())
   }
 
-  async fn withdraw_spec(&mut self, spec: Flowspec) -> kernel::Result<()> {
-    let Some((id, _)) = self.flow.remove(&spec) else {
-      return Ok(());
+  async fn withdraw_spec(&mut self, spec: Flowspec) {
+    let Some((handle, _)) = self.flow.remove(&spec) else {
+      return;
     };
-    self.kernel.remove(&id).await?;
-    Ok(())
+    grace(self.kernel.remove(&handle).await, "error removing handle from kernel");
   }
 
   pub async fn process(&mut self) -> kernel::Result<()> {

@@ -1,4 +1,5 @@
 use anstyle::{AnsiColor, Color, Reset, Style};
+use log::warn;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -275,6 +276,14 @@ impl Display for TruthTable {
       }
     }
     f.write_char('}')
+  }
+}
+
+// TODO: macro with format args
+pub fn grace<T, E: std::error::Error>(result: Result<T, E>, msg: &str) {
+  match result {
+    Ok(_) => {}
+    Err(error) => warn!("{msg}: {error}"),
   }
 }
 
