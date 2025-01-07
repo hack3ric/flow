@@ -366,7 +366,8 @@ impl TrafficFilterAction {
           let new = RtNetlink::new(rtnl_args.clone()).unwrap();
           rtnl.get_or_insert(new)
         };
-        let table_id = rtnl.next_table_id();
+        let table_id = rtnl.next_table_id(); // TODO: bug, should not be next_table_id and should be next_mark (?)
+        // TODO: mark could be random, create first and then pass to rtnl
         let result = smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
           key: make_meta(expr::MetaKey::Mark),
           value: NUM(table_id),

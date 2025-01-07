@@ -4,6 +4,7 @@ use super::rtnl::{RtNetlink, RtNetlinkArgs};
 use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
+use crate::util::grace;
 use clap::Args;
 use futures::future::OptionFuture;
 use futures::join;
@@ -32,6 +33,17 @@ impl Linux {
       rtnl: None,
       rtnl_args: rtnl,
     })
+  }
+
+  async fn remove_nft(&mut self, handle: &<Self as Kernel>::Handle) {
+    let mut batch = Batch::new();
+    for h in handle.iter().copied() {
+      batch.delete(self.nft.make_rule_handle(h));
+    }
+    grace(
+      self.nft.apply_ruleset(&batch.to_nftables()).await,
+      "failed to remove nft rules",
+    );
   }
 }
 
@@ -92,26 +104,28 @@ impl Kernel for Linux {
 
     if let Some((next_hop, table_id)) = rt_info {
       let rtnl = self.rtnl.as_mut().expect("RtNetlink should be initialized");
-      let real_table_id = rtnl.add(handle.clone(), spec, next_hop).await?;
+      let real_table_id = match rtnl.add(handle.clone(), spec, next_hop).await {
+        Ok(table_id) => table_id,
+        Err(error) => {
+          self.remove_nft(&handle).await;
+          return Err(error);
+        }
+      };
+      // TODO: remove this, table_id should be mark
       assert_eq!(table_id, real_table_id, "table ID mismatch");
     }
 
     Ok(handle)
   }
 
-  async fn remove(&mut self, handle: &Self::Handle) -> Result<()> {
-    let mut batch = Batch::new();
-    for h in handle.iter().copied() {
-      batch.delete(self.nft.make_rule_handle(h));
-    }
-    self.nft.apply_ruleset(&batch.to_nftables()).await?;
+  async fn remove(&mut self, handle: &Self::Handle) {
+    self.remove_nft(handle).await;
     if let Some(rtnl) = &mut self.rtnl {
-      rtnl.del(handle).await?;
+      let _ = rtnl.del(handle).await;
       if rtnl.is_empty() {
         self.rtnl = None;
       }
     }
-    Ok(())
   }
 
   async fn process(&mut self) -> Result<()> {

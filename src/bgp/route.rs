@@ -2,7 +2,7 @@ use super::flow::Flowspec;
 use super::nlri::{NextHop, Nlri, NlriContent};
 use crate::kernel::{self, Kernel, KernelAdapter, KernelHandle};
 use crate::net::IpPrefix;
-use crate::util::{grace, MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
+use crate::util::{MaybeRc, BOLD, FG_BLUE_BOLD, FG_GREEN_BOLD, RESET};
 use either::Either;
 use itertools::Itertools;
 use log::{warn, Level, LevelFilter};
@@ -52,7 +52,7 @@ impl Routes {
             }
             Entry::Occupied(mut e) => {
               let (id, _) = e.insert((id, MaybeRc::Rc(info.clone())));
-              grace(self.kernel.remove(&id).await, "error removing old flowspec from kernel");
+              self.kernel.remove(&id).await;
             }
           }
         }
@@ -78,7 +78,7 @@ impl Routes {
     let mut flow = BTreeMap::new();
     swap(&mut flow, &mut self.flow);
     for (_, (handle, _)) in flow {
-      grace(self.kernel.remove(&handle).await, "error removing handle from kernel");
+      self.kernel.remove(&handle).await;
     }
   }
 
@@ -86,7 +86,7 @@ impl Routes {
     let Some((handle, _)) = self.flow.remove(&spec) else {
       return;
     };
-    grace(self.kernel.remove(&handle).await, "error removing handle from kernel");
+    self.kernel.remove(&handle).await;
   }
 
   pub async fn process(&mut self) -> kernel::Result<()> {

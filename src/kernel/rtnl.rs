@@ -117,11 +117,15 @@ impl<K: Kernel> RtNetlink<K> {
       .unwrap_or(self.args.init_table_id)
   }
 
+  // TODO: add reserve table id for prefix
+
+  // TODO: make all delete action infallible (ignore errors)
   pub async fn del(&mut self, id: &K::Handle) -> Result<()> {
     let Some((prefix, _, table_id, _)) = self.routes.remove(id) else {
       return Ok(());
     };
     self.del_route(table_id, prefix).await?;
+    // TODO: del_rule mark xxx lookup table xxx
 
     let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existent table??");
     prefixes.remove(&prefix);
@@ -142,6 +146,9 @@ impl<K: Kernel> RtNetlink<K> {
     Ok(())
   }
 
+  // TODO: no need to explicitly delete rule
+  // when a route is removed, its `from all fwmark xxx lookup xxx` should be
+  // removed as well.
   async fn del_rule(&self, table_id: u32) -> Result<()> {
     // TODO: add RuleMessageBuilder to rtnetlink crate
     let mut msg = RuleMessage::default();
@@ -236,7 +243,8 @@ impl<K: Kernel> RtNetlink<K> {
     handle: &Handle,
     iter: impl Iterator<Item = &mut (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
   ) -> Result<()> {
-    // TODO: remove route if next hop becomes unreachable
+    // TODO: ~~remove route~~ replace route with "unreachable" if next hop becomes
+    // unreachable
     for (prefix, next_hop, table_id, attrs) in iter {
       warn!("process {prefix}");
       let new_attrs = Self::get_route2(handle, *next_hop).await?;
@@ -254,6 +262,8 @@ impl<K: Kernel> RtNetlink<K> {
     Ok(())
   }
 
+  // TODO: if network unreachable then insert unreachable route
+  // could be replaced with regular ones once the link is ready in `process_*`
   async fn get_route(&self, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
     Self::get_route2(&self.handle, ip).await
   }
@@ -303,10 +313,12 @@ pub struct RtNetlinkArgs {
   pub route_scan_time: u64,
 
   /// Initial routing table ID.
-  ///
-  /// Table IDs are also used as fwmarks.
-  #[arg(long, value_name = "ID", default_value_t = 10000)]
+  #[arg(long, value_name = "ID", default_value_t = 0xffff0000)]
   pub init_table_id: u32,
+
+  /// Initial firewall mark.
+  #[arg(long, value_name = "MARK", default_value_t = 0xffff0000)]
+  pub init_fwmark: u32,
 
   /// Route rule priority as shown in `ip rule`.
   #[arg(long, value_name = "PRIO", default_value_t = 100)]

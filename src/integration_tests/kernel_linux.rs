@@ -68,37 +68,39 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
+  let table = 0xffff0000;
+  let fwmarks = [0xffff0000, 0xffff0001];
   let dummy_index = create_dummy_link(&handle, "10.128.128.254/24".parse()?).await?;
-  let (name, (_g1, bird, chans, _g2)) =
-    run_kernel_test(["flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }"])
-      .await?;
+  let (name, (_g1, mut bird, chans, _g2)) = run_kernel_test([
+    "flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
+    "flow4 { dst 172.21.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
+  ])
+  .await?;
 
   print_nft_chain(&name, &name).await?;
   print_ip_rule().await?;
-  print_ip_route(10000).await?;
+  print_ip_route(table).await?;
 
+  let nft_stmts = get_nft_stmts(&name, &name).await?;
   let ip_rules = get_ip_rule(&handle, IpVersion::V4).await?;
   let ip_routes = get_ip_route(&handle, IpVersion::V4, 10000).await?;
-  let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
-  drop(bird);
+  bird.kill().await?;
   remove_link(&handle, dummy_index).await?;
-
-  let table_index = 10000;
 
   assert_eq!(nft_stmts, [vec![
     prefix_stmt("daddr", "172.20.0.0/16".parse()?).unwrap(),
-    stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
+    stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(fwmarks[0]) }),
     ACCEPT,
   ]]);
 
-  let ip_rule_exp = make_ip_rule_mark(IpVersion::V4, 100, table_index, table_index);
+  let ip_rule_exp = make_ip_rule_mark(IpVersion::V4, 100, fwmarks[0], table);
   println!("> ip rule = {ip_rules:?}");
   println!("> exp = {ip_rule_exp:?}");
   assert!(ip_rules.contains(&ip_rule_exp));
 
   let mut ip_route_exp = RouteMessageBuilder::<IpAddr>::new()
-    .table_id(table_index)
+    .table_id(table)
     .destination_prefix("172.20.0.0".parse()?, 16)?
     .output_interface(dummy_index)
     .gateway("10.128.128.1".parse()?)?
