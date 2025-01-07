@@ -65,12 +65,15 @@ impl<K: Kernel> RtNetlink<K> {
         Afi::Ipv6 => IpPrefix::V6_ALL,
       });
 
-    let table_id = if let Some((table_id, prefixes)) =
+    let attrs = self.get_route(next_hop).await?.collect::<Vec<_>>();
+
+    // Create table first...
+    let (table_id, table_created) = if let Some((table_id, prefixes)) =
       (self.rules).iter_mut().find(|(_, v)| v.iter().all(|p| !p.overlaps(prefix)))
     {
       // there's a table whose content doesn't overlap with our prefix, we reuse it
       prefixes.insert(prefix);
-      *table_id
+      (*table_id, false)
     } else {
       let table_id = self.next_table_id();
       self.rules.insert(table_id, Some(prefix).into_iter().collect());
@@ -80,19 +83,27 @@ impl<K: Kernel> RtNetlink<K> {
         .action(RuleAction::ToTable)
         .table_id(table_id)
         .priority(self.args.rt_rule_priority);
-      try_join!(rule_add.clone().v4().execute(), rule_add.v6().execute())?;
 
-      table_id
+      // TODO: separate v4 and v6 tables
+      try_join!(rule_add.clone().v4().execute(), rule_add.v6().execute())?;
+      (table_id, true)
     };
 
-    let attrs = self.get_route(next_hop).await?.collect::<Vec<_>>();
+    // ...and then add route to the table...
     let mut msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
     msg.attributes.extend(attrs.iter().cloned());
-    self.handle.route().add(msg).execute().await?;
+    if let Err(error) = self.handle.route().add(msg).execute().await {
+      if table_created {
+        let _ = self.del_rule(table_id).await;
+      }
+      return Err(error.into());
+    }
+
+    // ...and finally insert to our own database
     self.routes.insert(id, (prefix, next_hop, table_id, attrs));
 
     Ok(table_id)
