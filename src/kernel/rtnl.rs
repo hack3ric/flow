@@ -65,7 +65,7 @@ impl<K: Kernel> RtNetlink<K> {
         Afi::Ipv6 => IpPrefix::V6_ALL,
       });
 
-    let attrs = self.get_route(next_hop).await?.collect::<Vec<_>>();
+    let attrs = self.get_route(next_hop).await?;
 
     // Create table first...
     let (table_id, table_created) = if let Some((table_id, prefixes)) =
@@ -239,7 +239,7 @@ impl<K: Kernel> RtNetlink<K> {
     // TODO: remove route if next hop becomes unreachable
     for (prefix, next_hop, table_id, attrs) in iter {
       warn!("process {prefix}");
-      let new_attrs = Self::get_route2(handle, *next_hop).await?.collect::<Vec<_>>();
+      let new_attrs = Self::get_route2(handle, *next_hop).await?;
       if *attrs != new_attrs {
         *attrs = new_attrs.clone();
         let mut msg = RouteMessageBuilder::<IpAddr>::new()
@@ -254,10 +254,10 @@ impl<K: Kernel> RtNetlink<K> {
     Ok(())
   }
 
-  async fn get_route(&self, ip: IpAddr) -> Result<impl Iterator<Item = RouteAttribute>> {
+  async fn get_route(&self, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
     Self::get_route2(&self.handle, ip).await
   }
-  async fn get_route2(handle: &Handle, ip: IpAddr) -> Result<impl Iterator<Item = RouteAttribute>> {
+  async fn get_route2(handle: &Handle, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })
       .expect("destination prefix should be valid")
@@ -266,8 +266,20 @@ impl<K: Kernel> RtNetlink<K> {
     let Some(rt) = msg.try_next().await? else {
       unreachable!();
     };
-    let attrs = rt.attributes.into_iter().filter(|x| [RTA_GATEWAY, RTA_OIF].contains(&x.kind()));
-    // TODO: if no gateway then use dest
+    let mut has_gateway = false;
+    let attrs = rt.attributes.into_iter().filter(|x| {
+      let kind = x.kind();
+      if kind == RTA_GATEWAY {
+        has_gateway = true;
+        true
+      } else {
+        kind == RTA_OIF
+      }
+    });
+    let mut attrs: Vec<_> = attrs.collect();
+    if !has_gateway {
+      attrs.push(RouteAttribute::Gateway(ip.into()));
+    }
     Ok(attrs)
   }
 
