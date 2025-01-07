@@ -1,10 +1,11 @@
 use crate::net::IpWithPrefix;
 use futures::TryStreamExt;
 use nix::net::if_::if_nametoindex;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use rtnetlink::packet_route::link::InfoKind;
-use rtnetlink::packet_route::route::{RouteMessage, RouteProtocol};
-use rtnetlink::packet_route::rule::RuleAttribute::{self, *};
-use rtnetlink::packet_route::rule::{RuleAction, RuleHeader, RuleMessage};
+use rtnetlink::packet_route::route::{RouteAttribute, RouteMessage, RouteProtocol};
+use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleHeader, RuleMessage};
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_utils::nla::Nla;
 use rtnetlink::packet_utils::Emitable;
@@ -12,18 +13,29 @@ use rtnetlink::{Handle, IpVersion, LinkMessageBuilder, LinkUnspec, RouteMessageB
 use std::cmp::Ordering;
 use std::net::IpAddr;
 
-pub async fn create_dummy_link(handle: &Handle, name: &str, addr: IpWithPrefix) -> anyhow::Result<()> {
+pub async fn create_dummy_link(handle: &Handle, addr: IpWithPrefix) -> anyhow::Result<u32> {
+  let name: String = "dummy_"
+    .chars()
+    .chain(rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from))
+    .collect();
   let link_msg = LinkMessageBuilder::<LinkUnspec>::new_with_info_kind(InfoKind::Dummy)
-    .name(name.into())
+    .name(name.clone())
     .up()
     .build();
   handle.link().add(link_msg).execute().await?;
-  let index = if_nametoindex(name)?;
+  let index = if_nametoindex(&*name)?;
   handle.address().add(index, addr.addr(), addr.prefix_len()).execute().await?;
+  Ok(index)
+}
+
+pub async fn remove_link(handle: &Handle, index: u32) -> anyhow::Result<()> {
+  handle.link().del(index).execute().await?;
   Ok(())
 }
 
 pub async fn get_ip_rule(handle: &Handle, ip_version: IpVersion) -> anyhow::Result<Vec<RuleMessage>> {
+  use RuleAttribute::*;
+
   let mut buf = Vec::new();
   let mut stream = handle.rule().get(ip_version).execute();
   while let Some(mut msg) = stream.try_next().await? {
@@ -47,6 +59,8 @@ pub async fn get_ip_rule(handle: &Handle, ip_version: IpVersion) -> anyhow::Resu
 }
 
 pub fn make_ip_rule_mark(ip_version: IpVersion, prio: u32, mark: u32, table: u32) -> RuleMessage {
+  use RuleAttribute::*;
+
   let mut msg = RuleMessage::default();
   msg.header = RuleHeader {
     family: match ip_version {
@@ -86,9 +100,39 @@ pub async fn get_ip_route(handle: &Handle, ip_version: IpVersion, table: u32) ->
     IpVersion::V6 => AddressFamily::Inet6,
   };
   let mut buf = Vec::new();
-  let mut stream = handle.route().get(msg).dump(false).execute();
-  while let Some(msg) = stream.try_next().await? {
-    buf.push(msg);
+  let mut stream = handle.route().get(msg).execute();
+  while let Some(mut msg) = stream.try_next().await? {
+    if msg.header.table as u32 == table || msg.attributes.contains(&RouteAttribute::Table(table)) {
+      route_msg_normalize(&mut msg);
+      buf.push(msg);
+    }
   }
   Ok(buf)
+}
+
+pub fn route_msg_normalize(msg: &mut RouteMessage) {
+  for attr in &msg.attributes {
+    if let RouteAttribute::Table(table) = attr {
+      if *table > 0xff {
+        msg.header.table = 0;
+      }
+    }
+  }
+  msg.attributes.sort_by(route_attr_sort);
+}
+
+fn route_attr_sort(a: &RouteAttribute, b: &RouteAttribute) -> Ordering {
+  match a.kind().cmp(&b.kind()) {
+    Ordering::Equal => {}
+    ord => return ord,
+  }
+  let (al, bl) = (a.value_len(), b.value_len());
+  match al.cmp(&bl) {
+    Ordering::Equal => {}
+    ord => return ord,
+  }
+  let (mut abuf, mut bbuf) = (vec![0; al], vec![0; bl]);
+  a.emit(&mut abuf);
+  b.emit(&mut bbuf);
+  abuf.cmp(&bbuf)
 }
