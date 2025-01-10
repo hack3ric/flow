@@ -82,13 +82,17 @@ impl Kernel for Linux {
 
     let handle: Self::Handle = (result.objects.iter())
       .filter_map(|x| {
-        if let NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(rule))) = x {
+        if let NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(rule)))
+        | NfObject::CmdObject(NfCmd::Insert(NfListObject::Rule(rule))) = x
+        {
           Some(rule.handle.unwrap())
         } else {
           None
         }
       })
       .collect();
+
+    debug_assert_eq!(nftables.objects.len(), handle.len());
 
     if let Some((next_hop, table_id)) = rt_info {
       let rtnl = self.rtnl.as_mut().expect("RtNetlink should be initialized");
