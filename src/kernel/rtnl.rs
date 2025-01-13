@@ -1,6 +1,6 @@
 use super::{Kernel, Result};
-use crate::bgp::flow::{Component, ComponentKind, Flowspec};
-use crate::net::{Afi, IpPrefix};
+use crate::bgp::flow::Flowspec;
+use crate::net::IpPrefix;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{try_join, StreamExt, TryStreamExt};
@@ -51,20 +51,7 @@ impl<K: Kernel> RtNetlink<K> {
   }
 
   pub async fn add(&mut self, id: K::Handle, spec: &Flowspec, next_hop: IpAddr) -> Result<u32> {
-    let prefix = spec
-      .component_set()
-      .get(&ComponentKind::DstPrefix)
-      .and_then(|x| {
-        let Component::DstPrefix(pat, offset) = x.0 else {
-          unreachable!();
-        };
-        (offset == 0).then_some(pat)
-      })
-      .unwrap_or_else(|| match spec.afi() {
-        Afi::Ipv4 => IpPrefix::V4_ALL,
-        Afi::Ipv6 => IpPrefix::V6_ALL,
-      });
-
+    let prefix = spec.dst_prefix();
     let attrs = self.get_route(next_hop).await?;
 
     // Create table first...
@@ -75,7 +62,7 @@ impl<K: Kernel> RtNetlink<K> {
       prefixes.insert(prefix);
       (*table_id, false)
     } else {
-      let table_id = self.next_table_id();
+      let table_id = self.next_table();
       self.rules.insert(table_id, Some(prefix).into_iter().collect());
 
       let rule_add = (self.handle.rule().add())
@@ -109,12 +96,19 @@ impl<K: Kernel> RtNetlink<K> {
     Ok(table_id)
   }
 
-  pub fn next_table_id(&self) -> u32 {
-    self
-      .rules
+  pub fn next_table(&self) -> u32 {
+    (self.rules)
       .last_key_value()
       .map(|(k, _)| *k + 1)
       .unwrap_or(self.args.init_table_id)
+  }
+
+  pub fn next_table_for(&self, prefix: IpPrefix) -> u32 {
+    // TODO: room for optimization
+    (self.rules.iter())
+      .find(|(_, v)| v.iter().all(|p| !p.overlaps(prefix)))
+      .map(|(k, _)| *k)
+      .unwrap_or_else(|| self.next_table())
   }
 
   pub async fn del(&mut self, id: &K::Handle) -> Result<()> {

@@ -46,7 +46,7 @@ impl Kernel for Linux {
   ) -> Result<Self::Handle> {
     let mut total = 1usize;
     let (info_stmts, rt_info) = info
-      .to_nft_stmts(spec.afi(), &mut self.rtnl, &self.rtnl_args)
+      .to_nft_stmts(spec.afi(), spec.dst_prefix(), &mut self.rtnl, &self.rtnl_args)
       .map(|(a, b)| (Some(a), b))
       .unwrap_or_default();
     let base = spec

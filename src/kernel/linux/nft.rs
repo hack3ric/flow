@@ -291,6 +291,7 @@ impl RouteInfo<'_> {
   pub(super) fn to_nft_stmts(
     &self,
     afi: Afi,
+    prefix: IpPrefix,
     rtnl: &mut Option<RtNetlink<Linux>>,
     rtnl_args: &RtNetlinkArgs,
   ) -> Option<(StatementBranch<'static>, Option<(IpAddr, u32)>)> {
@@ -299,21 +300,20 @@ impl RouteInfo<'_> {
       .chain(self.ipv6_ext_comm.iter().copied().filter_map(Ipv6ExtCommunity::action))
       .map(|x| (x.kind(), x))
       .collect::<BTreeMap<_, _>>();
-    let extract_terminal = |x| {
-      let &TrafficFilterAction::TrafficAction { terminal, .. } = x else {
-        unreachable!()
-      };
-      terminal
-    };
     let mut terminal = set
       .get(&TrafficFilterActionKind::TrafficAction)
-      .map(extract_terminal)
+      .map(|x| {
+        let &TrafficFilterAction::TrafficAction { terminal, .. } = x else {
+          unreachable!()
+        };
+        terminal
+      })
       .unwrap_or(true);
     let mut last_term = false;
     let mut rt_info = None;
     let mut result = set
       .into_values()
-      .map(move |x| x.to_nft_stmts(afi, rtnl, rtnl_args))
+      .map(move |x| x.to_nft_stmts(afi, prefix, rtnl, rtnl_args))
       .map(|(x, r, term)| {
         term.then(|| terminal = false);
         rt_info = r;
@@ -338,6 +338,7 @@ impl TrafficFilterAction {
   fn to_nft_stmts(
     self,
     afi: Afi,
+    prefix: IpPrefix,
     rtnl: &mut Option<RtNetlink<Linux>>,
     rtnl_args: &RtNetlinkArgs,
   ) -> (StatementBlock<'static>, Option<(IpAddr, u32)>, bool) {
@@ -366,7 +367,7 @@ impl TrafficFilterAction {
           let new = RtNetlink::new(rtnl_args.clone()).unwrap();
           rtnl.get_or_insert(new)
         };
-        let table_id = rtnl.next_table_id();
+        let table_id = rtnl.next_table_for(prefix);
         let result = smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
           key: make_meta(expr::MetaKey::Mark),
           value: NUM(table_id),

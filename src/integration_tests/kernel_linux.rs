@@ -69,9 +69,11 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   tokio::spawn(conn);
 
   let dummy_index = create_dummy_link(&handle, "10.128.128.254/24".parse()?).await?;
-  let (name, (_g1, bird, chans, _g2)) =
-    run_kernel_test(["flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }"])
-      .await?;
+  let (name, (_g1, bird, chans, _g2)) = run_kernel_test([
+    "flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
+    "flow4 { dst 172.21.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
+  ])
+  .await?;
 
   print_nft_chain(&name, &name).await?;
   print_ip_rule().await?;

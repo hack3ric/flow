@@ -58,6 +58,21 @@ impl Flowspec {
     self.afi == Afi::Ipv6
   }
 
+  pub fn dst_prefix(&self) -> IpPrefix {
+    (self.inner)
+      .get(&ComponentKind::DstPrefix)
+      .and_then(|x| {
+        let Component::DstPrefix(pat, offset) = x.0 else {
+          unreachable!();
+        };
+        (offset == 0).then_some(pat)
+      })
+      .unwrap_or_else(|| match self.afi {
+        Afi::Ipv4 => IpPrefix::V4_ALL,
+        Afi::Ipv6 => IpPrefix::V6_ALL,
+      })
+  }
+
   pub fn write(&self, buf: &mut Vec<u8>) {
     let mut buf2 = Vec::new();
     self.inner.iter().for_each(|c| c.0.write(&mut buf2));
