@@ -67,7 +67,7 @@ impl Flowspec {
         };
         (offset == 0).then_some(pat)
       })
-      .unwrap_or_else(|| match self.afi {
+      .unwrap_or(match self.afi {
         Afi::Ipv4 => IpPrefix::V4_ALL,
         Afi::Ipv6 => IpPrefix::V6_ALL,
       })
