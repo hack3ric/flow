@@ -88,25 +88,40 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
 
   let table_index = 10000;
 
-  assert_eq!(nft_stmts, [vec![
-    prefix_stmt("daddr", "172.20.0.0/16".parse()?).unwrap(),
-    stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
-    ACCEPT,
-  ]]);
+  assert_eq!(nft_stmts, [
+    vec![
+      prefix_stmt("daddr", "172.20.0.0/16".parse()?).unwrap(),
+      stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
+      ACCEPT,
+    ],
+    vec![
+      prefix_stmt("daddr", "172.21.0.0/16".parse()?).unwrap(),
+      stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
+      ACCEPT,
+    ]
+  ]);
 
   let ip_rule_exp = make_ip_rule_mark(IpVersion::V4, 100, table_index, table_index);
   println!("> ip rule = {ip_rules:?}");
   println!("> exp = {ip_rule_exp:?}");
   assert!(ip_rules.contains(&ip_rule_exp));
 
-  let mut ip_route_exp = RouteMessageBuilder::<IpAddr>::new()
-    .table_id(table_index)
-    .destination_prefix("172.20.0.0".parse()?, 16)?
-    .output_interface(dummy_index)
-    .gateway("10.128.128.1".parse()?)?
-    .build();
-  route_msg_normalize(&mut ip_route_exp);
-  assert_eq!(ip_routes, [ip_route_exp]);
+  let mut ip_routes_exp = [
+    RouteMessageBuilder::<IpAddr>::new()
+      .table_id(table_index)
+      .destination_prefix("172.20.0.0".parse()?, 16)?
+      .output_interface(dummy_index)
+      .gateway("10.128.128.1".parse()?)?
+      .build(),
+    RouteMessageBuilder::<IpAddr>::new()
+      .table_id(table_index)
+      .destination_prefix("172.21.0.0".parse()?, 16)?
+      .output_interface(dummy_index)
+      .gateway("10.128.128.1".parse()?)?
+      .build(),
+  ];
+  ip_routes_exp.iter_mut().for_each(route_msg_normalize);
+  assert_eq!(ip_routes, ip_routes_exp);
 
   Ok(())
 }
