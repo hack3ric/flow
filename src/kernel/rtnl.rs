@@ -1,6 +1,7 @@
 use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
 use crate::net::IpPrefix;
+use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{try_join, StreamExt, TryStreamExt};
@@ -111,32 +112,30 @@ impl<K: Kernel> RtNetlink<K> {
       .unwrap_or_else(|| self.next_table())
   }
 
-  pub async fn del(&mut self, id: &K::Handle) -> Result<()> {
+  pub async fn del(&mut self, id: &K::Handle) {
     let Some((prefix, _, table_id, _)) = self.routes.remove(id) else {
-      return Ok(());
+      return;
     };
-    self.del_route(table_id, prefix).await?;
+    self.del_route(table_id, prefix).await;
 
     let prefixes = self.rules.get_mut(&table_id).expect("route contains non-existent table??");
     prefixes.remove(&prefix);
     if prefixes.is_empty() {
       self.rules.remove(&table_id);
-      self.del_rule(table_id).await?;
+      self.del_rule(table_id).await;
     }
-    Ok(())
   }
 
-  async fn del_route(&self, table_id: u32, prefix: IpPrefix) -> Result<()> {
+  async fn del_route(&self, table_id: u32, prefix: IpPrefix) {
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
-    self.handle.route().del(msg).execute().await?;
-    Ok(())
+    grace(self.handle.route().del(msg).execute().await, "failed to delete route");
   }
 
-  async fn del_rule(&self, table_id: u32) -> Result<()> {
+  async fn del_rule(&self, table_id: u32) {
     // TODO: add RuleMessageBuilder to rtnetlink crate
     let mut msg = RuleMessage::default();
     msg.header.family = AddressFamily::Inet;
@@ -147,10 +146,15 @@ impl<K: Kernel> RtNetlink<K> {
     } else {
       msg.header.table = table_id as u8;
     }
-    self.handle.rule().del(msg.clone()).execute().await?;
+    grace(
+      self.handle.rule().del(msg.clone()).execute().await,
+      "failed to delete IPv4 rule",
+    );
     msg.header.family = AddressFamily::Inet6;
-    self.handle.rule().del(msg).execute().await?;
-    Ok(())
+    grace(
+      self.handle.rule().del(msg).execute().await,
+      "failed to delete IPv6 rule",
+    );
   }
 
   // route & addr change: check if next hop in changed prefix

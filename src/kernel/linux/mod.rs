@@ -4,6 +4,7 @@ use super::rtnl::{RtNetlink, RtNetlinkArgs};
 use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
+use crate::util::grace;
 use clap::Args;
 use futures::future::OptionFuture;
 use futures::join;
@@ -103,19 +104,21 @@ impl Kernel for Linux {
     Ok(handle)
   }
 
-  async fn remove(&mut self, handle: &Self::Handle) -> Result<()> {
+  async fn remove(&mut self, handle: &Self::Handle) {
     let mut batch = Batch::new();
     for h in handle.iter().copied() {
       batch.delete(self.nft.make_rule_handle(h));
     }
-    self.nft.apply_ruleset(&batch.to_nftables()).await?;
+    grace(
+      self.nft.apply_ruleset(&batch.to_nftables()).await,
+      "failed to remove nftables rules",
+    );
     if let Some(rtnl) = &mut self.rtnl {
-      rtnl.del(handle).await?;
+      rtnl.del(handle).await;
       if rtnl.is_empty() {
         self.rtnl = None;
       }
     }
-    Ok(())
   }
 
   async fn process(&mut self) -> Result<()> {

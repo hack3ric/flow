@@ -32,7 +32,7 @@ pub trait Kernel: Sized {
   ) -> impl Future<Output = Result<Self::Handle>>;
 
   /// Remove a flowspec from kernel using previously returned handle.
-  fn remove(&mut self, handle: &Self::Handle) -> impl Future<Output = Result<()>>;
+  fn remove(&mut self, handle: &Self::Handle) -> impl Future<Output = ()>;
 
   /// Process notifications from kernel, timers, etc.
   fn process(&mut self) -> impl Future<Output = Result<()>> {
@@ -81,13 +81,13 @@ impl Kernel for KernelAdapter {
     }
   }
 
-  async fn remove(&mut self, handle: &Self::Handle) -> Result<()> {
+  async fn remove(&mut self, handle: &Self::Handle) {
     match (self, handle) {
-      (Self::Noop, KernelHandle::Noop) => Ok(()),
+      (Self::Noop, KernelHandle::Noop) => {}
       #[cfg(linux)]
       (Self::Linux(linux), KernelHandle::Linux(handle)) => linux.remove(handle).await,
       #[cfg(linux)]
-      _ => Err(Error::HandleMismatch),
+      _ => panic!("handle mismatch"),
     }
   }
 
@@ -140,9 +140,6 @@ pub enum Error {
 
   #[error("flowspec matches nothing")]
   MatchNothing,
-
-  #[error("kernel handle mismatch")]
-  HandleMismatch,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
