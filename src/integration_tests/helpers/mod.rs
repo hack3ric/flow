@@ -1,5 +1,6 @@
 pub mod bird;
 pub mod cli;
+pub mod exabgp;
 pub mod kernel;
 
 use async_tempfile::TempFile;

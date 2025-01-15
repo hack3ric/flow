@@ -65,3 +65,15 @@ protocol bgp flow_test {
   flow4 { table myflow4; import none; export all; };
   flow6 { table myflow6; import none; export all; };
 }";
+
+const EXABGP_CONFIG_1: &str = "\
+neighbor ::1 {
+  router-id 10.234.56.78;
+  local-address ::1;
+  local-as 65000;
+  peer-as 65000;
+
+  flow {
+    @@FLOWS@@
+  }
+}";
