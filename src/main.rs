@@ -109,7 +109,10 @@ async fn run(
         result = bgp.process() => match result {
           Ok(()) => {}
           Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
+          #[cfg(not(test))]
           Err(e @ (bgp::Error::Notification(_) | bgp::Error::Remote(_))) => error!("BGP error: {e}"),
+          #[cfg(test)]
+          Err(bgp::Error::Notification(_) | bgp::Error::Remote(_)) => result.context("BGP error")?,
           Err(_) => result.context("failed to process BGP")?,
         },
         result = ipc.accept() => {
