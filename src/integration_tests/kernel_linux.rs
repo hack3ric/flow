@@ -69,7 +69,7 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
-  let table_index = 10000;
+  let table_index = 0xffff0000;
   let dummy_index = create_dummy_link(&handle, "10.128.128.254/24".parse()?).await?;
   let (name, (_g1, bird, chans, _g2)) = run_kernel_test([
     "flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
@@ -131,7 +131,7 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
-  let table_index = 10000;
+  let table_index = 0xffff0000;
   let dummy_index = create_dummy_link(&handle, "fc64::1/64".parse()?).await?;
   let (name, (_g1, exabgp, chans, _g2)) = run_kernel_test_exabgp([
     "match { destination fc00::/16; } then { redirect-to-nexthop-ietf fc64::ffff; }",
