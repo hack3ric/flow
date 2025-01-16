@@ -69,6 +69,7 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
+  let table_index = 10000;
   let dummy_index = create_dummy_link(&handle, "10.128.128.254/24".parse()?).await?;
   let (name, (_g1, bird, chans, _g2)) = run_kernel_test([
     "flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
@@ -78,16 +79,14 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
 
   print_nft_chain(&name, &name).await?;
   print_ip_rule(false).await?;
-  print_ip_route(false, 10000).await?;
+  print_ip_route(false, table_index).await?;
 
   let ip_rules = get_ip_rule(&handle, IpVersion::V4).await?;
-  let ip_routes = get_ip_route(&handle, IpVersion::V4, 10000).await?;
+  let ip_routes = get_ip_route(&handle, IpVersion::V4, table_index).await?;
   let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
   drop(bird);
   remove_link(&handle, dummy_index).await?;
-
-  let table_index = 10000;
 
   assert_eq!(nft_stmts, [
     vec![
@@ -132,6 +131,7 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
+  let table_index = 10000;
   let dummy_index = create_dummy_link(&handle, "fc64::1/64".parse()?).await?;
   let (name, (_g1, exabgp, chans, _g2)) = run_kernel_test_exabgp([
     "match { destination fc00::/16; } then { redirect-to-nexthop-ietf fc64::ffff; }",
@@ -141,16 +141,14 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
 
   print_nft_chain(&name, &name).await?;
   print_ip_rule(true).await?;
-  print_ip_route(true, 10000).await?;
+  print_ip_route(true, table_index).await?;
 
   let ip_rules = get_ip_rule(&handle, IpVersion::V6).await?;
-  let ip_routes = get_ip_route(&handle, IpVersion::V6, 10000).await?;
+  let ip_routes = get_ip_route(&handle, IpVersion::V6, table_index).await?;
   let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
   drop(exabgp);
   remove_link(&handle, dummy_index).await?;
-
-  let table_index = 10000;
 
   assert_eq!(nft_stmts, [
     vec![
