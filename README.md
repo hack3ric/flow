@@ -117,10 +117,10 @@ Or, skip integration tests and run only unit tests:
 $ cargo test -- --skip integration_tests
 ```
 
-BIRD path can be specified via the `FLOW_BIRD_PATH` environment variable:
+BIRD and ExaBGP path can be specified via the `FLOW_BIRD_PATH` environment variable:
 
 ```console
-$ FLOW_BIRD_PATH=/path/to/my/bird cargo <...options> test
+$ FLOW_BIRD_PATH=/path/to/my/bird FLOW_EXABGP_PATH=/path/to/my/exabgp cargo <...options> test
 ```
 
 ## Future Work
