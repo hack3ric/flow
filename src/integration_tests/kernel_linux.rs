@@ -189,6 +189,7 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
 }
 
 // TODO: test IPv4 with IPv6 nexthop
+// TODO: test IPv6 offset
 
 async fn run_kernel_test(flows: impl IntoIterator<Item = &str>) -> anyhow::Result<(String, CliGuard)> {
   ensure_bird_2();

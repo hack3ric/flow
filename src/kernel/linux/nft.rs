@@ -465,7 +465,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
     STRING("ipv6".into()),
   ));
 
-  let addr_offset = if src { 192 } else { 64 };
+  let addr_offset = if src { 64 } else { 192 };
   let start_32bit = offset.next_multiple_of(32);
   let pre_rem = start_32bit - offset;
   let end_32bit = pattern.len().prev_multiple_of(&32); // this uses num::Integer, not std
@@ -500,7 +500,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
       ));
     }
   } else {
-    let num = ip.to_bits() >> (128 - offset);
+    let num = ip.to_bits() >> (128 - pattern.len());
     buf.push(make_match(
       stmt::Operator::EQ,
       make_payload_raw(
