@@ -19,7 +19,6 @@ use ipc::{get_sock_path, IpcServer};
 use itertools::Itertools;
 use log::{error, info, warn, Level, LevelFilter, Record};
 use std::fs::{create_dir_all, File};
-use std::io::ErrorKind::UnexpectedEof;
 use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -108,11 +107,10 @@ async fn run(
         }
         result = bgp.process() => match result {
           Ok(()) => {}
-          Err(bgp::Error::Io(error)) if error.kind() == UnexpectedEof => warn!("remote closed"),
+          #[cfg(not(test))]
+          Err(bgp::Error::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => warn!("remote closed"),
           #[cfg(not(test))]
           Err(e @ (bgp::Error::Notification(_) | bgp::Error::Remote(_))) => error!("BGP error: {e}"),
-          #[cfg(test)]
-          Err(bgp::Error::Notification(_) | bgp::Error::Remote(_)) => result.context("BGP error")?,
           Err(_) => result.context("failed to process BGP")?,
         },
         result = ipc.accept() => {
