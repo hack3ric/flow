@@ -14,6 +14,8 @@ It doesn't:
 - initiate BGP session actively;
 - currently support VRF and VPN routes.
 
+**Flow has yet to be tested thoroughly and not suitable for production for now. Use and test at your own risk!**
+
 ## Implemented RFCs/Drafts
 
 - [RFC 8955](https://www.rfc-editor.org/rfc/rfc8955.html): Dissemination of Flow Specification Rules
