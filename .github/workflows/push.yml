@@ -37,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: |
-          sudo apt install libreadline-dev
+          sudo apt install exabgp libreadline-dev
           wget https://bird.network.cz/download/bird-3.0.0.tar.gz
           tar xf bird-3.0.0.tar.gz
           cd bird-3.0.0
