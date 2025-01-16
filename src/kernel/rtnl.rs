@@ -305,7 +305,7 @@ pub struct RtNetlinkArgs {
   /// Initial routing table ID.
   ///
   /// Table IDs are also used as fwmarks.
-  #[arg(long, value_name = "ID", default_value_t = 0xffffff00)]
+  #[arg(long, value_name = "ID", default_value_t = 0xffff0000)]
   pub init_table_id: u32,
 
   /// Route rule priority as shown in `ip rule`.
