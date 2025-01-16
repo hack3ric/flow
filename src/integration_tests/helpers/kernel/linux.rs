@@ -12,14 +12,19 @@ pub async fn print_nft_chain(table: &str, chain: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-pub async fn print_ip_rule() -> anyhow::Result<()> {
-  let output = tokio::process::Command::new("ip").arg("rule").output().await?;
+pub async fn print_ip_rule(v6: bool) -> anyhow::Result<()> {
+  let output = tokio::process::Command::new("ip")
+    .arg(if v6 { "-6" } else { "-4" })
+    .arg("rule")
+    .output()
+    .await?;
   println!("{}", String::from_utf8(output.stdout)?);
   Ok(())
 }
 
-pub async fn print_ip_route(table: u32) -> anyhow::Result<()> {
+pub async fn print_ip_route(v6: bool, table: u32) -> anyhow::Result<()> {
   let output = tokio::process::Command::new("ip")
+    .arg(if v6 { "-6" } else { "-4" })
     .args(["route", "show", "table", &table.to_string()])
     .output()
     .await?;

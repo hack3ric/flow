@@ -95,7 +95,7 @@ $ cargo xtask gen
 
 ## Running Tests
 
-Intergration tests involve exchanging information with BIRD and modifying kernel network interface. For example, on Linux, install BIRD (version 2.x or above) and use [`unshare(1)`](https://www.man7.org/linux/man-pages/man1/unshare.1.html) to run the full sets of tests:
+Intergration tests involve exchanging information with BGP daemons and modifying kernel network interface. For example, on Linux, install BIRD (>2.x), ExaBGP (>4.x) and use [`unshare(1)`](https://www.man7.org/linux/man-pages/man1/unshare.1.html) to run the full sets of tests:
 
 ```console
 $ cargo xtask unshare test  # shortcut for:

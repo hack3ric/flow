@@ -18,35 +18,33 @@ pub type CliGuard = (
 );
 
 pub async fn run_cli_with_bird(mut cli_opt: Cli, bird_conf: &str) -> anyhow::Result<CliGuard> {
-  let bird_conf_file = str_to_file(bird_conf.as_bytes()).await?;
+  let conf_file = str_to_file(bird_conf.as_bytes()).await?;
 
   let sock_dir = TempDir::new().await?;
   cli_opt.run_dir = sock_dir.as_ref().into();
-  let bird = run_bird(bird_conf_file.file_path(), sock_dir.join("bird.sock")).await?;
+  let bird = run_bird(conf_file.file_path(), sock_dir.join("bird.sock")).await?;
 
-  let (event_tx, event_rx) = mpsc::channel(127);
-  let (close_tx, close_rx) = oneshot::channel();
-  let cli = tokio::task::spawn_local(async {
-    let exit_code = cli_entry(cli_opt, event_tx, close_rx).await;
-    anyhow::Ok(exit_code)
-  });
-  Ok((cli, bird, (event_rx, close_tx), (bird_conf_file, sock_dir)))
+  let (cli, event, close) = run_cli(cli_opt);
+  Ok((cli, bird, (event, close), (conf_file, sock_dir)))
 }
 
 pub async fn run_cli_with_exabgp(mut cli_opt: Cli, exabgp_conf: &str, port: u16) -> anyhow::Result<CliGuard> {
-  let exabgp_conf_file = str_to_file(exabgp_conf.as_bytes()).await?;
-
+  let conf_file = str_to_file(exabgp_conf.as_bytes()).await?;
   let sock_dir = TempDir::new().await?;
   cli_opt.run_dir = sock_dir.as_ref().into();
-  let bird = run_exabgp(exabgp_conf_file.file_path(), port).await?;
+  let daemon = run_exabgp(conf_file.file_path(), port).await?;
+  let (cli, event, close) = run_cli(cli_opt);
+  Ok((cli, daemon, (event, close), (conf_file, sock_dir)))
+}
 
+fn run_cli(cli_opt: Cli) -> (CliChild, mpsc::Receiver<TestEvent>, oneshot::Sender<()>) {
   let (event_tx, event_rx) = mpsc::channel(127);
   let (close_tx, close_rx) = oneshot::channel();
   let cli = tokio::task::spawn_local(async {
     let exit_code = cli_entry(cli_opt, event_tx, close_rx).await;
     anyhow::Ok(exit_code)
   });
-  Ok((cli, bird, (event_rx, close_tx), (exabgp_conf_file, sock_dir)))
+  (cli, event_rx, close_tx)
 }
 
 pub async fn close_cli(chans: (mpsc::Receiver<TestEvent>, oneshot::Sender<()>)) {

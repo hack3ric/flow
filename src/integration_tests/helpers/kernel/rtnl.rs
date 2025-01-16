@@ -4,7 +4,7 @@ use nix::net::if_::if_nametoindex;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use rtnetlink::packet_route::link::InfoKind;
-use rtnetlink::packet_route::route::{RouteAttribute, RouteMessage, RouteProtocol};
+use rtnetlink::packet_route::route::{RouteAttribute, RouteMessage, RoutePreference, RouteProtocol};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleHeader, RuleMessage};
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_utils::nla::Nla;
@@ -111,13 +111,18 @@ pub async fn get_ip_route(handle: &Handle, ip_version: IpVersion, table: u32) ->
 }
 
 pub fn route_msg_normalize(msg: &mut RouteMessage) {
-  for attr in &msg.attributes {
-    if let RouteAttribute::Table(table) = attr {
+  use RouteAttribute::*;
+  msg.attributes.retain(|attr| match attr {
+    Table(table) => {
       if *table > 0xff {
         msg.header.table = 0;
       }
+      true
     }
-  }
+    CacheInfo(_) => false, // TODO: match all zero on non-exhaustive struct
+    Priority(1024) | Preference(RoutePreference::Medium) => false,
+    _ => true,
+  });
   msg.attributes.sort_by(route_attr_sort);
 }
 
