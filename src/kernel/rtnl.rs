@@ -86,7 +86,8 @@ impl<K: Kernel> RtNetlink<K> {
     msg.attributes.extend(attrs.iter().cloned());
     if let Err(error) = self.handle.route().add(msg).execute().await {
       if table_created {
-        let _ = self.del_rule(table_id).await;
+        self.rules.remove(&table_id);
+        self.del_rule(table_id).await;
       }
       return Err(error.into());
     }
@@ -135,6 +136,7 @@ impl<K: Kernel> RtNetlink<K> {
     grace(self.handle.route().del(msg).execute().await, "failed to delete route");
   }
 
+  /// Deletes kernel `ip rule`. `self.rules` remains unchanged.
   async fn del_rule(&self, table_id: u32) {
     // TODO: add RuleMessageBuilder to rtnetlink crate
     let mut msg = RuleMessage::default();
@@ -283,9 +285,9 @@ impl<K: Kernel> RtNetlink<K> {
 
   pub async fn terminate(self) {
     for (table_id, prefixes) in &self.rules {
-      _ = self.del_rule(*table_id).await;
+      self.del_rule(*table_id).await;
       for prefix in prefixes {
-        _ = self.del_route(*table_id, *prefix).await;
+        self.del_route(*table_id, *prefix).await;
       }
     }
   }

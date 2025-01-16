@@ -4,7 +4,7 @@ use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilter
 use crate::kernel::rtnl::{RtNetlink, RtNetlinkArgs};
 use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
-use crate::util::{Intersect, TruthTable};
+use crate::util::{grace, Intersect, TruthTable};
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number as NUM, String as STRING};
 use nftables::helper::{
@@ -82,16 +82,6 @@ impl Nftables {
     })
   }
 
-  pub fn make_rule_handle(&self, handle: u32) -> schema::NfListObject {
-    schema::NfListObject::Rule(schema::Rule {
-      family: types::NfFamily::INet,
-      table: self.table.clone(),
-      chain: self.chain.clone(),
-      handle: Some(handle),
-      ..Default::default()
-    })
-  }
-
   #[expect(unused)]
   pub async fn get_current_ruleset_raw(&self) -> Result<String> {
     let args = ["-n", "-s", "list", "chain", "inet", &self.table, &self.chain];
@@ -104,6 +94,26 @@ impl Nftables {
 
   pub async fn apply_and_return_ruleset(&self, n: &NftablesReq<'_>) -> Result<NftablesReq<'static>> {
     Ok(apply_and_return_ruleset_async(n).await?)
+  }
+
+  fn make_rule_handle(&self, handle: u32) -> schema::NfListObject {
+    schema::NfListObject::Rule(schema::Rule {
+      family: types::NfFamily::INet,
+      table: self.table.clone(),
+      chain: self.chain.clone(),
+      handle: Some(handle),
+      ..Default::default()
+    })
+  }
+
+  pub async fn remove_rules(&self, handle: impl IntoIterator<Item = u32>) {
+    let rm = NftablesReq {
+      objects: handle
+        .into_iter()
+        .map(|x| schema::NfObject::CmdObject(schema::NfCmd::Delete(self.make_rule_handle(x))))
+        .collect(),
+    };
+    grace(self.apply_ruleset(&rm).await, "failed to remove nftables rules");
   }
 
   pub async fn terminate(self) {
