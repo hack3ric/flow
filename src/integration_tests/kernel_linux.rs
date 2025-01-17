@@ -17,7 +17,7 @@ use nftables::stmt;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use rtnetlink::{IpVersion, RouteMessageBuilder};
-use std::net::IpAddr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 use tokio::select;
 use tokio::time::sleep;
@@ -107,17 +107,17 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   assert!(ip_rules.contains(&ip_rule_exp));
 
   let mut ip_routes_exp = [
-    RouteMessageBuilder::<IpAddr>::new()
+    RouteMessageBuilder::<Ipv4Addr>::new()
       .table_id(table_index)
-      .destination_prefix("172.20.0.0".parse()?, 16)?
+      .destination_prefix("172.20.0.0".parse()?, 16)
       .output_interface(dummy_index)
-      .gateway("10.128.128.1".parse()?)?
+      .gateway("10.128.128.1".parse()?)
       .build(),
-    RouteMessageBuilder::<IpAddr>::new()
+    RouteMessageBuilder::<Ipv4Addr>::new()
       .table_id(table_index)
-      .destination_prefix("172.21.0.0".parse()?, 16)?
+      .destination_prefix("172.21.0.0".parse()?, 16)
       .output_interface(dummy_index)
-      .gateway("10.128.128.1".parse()?)?
+      .gateway("10.128.128.1".parse()?)
       .build(),
   ];
   ip_routes_exp.iter_mut().for_each(route_msg_normalize);
@@ -169,21 +169,32 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
   assert!(ip_rules.contains(&ip_rule_exp));
 
   let mut ip_routes_exp = [
-    RouteMessageBuilder::<IpAddr>::new()
+    RouteMessageBuilder::<Ipv6Addr>::new()
       .table_id(table_index)
-      .destination_prefix("fc00::".parse()?, 16)?
+      .destination_prefix("fc00::".parse()?, 16)
       .output_interface(dummy_index)
-      .gateway("fc64::ffff".parse()?)?
+      .gateway("fc64::ffff".parse()?)
       .build(),
-    RouteMessageBuilder::<IpAddr>::new()
+    RouteMessageBuilder::<Ipv6Addr>::new()
       .table_id(table_index)
-      .destination_prefix("fc65:6565::".parse()?, 32)?
+      .destination_prefix("fc65:6565::".parse()?, 32)
       .output_interface(dummy_index)
-      .gateway("fc64::2333".parse()?)?
+      .gateway("fc64::2333".parse()?)
       .build(),
   ];
   ip_routes_exp.iter_mut().for_each(route_msg_normalize);
   assert_eq!(ip_routes, ip_routes_exp);
+
+  Ok(())
+}
+
+#[apply(test_local!)]
+async fn test_random_114514() -> anyhow::Result<()> {
+  let (conn, handle, _) = rtnetlink::new_connection()?;
+  tokio::spawn(conn);
+  let ip_routes = get_ip_route(&handle, IpVersion::V4, 254).await?;
+
+  println!("{ip_routes:?}");
 
   Ok(())
 }

@@ -262,7 +262,7 @@ impl<K: Kernel> RtNetlink<K> {
       .destination_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })
       .expect("destination prefix should be valid")
       .build();
-    let mut msg = (handle.route()).get(msg).dump(false).execute();
+    let mut msg = handle.route().get(msg).execute();
     let Some(rt) = msg.try_next().await? else {
       unreachable!();
     };
