@@ -1,15 +1,14 @@
 use super::{Kernel, Result};
 use crate::bgp::flow::Flowspec;
-use crate::net::IpPrefix;
+use crate::net::{Afi, IpPrefix};
 use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{try_join, StreamExt, TryStreamExt};
-use libc::{RTA_GATEWAY, RTA_OIF};
-use log::warn;
+use libc::{RTA_GATEWAY, RTA_OIF, RTA_VIA};
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
-use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage};
+use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::packet_utils::nla::Nla;
@@ -53,7 +52,7 @@ impl<K: Kernel> RtNetlink<K> {
 
   pub async fn add(&mut self, id: K::Handle, spec: &Flowspec, next_hop: IpAddr) -> Result<u32> {
     let prefix = spec.dst_prefix();
-    let attrs = self.get_route(next_hop).await?;
+    let attrs = self.get_route(prefix.afi(), next_hop).await?;
 
     // Create table first...
     let (table_id, table_created) = if let Some((table_id, prefixes)) =
@@ -238,8 +237,7 @@ impl<K: Kernel> RtNetlink<K> {
   ) -> Result<()> {
     // TODO: remove route if next hop becomes unreachable
     for (prefix, next_hop, table_id, attrs) in iter {
-      warn!("process {prefix}");
-      let new_attrs = Self::get_route2(handle, *next_hop).await?;
+      let new_attrs = Self::get_route2(handle, prefix.afi(), *next_hop).await?;
       if *attrs != new_attrs {
         *attrs = new_attrs.clone();
         let mut msg = RouteMessageBuilder::<IpAddr>::new()
@@ -254,10 +252,10 @@ impl<K: Kernel> RtNetlink<K> {
     Ok(())
   }
 
-  async fn get_route(&self, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
-    Self::get_route2(&self.handle, ip).await
+  async fn get_route(&self, afi: Afi, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
+    Self::get_route2(&self.handle, afi, ip).await
   }
-  async fn get_route2(handle: &Handle, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
+  async fn get_route2(handle: &Handle, afi: Afi, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })
       .expect("destination prefix should be valid")
@@ -269,7 +267,7 @@ impl<K: Kernel> RtNetlink<K> {
     let mut has_gateway = false;
     let attrs = rt.attributes.into_iter().filter(|x| {
       let kind = x.kind();
-      if kind == RTA_GATEWAY {
+      if kind == RTA_GATEWAY || kind == RTA_VIA {
         has_gateway = true;
         true
       } else {
@@ -278,7 +276,11 @@ impl<K: Kernel> RtNetlink<K> {
     });
     let mut attrs: Vec<_> = attrs.collect();
     if !has_gateway {
-      attrs.push(RouteAttribute::Gateway(ip.into()));
+      if let (Afi::Ipv4, IpAddr::V6(v6)) = (afi, ip) {
+        attrs.push(RouteAttribute::Via(RouteVia::Inet6(v6)));
+      } else {
+        attrs.push(RouteAttribute::Gateway(ip.into()));
+      }
     }
     Ok(attrs)
   }
@@ -306,7 +308,7 @@ pub struct RtNetlinkArgs {
   ///
   /// Table IDs are also used as fwmarks.
   #[arg(long, value_name = "ID", default_value_t = 0xffff0000)]
-  pub init_table_id: u32,
+  pub init_table_id: u32, // TODO: specify table range
 
   /// Route rule priority as shown in `ip rule`.
   #[arg(long, value_name = "PRIO", default_value_t = 100)]

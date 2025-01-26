@@ -24,7 +24,7 @@ use tokio::time::sleep;
 
 #[apply(test_local!)]
 async fn test_order() -> anyhow::Result<()> {
-  let (name, (_g1, _g2, chans, _g3)) = run_kernel_test([
+  let (name, (_g1, _g2, chans, _g3)) = run_kernel_test(0xffff0000, [
     "flow4 { dst 10.0.0.0/9; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0)); }",
     "flow4 { dst 10.0.0.0/10; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0x4c97a25c)); }",
     "flow6 { src fdfd::/128; next header 17; } { bgp_ext_community.add((unknown 0x800c, 0, 0)); }",
@@ -69,9 +69,9 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
-  let table_index = 0xffff0000;
+  let table_index = 0xffff0001;
   let dummy_index = create_dummy_link(&handle, "10.128.128.254/24".parse()?).await?;
-  let (name, (_g1, bird, chans, _g2)) = run_kernel_test([
+  let (name, (_g1, bird, chans, _g2)) = run_kernel_test(table_index, [
     "flow4 { dst 172.20.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
     "flow4 { dst 172.21.0.0/16; } { bgp_ext_community.add((unknown 0x800c, 10.128.128.1, 0)); }",
   ])
@@ -81,9 +81,9 @@ async fn test_redirect_to_ip() -> anyhow::Result<()> {
   print_ip_rule(false).await?;
   print_ip_route(false, table_index).await?;
 
+  let nft_stmts = get_nft_stmts(&name, &name).await?;
   let ip_rules = get_ip_rule(&handle, IpVersion::V4).await?;
   let ip_routes = get_ip_route(&handle, IpVersion::V4, table_index).await?;
-  let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
   drop(bird);
   remove_link(&handle, dummy_index).await?;
@@ -131,9 +131,9 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
-  let table_index = 0xffff0000;
+  let table_index = 0xffff0002;
   let dummy_index = create_dummy_link(&handle, "fc64::1/64".parse()?).await?;
-  let (name, (_g1, exabgp, chans, _g2)) = run_kernel_test_exabgp([
+  let (name, (_g1, exabgp, chans, _g2)) = run_kernel_test_exabgp(table_index, [
     "match { destination fc00::/16; } then { redirect-to-nexthop-ietf fc64::ffff; }",
     "match { destination fc65:6565::/32; } then { redirect-to-nexthop-ietf fc64::2333; }",
   ])
@@ -143,9 +143,9 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
   print_ip_rule(true).await?;
   print_ip_route(true, table_index).await?;
 
+  let nft_stmts = get_nft_stmts(&name, &name).await?;
   let ip_rules = get_ip_rule(&handle, IpVersion::V6).await?;
   let ip_routes = get_ip_route(&handle, IpVersion::V6, table_index).await?;
-  let nft_stmts = get_nft_stmts(&name, &name).await?;
   close_cli(chans).await;
   drop(exabgp);
   remove_link(&handle, dummy_index).await?;
@@ -189,20 +189,73 @@ async fn test_redirect_to_ipv6() -> anyhow::Result<()> {
 }
 
 #[apply(test_local!)]
-async fn test_random_114514() -> anyhow::Result<()> {
+async fn test_ipv4_redirect_to_ipv6() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
-  let ip_routes = get_ip_route(&handle, IpVersion::V4, 254).await?;
 
-  println!("{ip_routes:?}");
+  let table_index = 0xffff0003;
+  let dummy_index = create_dummy_link(&handle, "fc65::1/64".parse()?).await?;
+  let (name, (_g1, exabgp, chans, _g2)) = run_kernel_test_exabgp(table_index, [
+    "match { destination 172.17.254.192/26; } then { redirect-to-nexthop-ietf fc65::ffff; }",
+    "match { destination 192.0.2.0/27; } then { redirect-to-nexthop-ietf fc65::2333; }",
+  ])
+  .await?;
+
+  print_nft_chain(&name, &name).await?;
+  print_ip_rule(false).await?;
+  print_ip_route(false, table_index).await?;
+
+  let nft_stmts = get_nft_stmts(&name, &name).await?;
+  let ip_rules = get_ip_rule(&handle, IpVersion::V4).await?;
+  let ip_routes = get_ip_route(&handle, IpVersion::V4, table_index).await?;
+  close_cli(chans).await;
+  drop(exabgp);
+  remove_link(&handle, dummy_index).await?;
+
+  assert_eq!(nft_stmts, [
+    vec![
+      prefix_stmt("daddr", "192.0.2.0/27".parse()?).unwrap(),
+      stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
+      ACCEPT,
+    ],
+    vec![
+      prefix_stmt("daddr", "172.17.254.192/26".parse()?).unwrap(),
+      stmt::Statement::Mangle(stmt::Mangle { key: make_meta(expr::MetaKey::Mark), value: Number(table_index) }),
+      ACCEPT,
+    ],
+  ]);
+
+  let ip_rule_exp = make_ip_rule_mark(IpVersion::V4, 100, table_index, table_index);
+  println!("> ip rule = {ip_rules:?}");
+  println!("> exp = {ip_rule_exp:?}");
+  assert!(ip_rules.contains(&ip_rule_exp));
+
+  let mut ip_routes_exp = [
+    RouteMessageBuilder::<Ipv4Addr>::new()
+      .table_id(table_index)
+      .destination_prefix("172.17.254.192".parse()?, 26)
+      .output_interface(dummy_index)
+      .gateway("fc65::ffff".parse()?)
+      .build(),
+    RouteMessageBuilder::<Ipv4Addr>::new()
+      .table_id(table_index)
+      .destination_prefix("192.0.2.0".parse()?, 27)
+      .output_interface(dummy_index)
+      .gateway("fc65::2333".parse()?)
+      .build(),
+  ];
+  ip_routes_exp.iter_mut().for_each(route_msg_normalize);
+  assert_eq!(ip_routes, ip_routes_exp);
 
   Ok(())
 }
 
-// TODO: test IPv4 with IPv6 nexthop
 // TODO: test IPv6 offset
 
-async fn run_kernel_test(flows: impl IntoIterator<Item = &str>) -> anyhow::Result<(String, CliGuard)> {
+async fn run_kernel_test(
+  init_table_id: u32,
+  flows: impl IntoIterator<Item = &str>,
+) -> anyhow::Result<(String, CliGuard)> {
   ensure_bird_2();
   ensure_root();
   ensure_loopback_up().await?;
@@ -215,7 +268,7 @@ async fn run_kernel_test(flows: impl IntoIterator<Item = &str>) -> anyhow::Resul
     }
   });
 
-  let (table_name, flow_port, cli) = prepare_kernel_test().await?;
+  let (table_name, flow_port, cli) = prepare_kernel_test(init_table_id).await?;
   let bird = BIRD_CONFIG_1
     .replace("@@BIRD_PORT@@", &pick_port().await?.to_string())
     .replace("@@FLOW_PORT@@", &flow_port.to_string())
@@ -226,21 +279,24 @@ async fn run_kernel_test(flows: impl IntoIterator<Item = &str>) -> anyhow::Resul
   Ok((table_name, guard))
 }
 
-async fn run_kernel_test_exabgp(flows: impl IntoIterator<Item = &str>) -> anyhow::Result<(String, CliGuard)> {
+async fn run_kernel_test_exabgp(
+  init_table_id: u32,
+  flows: impl IntoIterator<Item = &str>,
+) -> anyhow::Result<(String, CliGuard)> {
   // ensure_exabgp();
   ensure_root();
   ensure_loopback_up().await?;
 
   let flows = flows.into_iter().map(|x| format!("route {{ {x} }}")).join("\n");
 
-  let (table_name, port, cli) = prepare_kernel_test().await?;
+  let (table_name, port, cli) = prepare_kernel_test(init_table_id).await?;
   let daemon = EXABGP_CONFIG_1.replace("@@FLOWS@@", &flows);
 
   let guard = run_kernel_test_common(run_cli_with_exabgp(cli, &daemon, port).await?).await?;
   Ok((table_name, guard))
 }
 
-async fn prepare_kernel_test() -> anyhow::Result<(String, u16, Cli)> {
+async fn prepare_kernel_test(init_table_id: u32) -> anyhow::Result<(String, u16, Cli)> {
   let table_name: String = "flow_test_"
     .chars()
     .chain(rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from))
@@ -257,6 +313,8 @@ async fn prepare_kernel_test() -> anyhow::Result<(String, u16, Cli)> {
     &table_name,
     "--chain",
     &table_name,
+    "--init-table-id",
+    &init_table_id.to_string(),
   ])?;
   Ok((table_name, port, cli))
 }
