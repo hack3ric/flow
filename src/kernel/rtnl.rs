@@ -5,7 +5,6 @@ use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{try_join, StreamExt, TryStreamExt};
-use libc::{RTA_GATEWAY, RTA_OIF, RTA_VIA};
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteVia};
@@ -20,6 +19,12 @@ use std::net::IpAddr;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::{interval, Interval};
+
+// Route attribute kinds. Some const declarations are missing in libc crate with
+// musl targets, so define here.
+const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
+const RTA_VIA: u16 = 18;
 
 // TODO: maintain device info similar to BIRD's "device" protocol, and use it to
 // ensure only direct traffic to neighbours
