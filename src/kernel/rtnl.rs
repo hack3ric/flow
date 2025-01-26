@@ -10,7 +10,6 @@ use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
-use rtnetlink::packet_utils::nla::Nla;
 use rtnetlink::{Handle, RouteMessageBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,12 +18,6 @@ use std::net::IpAddr;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::{interval, Interval};
-
-// Route attribute kinds. Some const declarations are missing in libc crate with
-// musl targets, so define here.
-const RTA_OIF: u16 = 4;
-const RTA_GATEWAY: u16 = 5;
-const RTA_VIA: u16 = 18;
 
 // TODO: maintain device info similar to BIRD's "device" protocol, and use it to
 // ensure only direct traffic to neighbours
@@ -271,12 +264,11 @@ impl<K: Kernel> RtNetlink<K> {
     };
     let mut has_gateway = false;
     let attrs = rt.attributes.into_iter().filter(|x| {
-      let kind = x.kind();
-      if kind == RTA_GATEWAY || kind == RTA_VIA {
+      if matches!(x, RouteAttribute::Gateway(_) | RouteAttribute::Via(_)) {
         has_gateway = true;
         true
       } else {
-        kind == RTA_OIF
+        matches!(x, RouteAttribute::Oif(_))
       }
     });
     let mut attrs: Vec<_> = attrs.collect();
