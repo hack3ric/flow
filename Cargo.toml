@@ -57,9 +57,7 @@ tokio = { version = "1.38.0", features = [
 tokio-util = "0.7.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nftables = { git = "https://github.com/nftables-rs/nftables-rs", rev = "603bca255a23ee1be52187f52f08ce19cf4e941c", features = [
-  "tokio",
-] }
+nftables = { version = "0.6.0", features = ["tokio"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 rtnetlink = { git = "https://github.com/hack3ric/rust-rtnetlink", branch = "for-flow" }

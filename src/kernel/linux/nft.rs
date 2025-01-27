@@ -430,8 +430,8 @@ pub(crate) fn make_meta(key: expr::MetaKey) -> expr::Expression<'static> {
 pub(crate) fn make_exthdr<'a>(name: &'a str, field: &'a str, offset: u32) -> expr::Expression<'a> {
   expr::Expression::Named(expr::NamedExpression::Exthdr(expr::Exthdr {
     name: name.into(),
-    field: field.into(),
-    offset,
+    field: Some(field.into()),
+    offset: Some(offset),
   }))
 }
 
