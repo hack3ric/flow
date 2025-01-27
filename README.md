@@ -18,8 +18,13 @@ It doesn't:
 
 ## Implemented RFCs/Drafts
 
-- [RFC 8955](https://www.rfc-editor.org/rfc/rfc8955.html): Dissemination of Flow Specification Rules
-- [RFC 8956](https://www.rfc-editor.org/rfc/rfc8956.html): Dissemination of Flow Specification Rules for IPv6
+- [RFC 8955](https://www.rfc-editor.org/rfc/rfc8955.html): Dissemination of Flow Specification Rules, except:
+  - VPNv4 flowspec routes
+  - `rt-redirect` traffic action
+  - Validation procedure
+- [RFC 8956](https://www.rfc-editor.org/rfc/rfc8956.html): Dissemination of Flow Specification Rules for IPv6, except:
+  - VPNv6 flowspec routes
+  - `rt-redirect-ipv6` traffic action
 - [draft-ietf-idr-flowspec-redirect-ip-03](https://www.ietf.org/archive/id/draft-ietf-idr-flowspec-redirect-ip-03.html): BGP Flow-Spec Redirect-to-IP Action
 
 ## Usage
