@@ -1,7 +1,7 @@
 use crate::net::IpWithPrefix;
 use futures::TryStreamExt;
 use nix::net::if_::if_nametoindex;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use rand::Rng;
 use rtnetlink::packet_route::link::InfoKind;
 use rtnetlink::packet_route::route::{RouteAttribute, RouteMessage, RoutePreference, RouteProtocol};
@@ -16,7 +16,7 @@ use std::net::IpAddr;
 pub async fn create_dummy_link(handle: &Handle, addr: IpWithPrefix) -> anyhow::Result<u32> {
   let name: String = "dummy_"
     .chars()
-    .chain(rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from))
+    .chain(rand::rng().sample_iter(&Alphanumeric).take(8).map(char::from))
     .collect();
   let link_msg = LinkMessageBuilder::<LinkUnspec>::new_with_info_kind(InfoKind::Dummy)
     .name(name.clone())

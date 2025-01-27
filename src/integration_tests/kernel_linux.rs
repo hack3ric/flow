@@ -14,7 +14,7 @@ use macro_rules_attribute::apply;
 use nftables::expr::Expression::Number;
 use nftables::expr::{self, MetaKey};
 use nftables::stmt;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use rand::Rng;
 use rtnetlink::{IpVersion, RouteMessageBuilder};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -299,7 +299,7 @@ async fn run_kernel_test_exabgp(
 async fn prepare_kernel_test(init_table_id: u32) -> anyhow::Result<(String, u16, Cli)> {
   let table_name: String = "flow_test_"
     .chars()
-    .chain(rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from))
+    .chain(rand::rng().sample_iter(&Alphanumeric).take(8).map(char::from))
     .collect();
   let port = pick_port().await?;
   let cli = Cli::try_parse_from([
