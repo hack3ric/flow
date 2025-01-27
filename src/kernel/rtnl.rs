@@ -4,10 +4,11 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::{try_join, StreamExt, TryStreamExt};
+use futures::{try_join, StreamExt};
+use libc::ENETUNREACH;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
-use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteVia};
+use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{Handle, RouteMessageBuilder};
@@ -28,7 +29,7 @@ pub struct RtNetlink<K: Kernel> {
   args: RtNetlinkArgs,
   handle: Handle,
   msgs: UnboundedReceiver<(NetlinkMessage<RouteNetlinkMessage>, rtnetlink::sys::SocketAddr)>,
-  routes: BTreeMap<K::Handle, (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
+  routes: BTreeMap<K::Handle, RouteEntry>,
   rules: BTreeMap<u32, BTreeSet<IpPrefix>>,
   timer: Interval,
 }
@@ -80,7 +81,11 @@ impl<K: Kernel> RtNetlink<K> {
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
-    msg.attributes.extend(attrs.iter().cloned());
+    if let Some(attrs) = &attrs {
+      msg.attributes.extend(attrs.iter().cloned());
+    } else {
+      msg.header.kind = RouteType::Unreachable;
+    };
     if let Err(error) = self.handle.route().add(msg).execute().await {
       if table_created {
         self.rules.remove(&table_id);
@@ -90,7 +95,7 @@ impl<K: Kernel> RtNetlink<K> {
     }
 
     // ...and finally insert to our own database
-    self.routes.insert(id, (prefix, next_hop, table_id, attrs));
+    self.routes.insert(id, RouteEntry { prefix, next_hop, table_id, attrs });
 
     Ok(table_id)
   }
@@ -111,7 +116,7 @@ impl<K: Kernel> RtNetlink<K> {
   }
 
   pub async fn del(&mut self, id: &K::Handle) {
-    let Some((prefix, _, table_id, _)) = self.routes.remove(id) else {
+    let Some(RouteEntry { prefix, table_id, .. }) = self.routes.remove(id) else {
       return;
     };
     self.del_route(table_id, prefix).await;
@@ -154,6 +159,10 @@ impl<K: Kernel> RtNetlink<K> {
       self.handle.rule().del(msg).execute().await,
       "failed to delete IPv6 rule",
     );
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.routes.is_empty()
   }
 
   // route & addr change: check if next hop in changed prefix
@@ -219,23 +228,22 @@ impl<K: Kernel> RtNetlink<K> {
     }
   }
 
-  pub fn is_empty(&self) -> bool {
-    self.routes.is_empty()
+  async fn process_prefix(&mut self, prefix: IpPrefix) -> Result<()> {
+    Self::process_iter(
+      &self.handle,
+      self.routes.values_mut().filter(|x| prefix.contains(x.next_hop)),
+    )
+    .await
   }
 
-  async fn process_prefix(&mut self, prefix: IpPrefix) -> Result<()> {
-    Self::process_iter(&self.handle, self.routes.values_mut().filter(|x| prefix.contains(x.1))).await
-  }
   async fn process_all(&mut self) -> Result<()> {
     Self::process_iter(&self.handle, self.routes.values_mut()).await
   }
-  async fn process_iter(
-    handle: &Handle,
-    iter: impl Iterator<Item = &mut (IpPrefix, IpAddr, u32, Vec<RouteAttribute>)>,
-  ) -> Result<()> {
+
+  async fn process_iter(handle: &Handle, iter: impl Iterator<Item = &mut RouteEntry>) -> Result<()> {
     // TODO: remove route if next hop becomes unreachable
-    for (prefix, next_hop, table_id, attrs) in iter {
-      let new_attrs = Self::get_route2(handle, prefix.afi(), *next_hop).await?;
+    for RouteEntry { prefix, next_hop, table_id, attrs } in iter {
+      let new_attrs = Self::get_route_from_handle(handle, prefix.afi(), *next_hop).await?;
       if *attrs != new_attrs {
         *attrs = new_attrs.clone();
         let mut msg = RouteMessageBuilder::<IpAddr>::new()
@@ -243,43 +251,53 @@ impl<K: Kernel> RtNetlink<K> {
           .expect("destination prefix should be valid")
           .table_id(*table_id)
           .build();
-        msg.attributes.extend(new_attrs);
+        if let Some(attrs) = &attrs {
+          msg.attributes.extend(attrs.iter().cloned());
+        } else {
+          msg.header.kind = RouteType::Unreachable;
+        };
         handle.route().add(msg).replace().execute().await?;
       }
     }
     Ok(())
   }
 
-  async fn get_route(&self, afi: Afi, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
-    Self::get_route2(&self.handle, afi, ip).await
+  async fn get_route(&self, afi: Afi, ip: IpAddr) -> Result<Option<Vec<RouteAttribute>>> {
+    Self::get_route_from_handle(&self.handle, afi, ip).await
   }
-  async fn get_route2(handle: &Handle, afi: Afi, ip: IpAddr) -> Result<Vec<RouteAttribute>> {
+
+  async fn get_route_from_handle(handle: &Handle, prefix_afi: Afi, ip: IpAddr) -> Result<Option<Vec<RouteAttribute>>> {
     let msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })
       .expect("destination prefix should be valid")
       .build();
-    let mut msg = handle.route().get(msg).execute();
-    let Some(rt) = msg.try_next().await? else {
-      unreachable!();
+    let rt = match handle.route().get(msg).execute().next().await.unwrap() {
+      Ok(rt) => rt,
+      Err(rtnetlink::Error::NetlinkError(error)) if error.raw_code() == ENETUNREACH => return Ok(None),
+      Err(error) => return Err(error.into()),
     };
+
     let mut has_gateway = false;
-    let attrs = rt.attributes.into_iter().filter(|x| {
-      if matches!(x, RouteAttribute::Gateway(_) | RouteAttribute::Via(_)) {
-        has_gateway = true;
-        true
-      } else {
-        matches!(x, RouteAttribute::Oif(_))
-      }
-    });
-    let mut attrs: Vec<_> = attrs.collect();
+    let mut attrs = rt
+      .attributes
+      .into_iter()
+      .filter(|x| {
+        if matches!(x, RouteAttribute::Gateway(_) | RouteAttribute::Via(_)) {
+          has_gateway = true;
+          true
+        } else {
+          matches!(x, RouteAttribute::Oif(_))
+        }
+      })
+      .collect::<Vec<_>>();
     if !has_gateway {
-      if let (Afi::Ipv4, IpAddr::V6(v6)) = (afi, ip) {
+      if let (Afi::Ipv4, IpAddr::V6(v6)) = (prefix_afi, ip) {
         attrs.push(RouteAttribute::Via(RouteVia::Inet6(v6)));
       } else {
         attrs.push(RouteAttribute::Gateway(ip.into()));
       }
     }
-    Ok(attrs)
+    Ok(Some(attrs))
   }
 
   pub async fn terminate(self) {
@@ -290,6 +308,14 @@ impl<K: Kernel> RtNetlink<K> {
       }
     }
   }
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteEntry {
+  prefix: IpPrefix,
+  next_hop: IpAddr,
+  table_id: u32,
+  attrs: Option<Vec<RouteAttribute>>,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
