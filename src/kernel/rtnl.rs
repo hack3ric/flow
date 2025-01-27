@@ -5,12 +5,13 @@ use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{try_join, StreamExt};
-use libc::ENETUNREACH;
+use libc::{EHOSTUNREACH, ENETUNREACH};
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
+use rtnetlink::Error::NetlinkError;
 use rtnetlink::{Handle, RouteMessageBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,12 +131,15 @@ impl<K: Kernel> RtNetlink<K> {
   }
 
   async fn del_route(&self, table_id: u32, prefix: IpPrefix) {
-    let msg = RouteMessageBuilder::<IpAddr>::new()
+    let mut msg = RouteMessageBuilder::<IpAddr>::new()
       .destination_prefix(prefix.prefix(), prefix.len())
       .expect("destination prefix should be valid")
       .table_id(table_id)
       .build();
-    grace(self.handle.route().del(msg).execute().await, "failed to delete route");
+    if self.handle.route().del(msg.clone()).execute().await.is_err() {
+      msg.header.kind = RouteType::Unreachable;
+      grace(self.handle.route().del(msg).execute().await, "failed to delete route");
+    }
   }
 
   /// Deletes kernel `ip rule`. `self.rules` remains unchanged.
@@ -273,7 +277,7 @@ impl<K: Kernel> RtNetlink<K> {
       .build();
     let rt = match handle.route().get(msg).execute().next().await.unwrap() {
       Ok(rt) => rt,
-      Err(rtnetlink::Error::NetlinkError(error)) if error.raw_code() == ENETUNREACH => return Ok(None),
+      Err(NetlinkError(e)) if [ENETUNREACH, EHOSTUNREACH].contains(&-e.raw_code()) => return Ok(None),
       Err(error) => return Err(error.into()),
     };
 
