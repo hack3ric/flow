@@ -378,17 +378,17 @@ impl ExtCommunity {
   pub fn action(self) -> Option<TrafficFilterAction> {
     use GlobalAdmin::*;
     use TrafficFilterAction::*;
-    if !self.iana_authority() || !self.is_transitive() {
+    if !self.is_transitive() {
       return None;
     }
     let (g, l) = self.admins()?;
-    let result = match (g, self.sub_kind()) {
-      (As(desc), 0x06) => TrafficRateBytes { desc: desc as u16, rate: f32::from_bits(l) },
-      (As(desc), 0x0c) => TrafficRatePackets { desc: desc as u16, rate: f32::from_bits(l) },
-      (As(_), 0x07) => TrafficAction { terminal: l & 1 == 0, sample: l & (1 << 1) != 0 },
-      (_, 0x08) => RtRedirect { rt: g, value: l },
-      (As(_), 0x09) => TrafficMarking { dscp: (l as u8) & 0b111111 },
-      (Ipv4(ip), 0x0c) => RedirectToIp { ip: ip.into(), copy: l & 1 != 0 },
+    let result = match (self.iana_authority(), g, self.sub_kind()) {
+      (true, As(desc), 0x06) => TrafficRateBytes { desc: desc as u16, rate: f32::from_bits(l) },
+      (true, As(desc), 0x0c) => TrafficRatePackets { desc: desc as u16, rate: f32::from_bits(l) },
+      (true, As(_), 0x07) => TrafficAction { terminal: l & 1 == 0, sample: l & (1 << 1) != 0 },
+      (true, _, 0x08) => RtRedirect { rt: g, value: l },
+      (true, As(_), 0x09) => TrafficMarking { dscp: (l as u8) & 0b111111 },
+      (false, Ipv4(ip), 0x0c) => RedirectToIp { ip: ip.into(), copy: l & 1 != 0 },
       _ => return None,
     };
     Some(result)
