@@ -6,7 +6,7 @@ use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
 use crate::util::{grace, Intersect, TruthTable};
 use nftables::batch::Batch;
-use nftables::expr::Expression::{Number as NUM, String as STRING};
+use nftables::expr::Expression::{Number, String as Str};
 use nftables::helper::{
   apply_and_return_ruleset_async, apply_ruleset_async, get_current_ruleset_raw_async, DEFAULT_NFT,
 };
@@ -157,7 +157,7 @@ impl Flowspec {
     let first = make_match(
       stmt::Operator::EQ,
       make_meta(expr::MetaKey::Nfproto),
-      STRING(if self.afi() == Afi::Ipv4 { "ipv4" } else { "ipv6" }.into()),
+      Str(if self.afi() == Afi::Ipv4 { "ipv4" } else { "ipv6" }.into()),
     );
     let result = Some(Ok(smallvec_inline![smallvec_inline![first]]))
       .into_iter()
@@ -219,11 +219,11 @@ impl Component {
           },
           expr::Expression::BinaryOperation(Box::new(expr::BinaryOperation::AND(
             make_payload_field("tcp", "flags"),
-            NUM(tt.mask as u32),
+            Number(tt.mask as u32),
           ))),
           expr::Expression::Named(expr::NamedExpression::Set(
             (tt.truth.iter().copied())
-              .map(|x| expr::SetItem::Element(NUM(x as u32)))
+              .map(|x| expr::SetItem::Element(Number(x as u32)))
               .collect(),
           )),
         )]]
@@ -261,7 +261,7 @@ impl Component {
           branch.push(smallvec_inline![make_match(
             stmt::Operator::EQ,
             make_payload_raw(expr::PayloadBase::NH, 17, 1),
-            NUM(1),
+            Number(1),
           )]);
         }
         // IsF: {ip,frag} frag-off != 0
@@ -270,23 +270,23 @@ impl Component {
           branch.push(smallvec_inline![make_match(
             stmt::Operator::NEQ,
             frag_off.clone(),
-            NUM(0)
+            Number(0)
           )]);
         }
         // FF: {ip,frag} frag-off == 0 && MF == 1
         if let Some(0b0100) = iter.peek() {
           iter.next();
           branch.push(smallvec![
-            make_match(stmt::Operator::EQ, frag_off.clone(), NUM(0)),
-            make_match(stmt::Operator::EQ, mf.clone(), NUM(1)),
+            make_match(stmt::Operator::EQ, frag_off.clone(), Number(0)),
+            make_match(stmt::Operator::EQ, mf.clone(), Number(1)),
           ]);
         }
         // LF: {ip,frag} frag-off != 0 && MF == 0
         if let Some(0b1000) = iter.peek() {
           iter.next();
           branch.push(smallvec![
-            make_match(stmt::Operator::NEQ, frag_off, NUM(0)),
-            make_match(stmt::Operator::EQ, mf, NUM(0)),
+            make_match(stmt::Operator::NEQ, frag_off, Number(0)),
+            make_match(stmt::Operator::EQ, mf, Number(0)),
           ]);
         }
         branch
@@ -362,12 +362,12 @@ impl TrafficFilterAction {
       TrafficAction { sample: true, .. } => smallvec_inline![stmt::Statement::Log(Some(stmt::Log::new(None))),],
       TrafficAction { .. } => SmallVec::new_const(),
       RtRedirect { .. } | RtRedirectIpv6 { .. } => SmallVec::new_const(), // redirect is not supported at the moment
-      TrafficMarking { dscp } => smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
-        key: make_payload_field(if afi == Afi::Ipv4 { "ip" } else { "ip6" }, "dscp"),
-        value: NUM(dscp.into()),
-      })],
+      TrafficMarking { dscp } => smallvec_inline![mangle_stmt(
+        make_payload_field(if afi == Afi::Ipv4 { "ip" } else { "ip6" }, "dscp"),
+        Number(dscp.into())
+      )],
       RedirectToIp { ip, copy: true } => smallvec_inline![stmt::Statement::Dup(stmt::Dup {
-        addr: STRING(ip.to_string().into()),
+        addr: Str(ip.to_string().into()),
         dev: None,
       })],
       RedirectToIp { ip, copy: false } => {
@@ -378,10 +378,7 @@ impl TrafficFilterAction {
           rtnl.get_or_insert(new)
         };
         let table_id = rtnl.next_table_for(prefix);
-        let result = smallvec_inline![stmt::Statement::Mangle(stmt::Mangle {
-          key: make_meta(expr::MetaKey::Mark),
-          value: NUM(table_id),
-        })];
+        let result = smallvec_inline![mangle_stmt(make_meta(expr::MetaKey::Mark), Number(table_id))];
         return (result, Some((ip, table_id)), false);
       }
     };
@@ -441,10 +438,10 @@ pub(crate) fn prefix_stmt(field: &'static str, prefix: IpPrefix) -> Option<stmt:
       stmt::Operator::EQ,
       make_payload_field(if prefix.afi() == Afi::Ipv4 { "ip" } else { "ip6" }, field),
       if prefix.is_single() {
-        STRING(format!("{}", prefix.prefix()).into())
+        Str(format!("{}", prefix.prefix()).into())
       } else {
         expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
-          addr: Box::new(STRING(format!("{}", prefix.prefix()).into())),
+          addr: Box::new(Str(format!("{}", prefix.prefix()).into())),
           len: prefix.len().into(),
         }))
       },
@@ -462,7 +459,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
   buf.push(make_match(
     stmt::Operator::EQ,
     make_meta(expr::MetaKey::Nfproto),
-    STRING("ipv6".into()),
+    Str("ipv6".into()),
   ));
 
   let addr_offset = if src { 64 } else { 192 };
@@ -480,7 +477,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + offset as u32, pre_rem.into()),
-        NUM(num.try_into().unwrap()),
+        Number(num.try_into().unwrap()),
       ));
     }
     for i in (start_32bit..end_32bit).step_by(32) {
@@ -488,7 +485,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + i as u32, 32),
-        NUM(num),
+        Number(num),
       ));
     }
     if post_rem > 0 {
@@ -496,7 +493,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
       buf.push(make_match(
         stmt::Operator::EQ,
         make_payload_raw(expr::PayloadBase::NH, addr_offset + end_32bit as u32, post_rem.into()),
-        NUM(num),
+        Number(num),
       ));
     }
   } else {
@@ -508,7 +505,7 @@ pub(crate) fn pattern_stmt(src: bool, pattern: IpPrefix, offset: u8) -> Option<S
         addr_offset + u32::from(offset),
         u32::from(pattern.len() - offset),
       ),
-      NUM(num.try_into().unwrap()),
+      Number(num.try_into().unwrap()),
     ));
   }
 
@@ -529,10 +526,10 @@ pub(crate) fn range_stmt<'a>(
   let right = if ranges.len() == 1 {
     let (start, end) = ranges.into_iter().next().unwrap().into_inner();
     if start == end {
-      expr::Expression::Number(start as u32)
+      Number(start as u32)
     } else {
       expr::Expression::Range(Box::new(expr::Range {
-        range: [NUM(start as u32), NUM(min(end, max) as u32)],
+        range: [Number(start as u32), Number(min(end, max) as u32)],
       }))
     }
   } else {
@@ -544,8 +541,10 @@ pub(crate) fn range_stmt<'a>(
         let (start, end) = x.into_inner();
         // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
         // But most of the matching expressions is smaller than 32 bits anyway.
-        let expr = (start == end).then_some(NUM(start as u32)).unwrap_or_else(|| {
-          expr::Expression::Range(Box::new(expr::Range { range: [NUM(start as u32), NUM(end as u32)] }))
+        let expr = (start == end).then_some(Number(start as u32)).unwrap_or_else(|| {
+          expr::Expression::Range(Box::new(expr::Range {
+            range: [Number(start as u32), Number(end as u32)],
+          }))
         });
         expr::SetItem::Element(expr)
       })
@@ -561,6 +560,10 @@ pub(crate) fn range_stmt_branch<'a>(
   max: u64,
 ) -> Result<StatementBranch<'a>> {
   range_stmt(left, ops, max).map(|x| x.into_iter().map(|x| smallvec_inline![x]).collect())
+}
+
+pub(crate) fn mangle_stmt<'a>(key: expr::Expression<'a>, value: expr::Expression<'a>) -> stmt::Statement<'a> {
+  stmt::Statement::Mangle(stmt::Mangle { key, value })
 }
 
 impl Ops<Numeric> {
