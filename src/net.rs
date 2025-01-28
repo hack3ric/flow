@@ -222,7 +222,7 @@ impl IpPrefix {
         _ => false,
       },
       Equal => self == other,
-      Greater => false,
+      Greater => other.overlaps(self),
     }
   }
 
