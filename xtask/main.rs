@@ -5,16 +5,35 @@ use std::process::{Command, ExitCode};
 enum Cli {
   /// Generate manpages and shell autocompletions into target/assets.
   Gen,
-  /// Run command with `unshare -rn`
+  /// Run command with `unshare -rn`.
   Unshare {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    _args: Vec<String>,
+    args: Vec<String>,
   },
-  /// Run command with `sudo -E`
+  /// Run command with `sudo -E`.
   Sudo {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    _args: Vec<String>,
+    args: Vec<String>,
   },
+  /// Run command with `ip netns exec <netns>`.
+  Netns {
+    netns: String,
+    /// Prepend `sudo -E` to runner.
+    #[arg(long)]
+    sudo: bool,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+  },
+}
+
+fn cargo_with_runner(runner: &str) -> Command {
+  let mut cmd = Command::new(env!("CARGO"));
+  let os = std::env::consts::OS;
+  cmd.args([
+    "--config",
+    &format!("target.'cfg(target_os = \"{os}\")'.runner = '{runner}'"),
+  ]);
+  cmd
 }
 
 fn main() -> ExitCode {
@@ -22,29 +41,24 @@ fn main() -> ExitCode {
     Cli::Gen => Command::new(env!("CARGO")).args(["run", "--features=__gen"]).status().unwrap(),
 
     #[cfg(target_os = "linux")]
-    Cli::Unshare { _args } => Command::new(env!("CARGO"))
-      .args(["--config", "target.'cfg(target_os = \"linux\")'.runner = 'unshare -rn'"])
-      .args(std::env::args().skip(2))
-      .status()
-      .unwrap(),
+    Cli::Unshare { args } => cargo_with_runner("unshare -rn").args(args).status().unwrap(),
 
     #[cfg(not(target_os = "linux"))]
-    Cli::Unshare { _args } => {
+    Cli::Unshare { args } => {
       eprintln!("Unshare not supported, running tests as current user");
-      Command::new(env!("CARGO")).args(std::env::args().skip(2)).status().unwrap()
+      Command::new(env!("CARGO")).args(args).status().unwrap()
     }
 
-    Cli::Sudo { _args } => Command::new(env!("CARGO"))
-      .args([
-        "--config",
-        &format!(
-          "target.'cfg(target_os = \"{}\")'.runner = 'sudo -E'",
-          std::env::consts::OS
-        ),
-      ])
-      .args(std::env::args().skip(2))
-      .status()
-      .unwrap(),
+    Cli::Sudo { args } => cargo_with_runner("sudo -E").args(args).status().unwrap(),
+
+    Cli::Netns { netns, sudo, args } => {
+      let runner = if sudo {
+        format!("sudo -E ip netns exec {netns}")
+      } else {
+        format!("ip netns exec {netns}")
+      };
+      cargo_with_runner(&runner).args(args).status().unwrap()
+    }
   };
 
   match status.code() {
