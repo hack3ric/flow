@@ -1,8 +1,8 @@
 //! Network Layer Reachability Information (NLRI).
 
 use super::flow::Flowspec;
-use super::msg::{PathAttr, PF_EXT_LEN, PF_OPTIONAL};
-use super::{extend_with_u16_len, Result};
+use super::msg::{PF_EXT_LEN, PF_OPTIONAL, PathAttr};
+use super::{Result, extend_with_u16_len};
 use crate::net::{Afi, IpPrefix};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;

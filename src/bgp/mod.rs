@@ -6,6 +6,7 @@ pub mod route;
 use crate::args::RunArgs;
 use crate::kernel::{self, KernelAdapter};
 use crate::net::{Afi, IpPrefixError, IpPrefixErrorKind};
+use State::*;
 use either::Either;
 use flow::FlowError;
 use itertools::Itertools;
@@ -22,7 +23,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cmp::min;
 use std::fmt::Display;
-use std::future::{pending, Future};
+use std::future::{Future, pending};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
@@ -31,8 +32,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio::time::{interval, Duration, Instant, Interval};
-use State::*;
+use tokio::time::{Duration, Instant, Interval, interval};
 
 #[cfg(test)]
 use {crate::integration_tests::TestEvent, tokio::sync::mpsc};

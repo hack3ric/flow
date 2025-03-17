@@ -3,9 +3,9 @@
 
 mod helpers;
 
+use crate::bgp::Session;
 use crate::bgp::msg::UpdateMessage;
 use crate::bgp::nlri::NlriKind;
-use crate::bgp::Session;
 use crate::net::Afi;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;

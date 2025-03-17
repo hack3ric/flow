@@ -4,14 +4,14 @@ use crate::net::{Afi, IpPrefix};
 use crate::util::grace;
 use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::{try_join, StreamExt};
+use futures::{StreamExt, try_join};
 use libc::{EHOSTUNREACH, ENETUNREACH};
+use rtnetlink::Error::NetlinkError;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
-use rtnetlink::Error::NetlinkError;
 use rtnetlink::{Handle, RouteMessageBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +19,7 @@ use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::select;
-use tokio::time::{interval, Interval};
+use tokio::time::{Interval, interval};
 
 // TODO: maintain device info similar to BIRD's "device" protocol, and use it to
 // ensure only direct traffic to neighbours

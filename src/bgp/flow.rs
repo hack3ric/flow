@@ -1,7 +1,7 @@
 use super::Result;
 use crate::net::{Afi, IpPrefix, IpPrefixError, IpWithPrefix, IpWithPrefixErrorKind};
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -818,11 +818,7 @@ impl OpKind for Bitmask {
     } else {
       d & v == v
     };
-    if flags & Self::NOT == 0 {
-      result
-    } else {
-      !result
-    }
+    if flags & Self::NOT == 0 { result } else { !result }
   }
 
   fn fmt(f: &mut Formatter, flags: u8, value: u64) -> fmt::Result {

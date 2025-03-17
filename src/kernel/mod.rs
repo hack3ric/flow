@@ -14,7 +14,7 @@ mod rtnl;
 use crate::bgp::flow::Flowspec;
 use crate::bgp::route::RouteInfo;
 use serde::{Deserialize, Serialize};
-use std::future::{pending, ready, Future};
+use std::future::{Future, pending, ready};
 use strum::Display;
 use thiserror::Error;
 

@@ -47,9 +47,11 @@ pub async fn get_nft_stmts(table: &str, chain: &str) -> anyhow::Result<Vec<Vec<S
       None
     }
   });
-  assert!(rules
-    .clone()
-    .all(|r| r.family == NfFamily::INet && r.table == table && r.chain == chain));
+  assert!(
+    rules
+      .clone()
+      .all(|r| r.family == NfFamily::INet && r.table == table && r.chain == chain)
+  );
 
   Ok(rules.map(|r| r.expr.into_owned()).collect())
 }

@@ -15,10 +15,10 @@ use args::{Cli, Command, RunArgs, ShowArgs};
 use bgp::{Session, StateView};
 use clap::Parser;
 use env_logger::fmt::Formatter;
-use ipc::{get_sock_path, IpcServer};
+use ipc::{IpcServer, get_sock_path};
 use itertools::Itertools;
-use log::{error, info, warn, Level, LevelFilter, Record};
-use std::fs::{create_dir_all, File};
+use log::{Level, LevelFilter, Record, error, info, warn};
+use std::fs::{File, create_dir_all};
 use std::io::{self, BufRead, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -37,9 +37,9 @@ use {
 
 #[cfg(not(test))]
 use {
-  futures::future::{select, FutureExt},
+  futures::future::{FutureExt, select},
   tokio::pin,
-  tokio::signal::unix::{signal, SignalKind},
+  tokio::signal::unix::{SignalKind, signal},
 };
 
 async fn run(

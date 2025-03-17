@@ -1,7 +1,7 @@
 use super::helpers::bird::{ensure_bird_2, ensure_bird_2_16};
 use super::helpers::cli::run_cli_with_bird;
 use super::helpers::kernel::{ensure_loopback_up, pick_port};
-use super::{test_local, TestEvent, BIRD_CONFIG_1};
+use super::{BIRD_CONFIG_1, TestEvent, test_local};
 use crate::args::Cli;
 use crate::bgp::flow::Component::*;
 use crate::bgp::flow::{Flowspec, Op};

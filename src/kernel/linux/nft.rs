@@ -4,19 +4,19 @@ use crate::bgp::route::{ExtCommunity, Ipv6ExtCommunity, RouteInfo, TrafficFilter
 use crate::kernel::rtnl::{RtNetlink, RtNetlinkArgs};
 use crate::kernel::{Error, Result};
 use crate::net::{Afi, IpPrefix};
-use crate::util::{grace, Intersect, TruthTable};
+use crate::util::{Intersect, TruthTable, grace};
 use nftables::batch::Batch;
 use nftables::expr::Expression::{Number, String as Str};
 use nftables::helper::{
-  apply_and_return_ruleset_async, apply_ruleset_async, get_current_ruleset_raw_async, DEFAULT_NFT,
+  DEFAULT_NFT, apply_and_return_ruleset_async, apply_ruleset_async, get_current_ruleset_raw_async,
 };
 use nftables::schema::Nftables as NftablesReq;
 use nftables::{expr, schema, stmt, types};
 use num_integer::Integer;
 use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, smallvec_inline, SmallVec};
+use smallvec::{SmallVec, smallvec, smallvec_inline};
 use std::borrow::Cow;
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::mem::replace;
@@ -355,7 +355,7 @@ impl TrafficFilterAction {
     use TrafficFilterAction::*;
     let action = match self {
       TrafficRateBytes { rate, .. } | TrafficRatePackets { rate, .. } if rate <= 0. || rate.is_nan() => {
-        return (smallvec_inline![DROP], None, true)
+        return (smallvec_inline![DROP], None, true);
       }
       TrafficRateBytes { rate, .. } => smallvec![make_limit(true, rate, "bytes", "second"), DROP],
       TrafficRatePackets { rate, .. } => smallvec![make_limit(true, rate, "packets", "second"), DROP],

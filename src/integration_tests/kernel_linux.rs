@@ -1,14 +1,14 @@
 use super::helpers::bird::ensure_bird_2;
-use super::helpers::cli::{close_cli, run_cli_with_bird, run_cli_with_exabgp, CliGuard};
+use super::helpers::cli::{CliGuard, close_cli, run_cli_with_bird, run_cli_with_exabgp};
 use super::helpers::kernel::rtnl::{create_dummy_link, get_ip_route, get_ip_rule, remove_link, route_msg_normalize};
 use super::helpers::kernel::{ensure_loopback_up, ensure_root, pick_port};
-use super::{TestEvent, BIRD_CONFIG_1, EXABGP_CONFIG_1};
+use super::{BIRD_CONFIG_1, EXABGP_CONFIG_1, TestEvent};
 use crate::args::Cli;
 use crate::bgp::flow::Op;
 use crate::integration_tests::helpers::kernel::linux::{get_nft_stmts, print_ip_route, print_ip_rule, print_nft_chain};
 use crate::integration_tests::helpers::kernel::rtnl::make_ip_rule_mark;
 use crate::kernel::nft::{
-  make_limit, make_meta, make_payload_field, mangle_stmt, prefix_stmt, range_stmt, ACCEPT, DROP,
+  ACCEPT, DROP, make_limit, make_meta, make_payload_field, mangle_stmt, prefix_stmt, range_stmt,
 };
 use crate::net::IpPrefix;
 use clap::Parser;
@@ -16,8 +16,8 @@ use itertools::Itertools;
 use macro_rules_attribute::apply;
 use nftables::expr::Expression::Number;
 use nftables::expr::{self, MetaKey};
-use rand::distr::Alphanumeric;
 use rand::Rng;
+use rand::distr::Alphanumeric;
 use rtnetlink::packet_route::route::{RouteAttribute, RouteType};
 use rtnetlink::{IpVersion, RouteMessageBuilder};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

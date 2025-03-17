@@ -85,11 +85,7 @@ impl IpWithPrefix {
   }
 
   pub const fn afi(&self) -> Afi {
-    if self.is_ipv4() {
-      Afi::Ipv4
-    } else {
-      Afi::Ipv6
-    }
+    if self.is_ipv4() { Afi::Ipv4 } else { Afi::Ipv6 }
   }
 
   pub const fn is_ipv4(&self) -> bool {
@@ -195,8 +191,8 @@ impl IpPrefix {
   }
 
   pub fn contains<T: Into<Self>>(self, other: T) -> bool {
-    use std::cmp::Ordering::*;
     use IpAddr::*;
+    use std::cmp::Ordering::*;
 
     let other = other.into();
     match self.len().cmp(&other.len()) {
@@ -211,8 +207,8 @@ impl IpPrefix {
   }
 
   pub fn overlaps<T: Into<Self>>(self, other: T) -> bool {
-    use std::cmp::Ordering::*;
     use IpAddr::*;
+    use std::cmp::Ordering::*;
 
     let other = other.into();
     match self.len().cmp(&other.len()) {
@@ -386,9 +382,9 @@ pub enum IpPrefixErrorKind {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use test_case::test_case;
   use IpPrefixErrorKind::*;
   use IpWithPrefixErrorKind::*;
+  use test_case::test_case;
 
   #[test_case("192.0.2.66/27")]
   #[test_case("2001:db8::dead:cafe/32")]

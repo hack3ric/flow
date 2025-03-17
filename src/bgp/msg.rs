@@ -1,9 +1,12 @@
 use super::nlri::{NextHop, Nlri, NlriContent, NlriKind};
 use super::route::{AsSegment, AsSegmentKind, Origin, RouteInfo};
-use super::{extend_with_u16_len, Result};
+use super::{Result, extend_with_u16_len};
 use crate::bgp::extend_with_u8_len;
 use crate::bgp::route::{Community, ExtCommunity, Ipv6ExtCommunity, LargeCommunity};
 use crate::net::{Afi, IpPrefix, IpPrefixError};
+use HeaderError::*;
+use OpenError::*;
+use UpdateError::*;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -14,9 +17,6 @@ use std::io;
 use strum::{Display, EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Take};
-use HeaderError::*;
-use OpenError::*;
-use UpdateError::*;
 
 pub const AS_TRANS: u16 = 23456;
 
