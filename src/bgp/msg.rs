@@ -45,6 +45,7 @@ pub trait MessageSend {
 
 #[derive(Debug, Clone, EnumDiscriminants)]
 #[strum_discriminants(name(MessageKind), derive(FromRepr))]
+#[allow(clippy::large_enum_variant)]
 #[repr(u8)]
 pub enum Message<'a> {
   Open(OpenMessage<'a>) = 1,

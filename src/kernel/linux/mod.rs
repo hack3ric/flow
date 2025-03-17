@@ -59,7 +59,7 @@ impl Kernel for Linux {
       .collect::<Result<Vec<_>, _>>()?;
     let rules = (0..total).map(move |i| {
       (base.iter())
-        .flat_map(|(x, v)| x[(x.len() == 1).then_some(0).unwrap_or_else(|| i / v % x.len())].iter())
+        .flat_map(|(x, v)| x[if x.len() == 1 { 0 } else { i / v % x.len() }].iter())
         .cloned()
         .collect::<Vec<_>>()
     });

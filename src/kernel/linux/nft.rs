@@ -229,9 +229,11 @@ impl Component {
         )]]
       }
       PacketLen(ops) => {
-        let ops = (afi == Afi::Ipv4)
-          .then(|| Cow::Borrowed(ops))
-          .unwrap_or_else(|| Cow::Owned(ops.with_offset(-40)));
+        let ops = if afi == Afi::Ipv4 {
+          Cow::Borrowed(ops)
+        } else {
+          Cow::Owned(ops.with_offset(-40))
+        };
         range_stmt_branch(make_payload_field(ip_ver, "length"), &ops, 0xffff)?
       }
       Dscp(ops) => range_stmt_branch(make_payload_field(ip_ver, "dscp"), ops, 0x3f)?,
@@ -248,12 +250,16 @@ impl Component {
         let mut iter = new_set.into_iter().peekable();
         let mut branch = StatementBranch::new();
 
-        let frag_off = (afi == Afi::Ipv4)
-          .then(|| make_payload_field("ip", "frag-off"))
-          .unwrap_or_else(|| make_exthdr("frag", "frag-off", 0));
-        let mf = (afi == Afi::Ipv4)
-          .then(|| make_payload_raw(expr::PayloadBase::NH, 18, 1))
-          .unwrap_or_else(|| make_exthdr("frag", "more-fragments", 0));
+        let frag_off = if afi == Afi::Ipv4 {
+          make_payload_field("ip", "frag-off")
+        } else {
+          make_exthdr("frag", "frag-off", 0)
+        };
+        let mf = if afi == Afi::Ipv4 {
+          make_payload_raw(expr::PayloadBase::NH, 18, 1)
+        } else {
+          make_exthdr("frag", "more-fragments", 0)
+        };
 
         // DF (IPv4)
         if let Some(0b0001) = iter.peek() {
@@ -541,11 +547,13 @@ pub(crate) fn range_stmt<'a>(
         let (start, end) = x.into_inner();
         // HACK: Does nftables itself support 64-bit integers? We shrink it for now.
         // But most of the matching expressions is smaller than 32 bits anyway.
-        let expr = (start == end).then_some(Number(start as u32)).unwrap_or_else(|| {
+        let expr = if start == end {
+          Number(start as u32)
+        } else {
           expr::Expression::Range(Box::new(expr::Range {
             range: [Number(start as u32), Number(end as u32)],
           }))
-        });
+        };
         expr::SetItem::Element(expr)
       })
       .collect();
