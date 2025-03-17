@@ -67,6 +67,7 @@ jobs:
           - armv7-unknown-linux-musleabihf
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: cargo-bins/cargo-binstall@main
       - name: Install cross-rs
         run: cargo binstall cross
