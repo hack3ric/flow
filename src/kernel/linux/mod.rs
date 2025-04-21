@@ -122,6 +122,7 @@ impl Kernel for Linux {
     if let Some(rtnl) = &mut self.rtnl {
       rtnl.process().await
     } else {
+      // TODO: should wait for self.rtnl to fill and exec rtnl.process()
       pending().await
     }
   }

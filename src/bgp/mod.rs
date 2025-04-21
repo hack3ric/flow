@@ -225,6 +225,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
           timers.as_mut().unwrap().process_tick(inst, stream).await?;
         }
+        result = self.routes.process() => result?,
       },
     }
     Ok(())

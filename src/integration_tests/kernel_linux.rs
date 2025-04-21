@@ -336,15 +336,15 @@ async fn test_unreachable_routes() -> anyhow::Result<()> {
   let ip_routes_exp = ["172.17.254.192/26", "192.0.2.0/27", "fc42::/32"];
   let mut ip_routes_exp: Vec<_> = ip_routes_exp
     .into_iter()
-    .map(|x| {
-      let x = x.parse::<IpPrefix>().unwrap();
+    .map(|prefix| {
+      let prefix = prefix.parse::<IpPrefix>().unwrap();
       let mut msg = RouteMessageBuilder::<IpAddr>::new()
-        .destination_prefix(x.prefix(), x.len())
-        .unwrap()
         .kind(RouteType::Unreachable)
         .table_id(table_id)
+        .destination_prefix(prefix.prefix(), prefix.len())
+        .unwrap()
         .build();
-      if x.is_ipv6() {
+      if prefix.is_ipv6() {
         msg.attributes.push(RouteAttribute::Oif(1));
       }
       msg
