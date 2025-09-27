@@ -1,5 +1,6 @@
 use crate::net::IpWithPrefix;
 use futures::TryStreamExt;
+use netlink_packet_core::{Emitable, Nla};
 use nix::net::if_::if_nametoindex;
 use rand::Rng;
 use rand::distr::Alphanumeric;
@@ -7,8 +8,6 @@ use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::packet_route::link::InfoKind;
 use rtnetlink::packet_route::route::{RouteAttribute, RouteMessage, RoutePreference, RouteProtocol};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleHeader, RuleMessage};
-use rtnetlink::packet_utils::Emitable;
-use rtnetlink::packet_utils::nla::Nla;
 use rtnetlink::{Handle, IpVersion, LinkMessageBuilder, LinkUnspec, RouteMessageBuilder};
 use std::cmp::Ordering;
 use std::net::IpAddr;
