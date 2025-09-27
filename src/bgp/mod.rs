@@ -260,7 +260,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> State<S> {
 }
 
 impl State<BufReader<TcpStream>> {
-  pub fn view(&self) -> StateView {
+  pub fn view(&self) -> StateView<'_> {
     match self {
       Idle => StateView::Idle,
       Connect => StateView::Connect,

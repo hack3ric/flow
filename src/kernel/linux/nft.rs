@@ -96,7 +96,7 @@ impl Nftables {
     Ok(apply_and_return_ruleset_async(n).await?)
   }
 
-  fn make_rule_handle(&self, handle: u32) -> schema::NfListObject {
+  fn make_rule_handle(&self, handle: u32) -> schema::NfListObject<'_> {
     schema::NfListObject::Rule(schema::Rule {
       family: types::NfFamily::INet,
       table: self.table.clone(),
@@ -598,11 +598,11 @@ impl Ops<Numeric> {
             }
             *x = y;
             return true;
-          } else if let Some(r2) = &r2 {
-            if let Some(y) = x.clone().intersect(r2.clone()) {
-              *x = y;
-              return true;
-            }
+          } else if let Some(r2) = &r2
+            && let Some(y) = x.clone().intersect(r2.clone())
+          {
+            *x = y;
+            return true;
           }
           false
         });

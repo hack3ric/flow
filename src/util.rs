@@ -155,7 +155,7 @@ impl TruthTable {
     self
   }
 
-  pub fn possible_values_masked(&self) -> Cow<BTreeSet<u64>> {
+  pub fn possible_values_masked(&self) -> Cow<'_, BTreeSet<u64>> {
     if self.inv {
       Cow::Owned(
         iter_masked(self.mask)
@@ -169,7 +169,7 @@ impl TruthTable {
     }
   }
 
-  pub fn shrink(&self, other_mask: u64) -> Cow<Self> {
+  pub fn shrink(&self, other_mask: u64) -> Cow<'_, Self> {
     let mask = self.mask & other_mask;
     if mask == self.mask {
       Cow::Borrowed(self)
@@ -178,7 +178,7 @@ impl TruthTable {
     }
   }
 
-  pub fn expand(&self, other_mask: u64) -> Cow<Self> {
+  pub fn expand(&self, other_mask: u64) -> Cow<'_, Self> {
     let mask = self.mask | other_mask;
     if mask == self.mask {
       Cow::Borrowed(self)
@@ -193,7 +193,7 @@ impl TruthTable {
     }
   }
 
-  fn expand_set(&self, other_mask: u64) -> Cow<BTreeSet<u64>> {
+  fn expand_set(&self, other_mask: u64) -> Cow<'_, BTreeSet<u64>> {
     match self.expand(other_mask) {
       Cow::Borrowed(x) => Cow::Borrowed(&x.truth),
       Cow::Owned(x) => Cow::Owned(x.truth),

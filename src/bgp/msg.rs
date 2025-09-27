@@ -547,7 +547,7 @@ impl UpdateMessage<'static> {
           }
 
           Some(PathAttr::Communities) => {
-            if len % 4 == 0 {
+            if len.is_multiple_of(4) {
               let mut opt_buf = vec![0; len.into()];
               pattrs_reader.read_exact(&mut opt_buf).await?;
               result.route_info.comm = opt_buf
@@ -561,7 +561,7 @@ impl UpdateMessage<'static> {
           }
 
           Some(PathAttr::ExtCommunities) => {
-            if len % 8 == 0 {
+            if len.is_multiple_of(8) {
               let mut opt_buf = vec![0; len.into()];
               pattrs_reader.read_exact(&mut opt_buf).await?;
               result.route_info.ext_comm = opt_buf
@@ -575,7 +575,7 @@ impl UpdateMessage<'static> {
           }
 
           Some(PathAttr::Ipv6ExtCommunities) => {
-            if len % 20 == 0 {
+            if len.is_multiple_of(20) {
               let mut opt_buf = vec![0; len.into()];
               pattrs_reader.read_exact(&mut opt_buf).await?;
               if let Some(comm) = opt_buf
@@ -595,7 +595,7 @@ impl UpdateMessage<'static> {
           }
 
           Some(PathAttr::LargeCommunities) => {
-            if len % 12 == 0 {
+            if len.is_multiple_of(12) {
               let mut opt_buf = vec![0; len.into()];
               pattrs_reader.read_exact(&mut opt_buf).await?;
               result.route_info.large_comm = opt_buf

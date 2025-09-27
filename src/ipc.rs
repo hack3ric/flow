@@ -38,7 +38,7 @@ impl Session<BufReader<TcpStream>> {
   }
 }
 
-pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Result<(RunArgs, StateView, Routes)> {
+pub async fn get_states(path: impl AsRef<Path>, buf: &mut Vec<u8>) -> anyhow::Result<(RunArgs, StateView<'_>, Routes)> {
   let mut stream = UnixStream::connect(path).await?;
   stream.read_to_end(buf).await?;
   let (config, buf) = postcard::take_from_bytes_cobs(buf)?;
