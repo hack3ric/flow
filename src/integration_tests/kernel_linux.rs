@@ -238,13 +238,13 @@ async fn test_ipv4_redirect_to_ipv6() -> anyhow::Result<()> {
       .table_id(table_id)
       .destination_prefix("172.17.254.192".parse()?, 26)
       .output_interface(dummy_id)
-      .gateway("fc65::ffff".parse()?)
+      .via("fc65::ffff".parse()?)
       .build(),
     RouteMessageBuilder::<Ipv4Addr>::new()
       .table_id(table_id)
       .destination_prefix("192.0.2.0".parse()?, 27)
       .output_interface(dummy_id)
-      .gateway("fc65::2333".parse()?)
+      .via("fc65::2333".parse()?)
       .build(),
   ];
   ip_routes_exp.iter_mut().for_each(route_msg_normalize);
