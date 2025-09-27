@@ -184,11 +184,12 @@ impl RouteInfo<'_> {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FromRepr, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, FromRepr, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Origin {
   Igp = 0,
   Egp = 1,
+  #[default]
   Incomplete = 2,
 }
 
@@ -199,12 +200,6 @@ impl Display for Origin {
       Self::Egp => f.write_str("EGP"),
       Self::Incomplete => f.write_str("incomplete"),
     }
-  }
-}
-
-impl Default for Origin {
-  fn default() -> Self {
-    Self::Incomplete
   }
 }
 
