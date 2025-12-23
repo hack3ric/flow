@@ -31,8 +31,6 @@ macro_rules! test_local {
   };
 }
 
-pub(crate) use test_local;
-
 // Test files
 mod flowspec;
 #[cfg(linux)]
