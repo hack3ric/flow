@@ -254,7 +254,7 @@ async fn test_ipv4_redirect_to_ipv6() -> anyhow::Result<()> {
 }
 
 #[apply(test_local!)]
-async fn test_unreachable_routes() -> anyhow::Result<()> {
+async fn test_ignored_routes() -> anyhow::Result<()> {
   let (conn, handle, _) = rtnetlink::new_connection()?;
   tokio::spawn(conn);
 
@@ -267,7 +267,7 @@ async fn test_unreachable_routes() -> anyhow::Result<()> {
       RouteMessageBuilder::<IpAddr>::new()
         .destination_prefix(p.prefix(), p.len())
         .unwrap()
-        .kind(RouteType::Unreachable)
+        .kind(RouteType::Throw)
         .build()
     })
     .collect();
@@ -339,7 +339,7 @@ async fn test_unreachable_routes() -> anyhow::Result<()> {
     .map(|prefix| {
       let prefix = prefix.parse::<IpPrefix>().unwrap();
       let mut msg = RouteMessageBuilder::<IpAddr>::new()
-        .kind(RouteType::Unreachable)
+        .kind(RouteType::Throw)
         .table_id(table_id)
         .destination_prefix(prefix.prefix(), prefix.len())
         .unwrap()

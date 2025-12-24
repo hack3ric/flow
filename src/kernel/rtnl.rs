@@ -6,13 +6,13 @@ use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{StreamExt, try_join};
 use libc::{EHOSTUNREACH, ENETUNREACH};
+use log::{debug, trace, warn};
 use rtnetlink::Error::NetlinkError;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
-use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType, RouteVia};
 use rtnetlink::packet_route::rule::{RuleAction, RuleAttribute, RuleMessage};
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
-use rtnetlink::{Handle, RouteMessageBuilder};
+use rtnetlink::{Handle, MulticastGroup, RouteMessageBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -21,9 +21,10 @@ use std::time::Duration;
 use tokio::select;
 use tokio::time::{Interval, interval};
 
-// TODO: maintain device info similar to BIRD's "device" protocol, and use it to
-// ensure only direct traffic to neighbours
-// For now, we allow any address by `ip route get`.
+// We allow redirecting to any address by resolving its next hop using `ip route
+// get`. This aligns with the RFC draft v4.
+//
+// Not handling with ECMP for now.
 
 #[derive(Debug)]
 pub struct RtNetlink<K: Kernel> {
@@ -37,9 +38,11 @@ pub struct RtNetlink<K: Kernel> {
 
 impl<K: Kernel> RtNetlink<K> {
   pub fn new(args: RtNetlinkArgs) -> io::Result<Self> {
-    let (conn, handle, msgs) = rtnetlink::new_connection()?;
+    use MulticastGroup::*;
+    let (conn, handle, msgs) = rtnetlink::new_multicast_connection(&[Ipv4Route, Ipv6Route, Ipv4Rule, Ipv6Rule])?;
     let scan_time = args.route_scan_time;
     tokio::spawn(conn);
+    warn!("rtnetlink spawned");
     Ok(Self {
       args,
       handle,
@@ -85,9 +88,9 @@ impl<K: Kernel> RtNetlink<K> {
     if let Some(attrs) = &attrs {
       msg.attributes.extend(attrs.iter().cloned());
     } else {
-      msg.header.kind = RouteType::Unreachable;
+      msg.header.kind = RouteType::Throw;
     };
-    if let Err(error) = self.handle.route().add(msg).execute().await {
+    if let Err(error) = self.handle.route().add(msg).replace().execute().await {
       if table_created {
         self.rules.remove(&table_id);
         self.del_rule(table_id).await;
@@ -137,7 +140,7 @@ impl<K: Kernel> RtNetlink<K> {
       .table_id(table_id)
       .build();
     if self.handle.route().del(msg.clone()).execute().await.is_err() {
-      msg.header.kind = RouteType::Unreachable;
+      msg.header.kind = RouteType::Throw;
       grace(self.handle.route().del(msg).execute().await, "failed to delete route");
     }
   }
@@ -203,32 +206,20 @@ impl<K: Kernel> RtNetlink<K> {
         .unwrap_or_else(|| af_to_wildcard(msg.header.address_family))
     }
 
-    fn addr_msg_dst_prefix(msg: AddressMessage) -> IpPrefix {
-      use AddressAttribute::Address;
-      let dst_len = msg.header.prefix_len;
-      (dst_len != 0)
-        .then(|| {
-          (msg.attributes.into_iter())
-            .filter_map(|x| if let Address(ip) = x { Some(ip) } else { None })
-            .map(|x| IpPrefix::new(x, dst_len))
-            .next()
-        })
-        .flatten()
-        .unwrap_or_else(|| af_to_wildcard(msg.header.family))
-    }
-
     select! {
-      _ = self.timer.tick() => self.process_all().await,
-      Some((msg, _)) = self.msgs.next() => match msg.payload {
-        InnerMessage(msg) => match msg {
-          NewRoute(msg) | DelRoute(msg) => self.process_prefix(route_msg_dst_prefix(msg)).await,
-          NewAddress(msg) | DelAddress(msg) => self.process_prefix(addr_msg_dst_prefix(msg)).await,
-          NewRule(msg) | DelRule(msg) => self.process_prefix(af_to_wildcard(msg.header.family)).await,
-          NewLink(_) | DelLink(_) => self.process_all().await,
+      _ = self.timer.tick() => { warn!("timer tick"); self.process_all().await }
+      Some((msg, _)) = self.msgs.next() => {
+        trace!("new rtnetlink msg: {msg:?}");
+        match msg.payload {
+          InnerMessage(msg) => match msg {
+            // TODO: filter out multicast routes
+            NewRoute(msg) | DelRoute(msg) => self.process_prefix(route_msg_dst_prefix(msg)).await,
+            NewRule(msg) | DelRule(msg) => self.process_prefix(af_to_wildcard(msg.header.family)).await,
+            _ => Ok(()),
+          },
           _ => Ok(()),
-        },
-        _ => Ok(()),
-      },
+        }
+      }
     }
   }
 
@@ -249,6 +240,7 @@ impl<K: Kernel> RtNetlink<K> {
     for RouteEntry { prefix, next_hop, table_id, attrs } in iter {
       let new_attrs = Self::get_route_from_handle(handle, prefix.afi(), *next_hop).await?;
       if *attrs != new_attrs {
+        debug!("route attrs: {attrs:?} -> {new_attrs:?}");
         *attrs = new_attrs.clone();
         let mut msg = RouteMessageBuilder::<IpAddr>::new()
           .destination_prefix(prefix.prefix(), prefix.len())
@@ -258,7 +250,7 @@ impl<K: Kernel> RtNetlink<K> {
         if let Some(attrs) = &attrs {
           msg.attributes.extend(attrs.iter().cloned());
         } else {
-          msg.header.kind = RouteType::Unreachable;
+          msg.header.kind = RouteType::Throw;
         };
         handle.route().add(msg).replace().execute().await?;
       }
