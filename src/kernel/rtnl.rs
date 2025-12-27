@@ -6,7 +6,7 @@ use clap::Args;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{StreamExt, try_join};
 use libc::{EHOSTUNREACH, ENETUNREACH};
-use log::{debug, trace, warn};
+use log::{debug, trace};
 use rtnetlink::Error::NetlinkError;
 use rtnetlink::packet_core::{NetlinkMessage, NetlinkPayload};
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteType, RouteVia};
@@ -24,7 +24,7 @@ use tokio::time::{Interval, interval};
 // We allow redirecting to any address by resolving its next hop using `ip route
 // get`. This aligns with the RFC draft v4.
 //
-// Not handling with ECMP for now.
+// Not handling ECMP for now.
 
 #[derive(Debug)]
 pub struct RtNetlink<K: Kernel> {
@@ -42,7 +42,7 @@ impl<K: Kernel> RtNetlink<K> {
     let (conn, handle, msgs) = rtnetlink::new_multicast_connection(&[Ipv4Route, Ipv6Route, Ipv4Rule, Ipv6Rule])?;
     let scan_time = args.route_scan_time;
     tokio::spawn(conn);
-    warn!("rtnetlink spawned");
+    trace!("rtnetlink: spawned");
     Ok(Self {
       args,
       handle,
@@ -179,6 +179,7 @@ impl<K: Kernel> RtNetlink<K> {
   pub async fn process(&mut self) -> Result<()> {
     use NetlinkPayload::*;
     use RouteNetlinkMessage::*;
+    use RouteType::*;
 
     fn af_to_wildcard(f: AddressFamily) -> IpPrefix {
       if f == AddressFamily::Inet {
@@ -207,16 +208,26 @@ impl<K: Kernel> RtNetlink<K> {
     }
 
     select! {
-      _ = self.timer.tick() => { warn!("timer tick"); self.process_all().await }
+      _ = self.timer.tick() => {
+        trace!("rtnetlink: timer tick");
+        self.process_all().await
+      }
       Some((msg, _)) = self.msgs.next() => {
-        trace!("new rtnetlink msg: {msg:?}");
         match msg.payload {
-          InnerMessage(msg) => match msg {
-            // TODO: filter out multicast routes
-            NewRoute(msg) | DelRoute(msg) => self.process_prefix(route_msg_dst_prefix(msg)).await,
-            NewRule(msg) | DelRule(msg) => self.process_prefix(af_to_wildcard(msg.header.family)).await,
-            _ => Ok(()),
-          },
+          InnerMessage(msg) => {
+            match msg {
+              NewRoute(msg) | DelRoute(msg) if !matches!(msg.header.kind, Local | Broadcast | Anycast | Multicast) => {
+                let prefix = route_msg_dst_prefix(msg);
+                trace!("rtnetlink: route to {prefix:?} changed");
+                self.process_prefix(prefix).await
+              }
+              NewRule(msg) | DelRule(msg) => {
+                trace!("rtnetlink: rule changed: {msg:?}");
+                self.process_prefix(af_to_wildcard(msg.header.family)).await
+              }
+              _ => Ok(()),
+            }
+          }
           _ => Ok(()),
         }
       }
