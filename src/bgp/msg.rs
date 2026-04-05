@@ -885,8 +885,11 @@ impl Notification<'_> {
 
 impl Notification<'static> {
   async fn read<R: AsyncRead + Unpin>(ptr: &mut R) -> Result<Self> {
+    use HeaderErrorKind as HEK;
     use Notification::*;
-    use {HeaderErrorKind as HEK, NotificationKind as NK, OpenErrorKind as OEK, UpdateErrorKind as UEK};
+    use NotificationKind as NK;
+    use OpenErrorKind as OEK;
+    use UpdateErrorKind as UEK;
 
     async fn to_vec<R: AsyncRead + Unpin>(ptr: &mut R) -> io::Result<Vec<u8>> {
       let mut buf = Vec::new();

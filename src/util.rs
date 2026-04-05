@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter, Write};
-use std::ops::{Add, Deref, RangeInclusive};
+use std::ops::{Deref, RangeInclusive};
 use std::rc::Rc;
 
 pub const FG_GREEN_BOLD: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green))).bold();
@@ -243,7 +243,7 @@ fn iter_masked(mask: u64) -> impl Iterator<Item = u64> + Clone + 'static {
   let pos = pos_of_set_bits(mask);
   let empty_zero = pos.is_empty().then_some(0);
   (0u64..1 << mask.count_ones())
-    .map(move |x| pos.iter().enumerate().map(|(i, p)| ((x >> i) & 1) << p).fold(0, Add::add))
+    .map(move |x| pos.iter().enumerate().map(|(i, p)| ((x >> i) & 1) << p).sum())
     .chain(empty_zero)
 }
 
