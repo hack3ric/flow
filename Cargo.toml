@@ -3,6 +3,33 @@ name = "flow"
 version = "0.2.0"
 edition = "2024"
 default-run = "flow"
+authors = ["Eric Long <i@hack3r.moe>"]
+description = "BGP Flowspec executor"
+license = "BSD-2-Clause"
+
+[package.metadata.deb]
+name = "flow"
+section = "net"
+priority = "optional"
+depends = "$auto"
+extended-description = """
+Flow enables BGP Flowspec on software routers and firewalls, acting
+as a sink that receives routes from another BGP speaker and transforms flowspecs
+into firewall rules and kernel routing tables.
+"""
+maintainer-scripts = "debian/"
+assets = [
+  [
+    "install/flow.service",
+    "usr/lib/systemd/system/",
+    "0644",
+  ],
+  [
+    "install/flow.sysusers",
+    "usr/lib/sysusers.d/flow.conf",
+    "0644",
+  ],
+]
 
 [workspace]
 members = [".", "xtask"]

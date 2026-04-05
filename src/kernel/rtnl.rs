@@ -213,6 +213,7 @@ impl<K: Kernel> RtNetlink<K> {
         self.process_all().await
       }
       Some((msg, _)) = self.msgs.next() => {
+        // TODO: aggregate multiple messages
         match msg.payload {
           InnerMessage(msg) => {
             match msg {

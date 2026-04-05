@@ -1,0 +1,19 @@
+[Unit]
+Description = BGP Flowspec executor
+After = network.target
+
+[Service]
+Type = simple
+ExecStart = /usr/bin/flow run --file /etc/flow.conf
+Restart = on-failure
+
+User = flow
+RuntimeDirectory = flow
+RuntimeDirectoryMode = 0755
+
+CapabilityBoundingSet = CAP_NET_ADMIN
+AmbientCapabilities = CAP_NET_ADMIN
+ProtectSystem = strict
+
+[Install]
+WantedBy = multi-user.target
