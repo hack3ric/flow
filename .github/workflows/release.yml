@@ -43,3 +43,20 @@ jobs:
           tar cJvf "$_archive.tar.xz" "$_archive"
           sha256sum "$_archive.tar.xz" > "$_archive.tar.xz.sha256"
           gh release upload "v$_version" "$_archive.tar.xz"{,.sha256}
+  deb:
+    name: Build and upload .deb package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install cargo-deb
+        run: cargo binstall cargo-deb
+      - name: Build .deb
+        run: cargo deb --verbose
+      - name: Upload .deb to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          _version="$(sed 's|refs/tags/v||' <(echo ${{ github.ref }}))"
+          gh release upload "v$_version" target/debian/flow_*.deb

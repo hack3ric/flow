@@ -88,3 +88,19 @@ jobs:
         with:
           name: flow-release-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/flow
+  deb:
+    name: Build .deb package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install cargo-deb
+        run: cargo binstall cargo-deb
+      - name: Build .deb
+        run: cargo deb --verbose
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: flow-deb
+          path: target/debian/flow_*.deb
