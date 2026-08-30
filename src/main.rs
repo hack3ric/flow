@@ -105,13 +105,13 @@ async fn run(
           addr.set_ip(addr.ip().to_canonical());
           bgp.accept(BufReader::new(stream), addr).await.context("failed to accept BGP connection")?;
         }
-        result = bgp.process() => match result {
+        event = bgp.next_event() => match bgp.handle_event(event).await {
           Ok(()) => {}
           #[cfg(not(test))]
           Err(bgp::Error::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => warn!("remote closed"),
           #[cfg(not(test))]
           Err(e @ (bgp::Error::Notification(_) | bgp::Error::Remote(_))) => error!("BGP error: {e}"),
-          Err(_) => result.context("failed to process BGP")?,
+          Err(error) => Err(error).context("failed to process BGP")?,
         },
         result = ipc.accept() => {
           let mut stream = result.context("failed to accept IPC connection")?;

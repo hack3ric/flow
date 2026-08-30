@@ -14,11 +14,51 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::io;
+use std::io::ErrorKind::UnexpectedEof;
 use strum::{Display, EnumDiscriminants, FromRepr};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Take};
 
 pub const AS_TRANS: u16 = 23456;
+const HEADER_LEN: usize = 19;
+
+/// Cancellation-safe BGP frame reader.
+///
+/// Bytes read from the socket stay in `buf` until a complete frame is
+/// available, so cancelling `read_frame` cannot discard a partial message.
+#[derive(Debug, Default)]
+pub(super) struct MessageReader {
+  buf: Vec<u8>,
+}
+
+impl MessageReader {
+  pub(super) async fn read_frame<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> io::Result<Vec<u8>> {
+    loop {
+      if self.buf.len() >= HEADER_LEN {
+        let valid_marker = self.buf[..16] == [u8::MAX; 16];
+        let declared_len = usize::from(u16::from_be_bytes(self.buf[16..18].try_into().unwrap()));
+        let valid_type = MessageKind::from_repr(self.buf[18]).is_some();
+        let valid_keepalive_len = self.buf[18] != MessageKind::Keepalive as u8 || declared_len == HEADER_LEN;
+        let frame_len = if valid_marker && declared_len >= HEADER_LEN && valid_type && valid_keepalive_len {
+          declared_len
+        } else {
+          HEADER_LEN
+        };
+        if self.buf.len() >= frame_len {
+          return Ok(self.buf.drain(..frame_len).collect());
+        }
+      }
+
+      if reader.read_buf(&mut self.buf).await? == 0 {
+        return Err(UnexpectedEof.into());
+      }
+    }
+  }
+
+  pub(super) fn clear(&mut self) {
+    self.buf.clear();
+  }
+}
 
 pub trait MessageSend {
   fn write_data(&self, buf: &mut Vec<u8>);
@@ -91,8 +131,8 @@ impl Message<'static> {
     }
   }
 
-  pub async fn read<S: AsyncWrite + AsyncRead + Unpin>(socket: &mut S) -> Result<Self> {
-    match Message::read_raw(socket).await {
+  pub(super) async fn parse<S: AsyncWrite + Unpin>(frame: &[u8], socket: &mut S) -> Result<Self> {
+    match Message::read_raw(&mut &frame[..]).await {
       Ok(Message::Notification(n)) => Err(super::Error::Remote(n)),
       Err(super::Error::Notification(n)) => n.send_and_return(socket).await.map(|_| unreachable!()),
       other => other,
@@ -1044,4 +1084,32 @@ pub enum UpdateError<'a> {
 
   #[error("malformed AS_PATH")]
   MalformedAsPath = 11,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::task::Poll;
+  use tokio::io::{AsyncWriteExt, duplex};
+
+  #[tokio::test]
+  async fn message_reader_keeps_partial_frame_when_cancelled() -> anyhow::Result<()> {
+    let mut frame = Vec::new();
+    Message::Keepalive.write_msg(&mut frame);
+    assert_eq!(frame.len(), HEADER_LEN);
+
+    let (mut writer, mut stream) = duplex(64);
+    let mut reader = MessageReader::default();
+    writer.write_all(&frame[..10]).await?;
+
+    let mut read = Box::pin(reader.read_frame(&mut stream));
+    assert!(matches!(futures::poll!(read.as_mut()), Poll::Pending));
+    drop(read);
+
+    writer.write_all(&frame[10..]).await?;
+    writer.write_all(&frame).await?;
+    assert_eq!(reader.read_frame(&mut stream).await?, frame);
+    assert_eq!(reader.read_frame(&mut stream).await?, frame);
+    Ok(())
+  }
 }

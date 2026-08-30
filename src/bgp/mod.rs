@@ -13,7 +13,7 @@ use itertools::Itertools;
 use log::{debug, error, info, warn};
 use msg::HeaderError::*;
 use msg::OpenError::*;
-use msg::{Message, MessageSend, Notification, OpenMessage, SendAndReturn, UpdateError};
+use msg::{Message, MessageReader, MessageSend, Notification, OpenMessage, SendAndReturn, UpdateError};
 use nlri::{Nlri, NlriContent, NlriError, NlriKind};
 use num_integer::gcd;
 use replace_with::replace_with_or_abort;
@@ -59,6 +59,7 @@ pub struct Session<S: AsyncRead + AsyncWrite + Unpin> {
   config: RunArgs,
   state: State<S>,
   routes: Routes,
+  reader: MessageReader,
   #[cfg(test)]
   event_tx: mpsc::Sender<TestEvent>,
 }
@@ -78,6 +79,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
       config,
       state: Active,
       routes: Routes::new(kernel),
+      reader: MessageReader::default(),
       #[cfg(test)]
       event_tx,
     })
@@ -121,55 +123,75 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
       self.config.router_id.to_bits(),
     );
     open.send(&mut stream).await?;
+    self.reader.clear();
     replace_with_or_abort(&mut self.state, |_| OpenSent { stream });
     info!("accepting BGP connection from {addr}");
     Ok(())
   }
 
-  pub async fn process(&mut self) -> Result<()> {
-    let result = self.process_inner().await;
+  pub async fn next_event(&mut self) -> Result<SessionEvent> {
+    match &mut self.state {
+      Idle | Connect | Active => pending().await,
+      OpenSent { stream } => Ok(SessionEvent::Message(self.reader.read_frame(stream).await?)),
+      OpenConfirm { stream, timers, .. } => select! {
+        frame = self.reader.read_frame(stream) => Ok(SessionEvent::Message(frame?)),
+        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => Ok(SessionEvent::Tick(inst)),
+      },
+      Established { stream, timers, .. } => select! {
+        frame = self.reader.read_frame(stream) => Ok(SessionEvent::Message(frame?)),
+        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => Ok(SessionEvent::Tick(inst)),
+        result = self.routes.process() => Ok(SessionEvent::Kernel(result)),
+      },
+    }
+  }
+
+  pub async fn handle_event(&mut self, event: Result<SessionEvent>) -> Result<()> {
+    let result = match event {
+      Ok(event) => self.handle_event_inner(event).await,
+      Err(error) => Err(error),
+    };
     if result.is_err() {
       self.state = Active;
+      self.reader.clear();
       self.routes.withdraw_all().await;
     }
     result
   }
 
-  async fn process_inner(&mut self) -> Result<()> {
+  async fn handle_event_inner(&mut self, event: SessionEvent) -> Result<()> {
     fn bad_type<'a>(msg: Message, stream: &'a mut (impl AsyncWrite + Unpin)) -> impl Future<Output = Result<()>> + 'a {
       BadType(msg.kind() as u8).send_and_return(stream)
     }
 
-    match &mut self.state {
-      Idle | Connect | Active => pending().await,
-      OpenSent { stream } => match Message::read(stream).await? {
-        Message::Open(remote_open) => {
-          if !remote_open.bgp_mp.contains(&(Afi::Ipv4 as _, NlriKind::Flow as _))
-            && !remote_open.bgp_mp.contains(&(Afi::Ipv6 as _, NlriKind::Flow as _))
-          {
-            warn!("remote does not seem to support flowspec, is it enabled?");
+    match event {
+      SessionEvent::Message(frame) => match &mut self.state {
+        OpenSent { stream } => match Message::parse(&frame, stream).await? {
+          Message::Open(remote_open) => {
+            if !remote_open.bgp_mp.contains(&(Afi::Ipv4 as _, NlriKind::Flow as _))
+              && !remote_open.bgp_mp.contains(&(Afi::Ipv6 as _, NlriKind::Flow as _))
+            {
+              warn!("remote does not seem to support flowspec, is it enabled?");
+            }
+            if !remote_open.supports_4b_asn {
+              error!("remote does not support 4-octet AS number");
+              Unspecific.send_and_return(stream).await?;
+            } else if self.config.remote_as.is_some_and(|x| remote_open.my_as != x) {
+              BadPeerAs.send_and_return(stream).await?;
+            } else if remote_open.hold_time == 1 || remote_open.hold_time == 2 {
+              UnacceptableHoldTime.send_and_return(stream).await?;
+            } else {
+              Message::Keepalive.send(stream).await?;
+              replace_with_or_abort(&mut self.state, |this| {
+                let OpenSent { stream } = this else { unreachable!() };
+                let hold_time = min(self.config.hold_time, remote_open.hold_time);
+                let timers = Timers::new(hold_time);
+                OpenConfirm { stream, remote_open, timers }
+              });
+            }
           }
-          if !remote_open.supports_4b_asn {
-            error!("remote does not support 4-octet AS number");
-            Unspecific.send_and_return(stream).await?;
-          } else if self.config.remote_as.is_some_and(|x| remote_open.my_as != x) {
-            BadPeerAs.send_and_return(stream).await?;
-          } else if remote_open.hold_time == 1 || remote_open.hold_time == 2 {
-            UnacceptableHoldTime.send_and_return(stream).await?;
-          } else {
-            Message::Keepalive.send(stream).await?;
-            replace_with_or_abort(&mut self.state, |this| {
-              let OpenSent { stream } = this else { unreachable!() };
-              let hold_time = min(self.config.hold_time, remote_open.hold_time);
-              let timers = Timers::new(hold_time);
-              OpenConfirm { stream, remote_open, timers }
-            });
-          }
-        }
-        other => bad_type(other, stream).await?,
-      },
-      OpenConfirm { stream, timers, .. } => select! {
-        msg = Message::read(stream) => match msg? {
+          other => bad_type(other, stream).await?,
+        },
+        OpenConfirm { stream, .. } => match Message::parse(&frame, stream).await? {
           Message::Keepalive => {
             replace_with_or_abort(&mut self.state, |this| {
               let OpenConfirm { stream, remote_open, mut timers } = this else {
@@ -182,18 +204,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
           }
           other => bad_type(other, stream).await?,
         },
-        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
-          timers.as_mut().unwrap().process_tick(inst, stream).await?;
-        }
-      },
-      Established { stream, timers, .. } => select! {
-        msg = Message::read(stream) => {
-          match msg {
-            Ok(Message::Update(msg)) => if let Some((afi, safi)) = msg.is_end_of_rib() {
+        Established { stream, timers, .. } => match Message::parse(&frame, stream).await {
+          Ok(Message::Update(msg)) => {
+            if let Some((afi, safi)) = msg.is_end_of_rib() {
               debug!("received End-of-RIB of ({afi}, {safi:?})");
               #[cfg(test)]
               let _ = self.event_tx.send(TestEvent::EndOfRib(afi, safi)).await;
-
             } else {
               debug!("received update: {msg:?}");
               #[cfg(test)]
@@ -211,22 +227,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
                   self.routes.withdraw(n).await;
                 }
               }
-            },
-            Err(Error::Withdraw(error, nlris)) => {
-              error!("{error}");
-              for n in nlris {
-                self.routes.withdraw(n).await;
-              }
-            },
-            Ok(Message::Keepalive) => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
-            other => bad_type(other?, stream).await?,
-          };
-        }
-        inst = timers.as_mut().unwrap().tick(), if timers.is_some() => {
+            }
+          }
+          Err(Error::Withdraw(error, nlris)) => {
+            error!("{error}");
+            for n in nlris {
+              self.routes.withdraw(n).await;
+            }
+          }
+          Ok(Message::Keepalive) => timers.as_mut().map(Timers::update_hold).unwrap_or(()),
+          other => bad_type(other?, stream).await?,
+        },
+        Idle | Connect | Active => unreachable!("message received while session is inactive"),
+      },
+      SessionEvent::Tick(inst) => match &mut self.state {
+        OpenConfirm { stream, timers, .. } | Established { stream, timers, .. } => {
           timers.as_mut().unwrap().process_tick(inst, stream).await?;
         }
-        result = self.routes.process() => result?,
+        Idle | Connect | Active | OpenSent { .. } => unreachable!("timer event in state without timers"),
       },
+      SessionEvent::Kernel(result) => {
+        debug_assert!(matches!(self.state, Established { .. }));
+        result?;
+      }
     }
     Ok(())
   }
@@ -234,6 +257,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
   pub async fn terminate(&mut self) {
     self.routes.terminate().await;
   }
+}
+
+#[derive(Debug)]
+pub enum SessionEvent {
+  Message(Vec<u8>),
+  Tick(Instant),
+  Kernel(kernel::Result<()>),
 }
 
 #[derive(Debug)]

@@ -145,6 +145,11 @@ impl Routes {
     }
   }
 
+  #[cfg(test)]
+  pub fn flow_len(&self) -> usize {
+    self.flow.len()
+  }
+
   pub async fn terminate(&mut self) {
     let mut kernel = KernelAdapter::Noop;
     std::mem::swap(&mut kernel, &mut self.kernel);

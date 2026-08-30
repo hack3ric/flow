@@ -7,6 +7,7 @@ use crate::args::Cli;
 use crate::bgp::flow::Op;
 use crate::integration_tests::helpers::kernel::linux::{get_nft_stmts, print_ip_route, print_ip_rule, print_nft_chain};
 use crate::integration_tests::helpers::kernel::rtnl::make_ip_rule_mark;
+use crate::ipc::{get_sock_path, get_states};
 use crate::kernel::nft::{
   ACCEPT, DROP, make_limit, make_meta, make_payload_field, mangle_stmt, prefix_stmt, range_stmt,
 };
@@ -20,14 +21,16 @@ use rand::Rng;
 use rand::distr::Alphanumeric;
 use rtnetlink::packet_route::route::{RouteAttribute, RouteType};
 use rtnetlink::{IpVersion, RouteMessageBuilder};
+use std::cell::Cell;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::rc::Rc;
 use std::time::Duration;
 use tokio::select;
 use tokio::time::sleep;
 
 #[apply(test_local!)]
 async fn test_order() -> anyhow::Result<()> {
-  let (name, (_g1, _g2, chans, _g3)) = run_kernel_test_bird(0xffff0000, [
+  let (name, (_g1, _g2, chans, (_g3, sock_dir))) = run_kernel_test_bird_with_ipc_polling(0xffff0000, [
     "flow4 { dst 10.0.0.0/9; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0)); }",
     "flow4 { dst 10.0.0.0/10; length > 1024; } { bgp_ext_community.add((unknown 0x8006, 0, 0x4c97a25c)); }",
     "flow6 { src fdfd::/128; next header 17; } { bgp_ext_community.add((unknown 0x800c, 0, 0)); }",
@@ -38,8 +41,11 @@ async fn test_order() -> anyhow::Result<()> {
   print_nft_chain(&name, &name).await?;
 
   let result = get_nft_stmts(&name, &name).await?;
+  let mut state_buf = Vec::new();
+  let (_, _, routes) = get_states(get_sock_path(&sock_dir)?, &mut state_buf).await?;
   close_cli(chans).await;
 
+  assert_eq!(routes.flow_len(), 4);
   assert_eq!(result, [
     vec![
       prefix_stmt("daddr", "10.0.0.0/10".parse()?).unwrap(),
@@ -364,6 +370,21 @@ async fn run_kernel_test_bird(
   init_table_id: u32,
   flows: impl IntoIterator<Item = &str>,
 ) -> anyhow::Result<(String, CliGuard)> {
+  run_kernel_test_bird_inner(init_table_id, flows, false).await
+}
+
+async fn run_kernel_test_bird_with_ipc_polling(
+  init_table_id: u32,
+  flows: impl IntoIterator<Item = &str>,
+) -> anyhow::Result<(String, CliGuard)> {
+  run_kernel_test_bird_inner(init_table_id, flows, true).await
+}
+
+async fn run_kernel_test_bird_inner(
+  init_table_id: u32,
+  flows: impl IntoIterator<Item = &str>,
+  poll_ipc: bool,
+) -> anyhow::Result<(String, CliGuard)> {
   ensure_bird_2();
   ensure_root();
   ensure_loopback_up().await?;
@@ -383,7 +404,7 @@ async fn run_kernel_test_bird(
     .replace("@@FLOW4@@", &flow4)
     .replace("@@FLOW6@@", &flow6);
 
-  let guard = run_kernel_test_common(run_cli_with_bird(cli, &bird).await?).await?;
+  let guard = run_kernel_test_common(run_cli_with_bird(cli, &bird).await?, poll_ipc).await?;
   Ok((table_name, guard))
 }
 
@@ -400,7 +421,7 @@ async fn run_kernel_test_exabgp(
   let (table_name, port, cli) = prepare_kernel_test(init_table_id).await?;
   let daemon = EXABGP_CONFIG_1.replace("@@FLOWS@@", &flows);
 
-  let guard = run_kernel_test_common(run_cli_with_exabgp(cli, &daemon, port).await?).await?;
+  let guard = run_kernel_test_common(run_cli_with_exabgp(cli, &daemon, port).await?, false).await?;
   Ok((table_name, guard))
 }
 
@@ -427,8 +448,27 @@ async fn prepare_kernel_test(init_table_id: u32) -> anyhow::Result<(String, u16,
   Ok((table_name, port, cli))
 }
 
-async fn run_kernel_test_common(g: CliGuard) -> anyhow::Result<CliGuard> {
-  let (mut cli, mut daemon, (mut events, close), g) = g;
+async fn run_kernel_test_common(g: CliGuard, poll_ipc: bool) -> anyhow::Result<CliGuard> {
+  let (mut cli, mut daemon, (mut events, close), (g, sock_dir)) = g;
+
+  // Stress test event loop by requesting IPC
+  let polls = Rc::new(Cell::new(0usize));
+  let stop_polling = Rc::new(Cell::new(false));
+  let poll_task = poll_ipc.then(|| {
+    let socket = get_sock_path(&sock_dir).unwrap();
+    let polls = polls.clone();
+    let stop_polling = stop_polling.clone();
+    tokio::task::spawn_local(async move {
+      while !stop_polling.get() {
+        let mut buf = Vec::new();
+        if get_states(&socket, &mut buf).await.is_ok() {
+          polls.set(polls.get() + 1);
+        }
+        sleep(Duration::from_millis(1)).await;
+      }
+    })
+  });
+
   let mut end_of_rib_count = 0;
   loop {
     select! {
@@ -447,5 +487,10 @@ async fn run_kernel_test_common(g: CliGuard) -> anyhow::Result<CliGuard> {
       status = daemon.wait() => panic!("BIRD exited early with {}", status?),
     }
   }
-  Ok((cli, daemon, (events, close), g))
+  if let Some(task) = poll_task {
+    stop_polling.set(true);
+    task.await?;
+    assert!(polls.get() > 0, "IPC poller never received a Flow state");
+  }
+  Ok((cli, daemon, (events, close), (g, sock_dir)))
 }
